@@ -1,0 +1,27 @@
+# Binaries
+/bidouille
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Session history & local configs
+/config/sessions/
+/config/bidouille.db
+.env
+.env.*
+
+# IDEs & System files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+scratch
+dev.txt
