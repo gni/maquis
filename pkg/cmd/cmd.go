@@ -29,6 +29,8 @@ var (
 	maxStepsFlag        int
 	resumeSession       bool
 	reasoningEffortFlag string
+	contextLimitFlag    int
+	directCommandsFlag  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -70,24 +72,14 @@ var rootCmd = &cobra.Command{
 		if reasoningEffortFlag != "" {
 			cfg.ReasoningEffort = reasoningEffortFlag
 		}
-
-		// Load reference skills
-		agent.ActiveSkills, err = agent.LoadSkills(cfg.SkillsDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
+		if contextLimitFlag != 0 {
+			cfg.ContextWindowLimit = contextLimitFlag
+		}
+		if cmd.Flags().Changed("direct") {
+			cfg.DirectCommands = directCommandsFlag
 		}
 
 		theme := ui.GetTheme(cfg.Theme)
-
-		// Start MCP servers
-		if len(cfg.MCPServers) > 0 {
-			_ = agent.StartMCPServers(cfg.MCPServers)
-			defer agent.StopMCPServers()
-
-			if len(agent.McpStartErrors) > 0 {
-				ui.RenderMCPStartupErrors(os.Stderr, agent.McpStartErrors, theme)
-			}
-		}
 
 		var allowedTools []string
 		if allowedToolsStr != "" {
@@ -115,6 +107,25 @@ var rootCmd = &cobra.Command{
 
 		httpClient := &http.Client{
 			Transport: transport,
+		}
+
+		// Instantiate Agent context
+		a := agent.NewAgent(cfg, configPath, httpClient)
+
+		// Load reference skills
+		a.ActiveSkills, err = agent.LoadSkills(cfg.SkillsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
+		}
+
+		// Start MCP servers
+		if len(cfg.MCPServers) > 0 {
+			_ = a.StartMCPServers(cfg.MCPServers)
+			defer a.StopMCPServers()
+
+			if len(a.McpStartErrors) > 0 {
+				ui.RenderMCPStartupErrors(os.Stderr, a.McpStartErrors, theme)
+			}
 		}
 
 		pipedData := ""
@@ -158,16 +169,16 @@ var rootCmd = &cobra.Command{
 			}
 			if len(messages) == 0 {
 				messages = []db.Message{
-					{Role: "system", Content: agent.GetSystemPrompt(cfg)},
+					{Role: "system", Content: a.GetSystemPrompt()},
 				}
 			}
 
-			agent.RunAgentLoop(os.Stdout, cfg, configPath, httpClient, &messages, prompt, allowedTools, theme, true, sessionID)
+			a.RunAgentLoop(os.Stdout, &messages, prompt, allowedTools, theme, true, sessionID)
 			return
 		}
 
 		// Interactive REPL Mode
-		agent.RunREPL(cfg, configPath, httpClient, allowedTools, theme, sessionID)
+		a.RunREPL(allowedTools, theme, sessionID)
 	},
 }
 
@@ -255,7 +266,8 @@ var sessionNewCmd = &cobra.Command{
 
 		newID := db.NewUUID()
 		cfg, _ := config.LoadConfig(configPath)
-		sysMsg := db.Message{Role: "system", Content: agent.GetSystemPrompt(cfg)}
+		a := agent.NewAgent(cfg, configPath, nil)
+		sysMsg := db.Message{Role: "system", Content: a.GetSystemPrompt()}
 		_ = db.ClearSession(newID)
 		_ = db.SaveMessage(newID, sysMsg)
 
@@ -300,6 +312,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&resumeSession, "resume", "r", false, "Resume the latest conversation session instead of starting a new one")
 	rootCmd.PersistentFlags().StringVar(&reasoningEffortFlag, "reasoning", "", "Override LLM reasoning effort (e.g. low, medium, high)")
 	rootCmd.PersistentFlags().IntVar(&maxStepsFlag, "steps", 0, "Override maximum reasoning steps limit (e.g. 30)")
+	rootCmd.PersistentFlags().IntVar(&contextLimitFlag, "context-limit", 0, "Override context window limit (default: 128000)")
+	rootCmd.PersistentFlags().BoolVar(&directCommandsFlag, "direct", false, "Enable direct execution of local shell commands (default: true in config)")
 
 	configCmd.AddCommand(configShowCmd, configEditCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionNewCmd)

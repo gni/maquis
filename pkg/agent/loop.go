@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,7 +26,7 @@ import (
 )
 
 
-func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *http.Client, messages *[]db.Message, prompt string, allowlist []string, theme ui.UITheme, isNonInteractive bool, sessionID string) {
+func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme ui.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return
@@ -59,7 +58,7 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 		}
 	}()
 
-	maxSteps := cfg.MaxReasoningSteps
+	maxSteps := a.Config.MaxReasoningSteps
 	if maxSteps <= 0 {
 		maxSteps = 9999
 	}
@@ -68,12 +67,16 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 			return
 		}
 
+		if iter > 1 {
+			fmt.Fprintln(w)
+		}
+
 		chunkChan := make(chan StreamChunk, 200)
 		streamErrChan := make(chan error, 1)
 		var assistantMsg *db.Message
 
 		go func() {
-			msg, err := StreamChatCompletions(ctx, cfg, client, *messages, allowlist, chunkChan)
+			msg, err := a.StreamChatCompletions(ctx, *messages, allowlist, chunkChan)
 			streamErrChan <- err
 			if msg != nil {
 				assistantMsg = msg
@@ -81,7 +84,7 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 			close(chunkChan)
 		}()
 
-		sr := ui.NewStreamRenderer(w, theme, cfg.ShowThinking)
+		sr := ui.NewStreamRenderer(w, theme, a.Config.ShowThinking)
 
 		stopKeyListen := make(chan struct{})
 		keyListenDone := make(chan struct{})
@@ -121,8 +124,46 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 					n, err := os.Stdin.Read(buf)
 					if err == nil && n > 0 {
 						if buf[0] == 15 { // Ctrl+O
-							cfg.CollapseResults = !cfg.CollapseResults
-							_ = config.SaveConfig(configPath, cfg)
+							runningTaskId := a.GetLastRunningTaskId()
+							if runningTaskId != "" {
+								a.ToggleStreaming(runningTaskId, w)
+							} else {
+								a.Config.CollapseResults = !a.Config.CollapseResults
+								_ = config.SaveConfig(a.ConfigPath, a.Config)
+								status := "EXPANDED"
+								if a.Config.CollapseResults {
+									status = "COLLAPSED"
+								}
+								infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
+								fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+O: Tool results will be %s]", status)))
+							}
+						} else if buf[0] == 20 { // Ctrl+T
+							a.Config.ShowThinking = !a.Config.ShowThinking
+							_ = config.SaveConfig(a.ConfigPath, a.Config)
+							status := "ENABLED"
+							if !a.Config.ShowThinking {
+								status = "DISABLED"
+							}
+							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
+							fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+T: Thinking is now %s]", status)))
+						} else if buf[0] == 18 { // Ctrl+R
+							nextEffort := "low"
+							switch strings.ToLower(a.Config.ReasoningEffort) {
+							case "low":
+								nextEffort = "medium"
+							case "medium":
+								nextEffort = "high"
+							case "high":
+								nextEffort = "max"
+							case "max":
+								nextEffort = "low"
+							default:
+								nextEffort = "low"
+							}
+							a.Config.ReasoningEffort = nextEffort
+							_ = config.SaveConfig(a.ConfigPath, a.Config)
+							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
+							fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+R: Reasoning effort set to %s]", nextEffort)))
 						} else if buf[0] == 3 || buf[0] == 27 { // Ctrl+C or Escape
 							fmt.Fprintln(w, "\n\n[Operation Cancelled by User]")
 							cancel()
@@ -142,7 +183,12 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 			} else if chunk.Type == "text" {
 				sr.Write(chunk.Content)
 			} else if chunk.Type == "tool_name" {
+				sr.Flush()
+				parser.needsLeadingNewline = sr.HasOutput()
 				parser.activeToolName = chunk.Content
+				parser.titlePrinted = false
+				parser.path = ""
+				parser.pathPrinted = false
 			} else if chunk.Type == "tool_call" {
 				parser.feed(chunk.Content, w, theme)
 			}
@@ -157,18 +203,16 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 				parser.titlePrinted = true
 				titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 				if parser.path != "" {
-					fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s %s", parser.activeToolName, parser.path)))
+					parser.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", parser.activeToolName, parser.path)))
 				} else {
-					fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s", parser.activeToolName)))
+					parser.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s", parser.activeToolName)))
 				}
 			}
 			if parser.outputBuf.Len() > 0 {
 				fmt.Fprint(w, parser.outputBuf.String())
 				parser.outputBuf.Reset()
 			}
-			fmt.Fprintln(w)
 		}
-		fmt.Fprintln(w)
 
 		if err := <-streamErrChan; err != nil {
 			if ctx.Err() == nil {
@@ -188,7 +232,7 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 		}
 
 		totalTokens := assistantMsg.PromptTokens + assistantMsg.CompletionTokens
-		pct := (float64(totalTokens) / float64(cfg.ContextWindowLimit)) * 100.0
+		pct := (float64(totalTokens) / float64(a.Config.ContextWindowLimit)) * 100.0
 
 		pStr := fmt.Sprintf("%d in", assistantMsg.PromptTokens)
 		if assistantMsg.PromptTokens >= 1000 {
@@ -203,9 +247,9 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 		if totalTokens >= 1000 {
 			totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
 		}
-		limitStr := fmt.Sprintf("%d", cfg.ContextWindowLimit)
-		if cfg.ContextWindowLimit >= 1000 {
-			limitStr = fmt.Sprintf("%dk", cfg.ContextWindowLimit/1000)
+		limitStr := fmt.Sprintf("%d", a.Config.ContextWindowLimit)
+		if a.Config.ContextWindowLimit >= 1000 {
+			limitStr = fmt.Sprintf("%dk", a.Config.ContextWindowLimit/1000)
 		}
 
 		pStyled := style.NewStyle().Foreground(theme.Secondary).Render(pStr)
@@ -213,16 +257,16 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 		ctxStyled := style.NewStyle().Foreground(theme.Primary).Render(fmt.Sprintf("Context: %s/%s (%.1f%%)", totStr, limitStr, pct))
 		dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
 
-		if cfg.ShowTokens && (assistantMsg.PromptTokens > 0 || assistantMsg.CompletionTokens > 0) {
-			fmt.Fprintln(w)
+		if a.Config.ShowTokens && (assistantMsg.PromptTokens > 0 || assistantMsg.CompletionTokens > 0) {
 			fmt.Fprintf(w, "%s%s%s%s%s\n", pStyled, dotStyled, cStyled, dotStyled, ctxStyled)
 		}
 
-		if totalTokens >= int(cfg.CompressionThreshold * float64(cfg.ContextWindowLimit)) {
-			compressHistory(ctx, cfg, client, messages, sessionID, theme, w)
+		if totalTokens >= int(a.Config.CompressionThreshold * float64(a.Config.ContextWindowLimit)) {
+			a.compressHistory(ctx, messages, sessionID, theme, w)
 		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
+			fmt.Fprintln(w)
 			return
 		}
 
@@ -245,13 +289,13 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 				return
 			}
 
-			approved := cfg.IsAutoApprove()
+			approved := a.Config.IsAutoApprove()
 			if !approved {
 				var always bool
 				approved, always = ui.AskForApproval(w, theme)
 				if always {
-					cfg.AutoApprove = true
-					cfg.YoloMode = true
+					a.Config.AutoApprove = true
+					a.Config.YoloMode = true
 				}
 			}
 
@@ -267,7 +311,7 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 			for _, tc := range rejectedBatch {
 				toolOutput := "Tool execution rejected by user."
 				fmt.Fprintln(w, "Tool execution rejected.")
-				ui.RenderToolOutput(w, toolOutput, true, cfg.CollapseResults, theme)
+				ui.RenderToolOutput(w, toolOutput, true, a.Config.CollapseResults, theme)
 
 				*messages = append(*messages, db.Message{
 					Role:       "tool",
@@ -317,7 +361,7 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 				go func(i int, call db.ToolCall) {
 					defer wg.Done()
 
-					allowed, reason := runBeforeToolHook(cfg, call)
+					allowed, reason := a.runBeforeToolHook(call)
 					if !allowed {
 						resultsChan <- toolExecutionResult{
 							index:  i,
@@ -328,9 +372,9 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 						return
 					}
 
-					out, err := ExecuteTool(call.Function.Name, call.Function.Arguments)
+					out, err := a.Registry.Execute(a, call.Function.Name, call.Function.Arguments)
 
-					out, err = runAfterToolHook(cfg, call, out, err)
+					out, err = a.runAfterToolHook(call, out, err)
 
 					resultsChan <- toolExecutionResult{
 						index:  i,
@@ -364,11 +408,11 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 					toolOutput = "(no output)"
 				}
 
-				ui.RenderToolOutput(w, toolOutput, toolErr != nil, cfg.CollapseResults, theme)
+				ui.RenderToolOutput(w, toolOutput, toolErr != nil, a.Config.CollapseResults, theme)
 
-				lastToolOutput = toolOutput
-				lastToolIsError = toolErr != nil
-				lastToolTheme = theme
+				a.lastToolOutput = toolOutput
+				a.lastToolIsError = toolErr != nil
+				a.lastToolTheme = theme
 
 				*messages = append(*messages, db.Message{
 					Role:       "tool",
@@ -389,10 +433,8 @@ func RunAgentLoop(w io.Writer, cfg *config.Config, configPath string, client *ht
 	fmt.Fprintf(w, "\n%s Reached maximum reasoning steps limit (%d).\n", errStyle.Render("WARNING:"), maxSteps)
 }
 
-func compressHistory(
+func (a *Agent) compressHistory(
 	ctx context.Context,
-	cfg *config.Config,
-	client *http.Client,
 	messages *[]db.Message,
 	sessionID string,
 	theme ui.UITheme,
@@ -445,7 +487,8 @@ func compressHistory(
 	}
 
 	infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-	fmt.Fprintln(w, infoStyle.Render("\n[System: Context usage threshold reached. Compressing older conversation history...]"))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, infoStyle.Render("[System: Context usage threshold reached. Compressing older conversation history...]"))
 
 	dummyChan := make(chan StreamChunk, 100)
 	go func() {
@@ -454,7 +497,7 @@ func compressHistory(
 		}
 	}()
 
-	summaryAssistantMsg, err := StreamChatCompletions(ctx, cfg, client, summaryMsgs, []string{}, dummyChan)
+	summaryAssistantMsg, err := a.StreamChatCompletions(ctx, summaryMsgs, []string{}, dummyChan)
 	if err != nil {
 		warnStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
 		fmt.Fprintf(w, "%s Failed to compress conversation context: %v\n", warnStyle.Render("WARNING:"), err)
@@ -511,6 +554,8 @@ type jsonStreamParser struct {
 
 	// Output buffer for lazy rendering when path is not yet known
 	outputBuf strings.Builder
+
+	needsLeadingNewline bool
 }
 
 func (p *jsonStreamParser) needsPath() bool {
@@ -523,7 +568,7 @@ type parserWriter struct {
 }
 
 func (pw parserWriter) Write(data []byte) (int, error) {
-	if pw.p.needsPath() && pw.p.path == "" {
+	if pw.p.needsPath() && pw.p.path == "" && !pw.p.titlePrinted {
 		return pw.p.outputBuf.Write(data)
 	}
 	return pw.w.Write(data)
@@ -635,11 +680,15 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 							p.titlePrinted = true
 							p.pathPrinted = true
 							titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-							fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s %s", p.activeToolName, p.path)))
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
 							if p.outputBuf.Len() > 0 {
 								fmt.Fprint(w, p.outputBuf.String())
 								p.outputBuf.Reset()
 							}
+						} else if !p.pathPrinted {
+							p.pathPrinted = true
+							titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+							fmt.Fprintf(w, "%s\n", titleStyle.Render(fmt.Sprintf("  [Path Resolved: %s]", p.path)))
 						}
 					}
 					if p.isContent && p.lineBuffer.Len() > 0 {
@@ -742,27 +791,57 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 					p.isContent = true
 					p.guessedLang = ""
 					if !p.titlePrinted {
-						if p.needsPath() {
-							// Wait for path
+						p.titlePrinted = true
+						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+						if p.path != "" {
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
 						} else {
-							p.titlePrinted = true
-							titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-							fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s", p.activeToolName)))
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
+						}
+						if p.outputBuf.Len() > 0 {
+							fmt.Fprint(w, p.outputBuf.String())
+							p.outputBuf.Reset()
 						}
 					}
-					fmt.Fprintf(pw, "\n  %s:\n", keyStyle.Render(p.currentKey))
+					fmt.Fprintf(pw, "%s:\n", keyStyle.Render(p.currentKey))
 				} else if p.currentKey == "path" {
 					p.isPath = true
 					p.path = ""
 					if p.titlePrinted && !p.pathPrinted {
-						fmt.Fprintf(pw, "  %s: ", keyStyle.Render("path"))
+						fmt.Fprintf(pw, "%s: ", keyStyle.Render("path"))
 					}
 				} else if p.currentKey == "oldText" {
 					p.isOldText = true
-					fmt.Fprintf(pw, "\n    %s:\n      ", style.NewStyle().Foreground(theme.Error).Render("- [Old text]"))
+					if !p.titlePrinted {
+						p.titlePrinted = true
+						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+						if p.path != "" {
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
+						} else {
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
+						}
+						if p.outputBuf.Len() > 0 {
+							fmt.Fprint(w, p.outputBuf.String())
+							p.outputBuf.Reset()
+						}
+					}
+					fmt.Fprintf(pw, "%s:\n  ", style.NewStyle().Foreground(theme.Error).Render("- [old text]"))
 				} else if p.currentKey == "newText" {
 					p.isNewText = true
-					fmt.Fprintf(pw, "\n    %s:\n      ", style.NewStyle().Foreground(theme.Success).Render("+ [New text]"))
+					if !p.titlePrinted {
+						p.titlePrinted = true
+						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+						if p.path != "" {
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
+						} else {
+							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
+						}
+						if p.outputBuf.Len() > 0 {
+							fmt.Fprint(w, p.outputBuf.String())
+							p.outputBuf.Reset()
+						}
+					}
+					fmt.Fprintf(pw, "%s:\n  ", style.NewStyle().Foreground(theme.Success).Render("+ [new text]"))
 				}
 			} else if char == ',' {
 				p.inValue = false
@@ -825,12 +904,12 @@ func guessLanguage(line string) string {
 	return ""
 }
 
-func runBeforeToolHook(cfg *config.Config, tc db.ToolCall) (bool, string) {
-	if cfg.BeforeToolHook == "" {
+func (a *Agent) runBeforeToolHook(tc db.ToolCall) (bool, string) {
+	if a.Config.BeforeToolHook == "" {
 		return true, ""
 	}
 
-	cmd := exec.Command("bash", "-c", cfg.BeforeToolHook)
+	cmd := exec.Command("bash", "-c", a.Config.BeforeToolHook)
 	cmd.Env = os.Environ()
 
 	payload := map[string]string{
@@ -859,12 +938,12 @@ func runBeforeToolHook(cfg *config.Config, tc db.ToolCall) (bool, string) {
 	return true, ""
 }
 
-func runAfterToolHook(cfg *config.Config, tc db.ToolCall, output string, toolErr error) (string, error) {
-	if cfg.AfterToolHook == "" {
+func (a *Agent) runAfterToolHook(tc db.ToolCall, output string, toolErr error) (string, error) {
+	if a.Config.AfterToolHook == "" {
 		return output, toolErr
 	}
 
-	cmd := exec.Command("bash", "-c", cfg.AfterToolHook)
+	cmd := exec.Command("bash", "-c", a.Config.AfterToolHook)
 	cmd.Env = os.Environ()
 
 	errStr := ""
@@ -900,4 +979,12 @@ func runAfterToolHook(cfg *config.Config, tc db.ToolCall, output string, toolErr
 		return hookOutput, nil
 	}
 	return output, toolErr
+}
+
+func (p *jsonStreamParser) printTitle(w io.Writer, title string) {
+	if p.needsLeadingNewline {
+		fmt.Fprintln(w)
+		p.needsLeadingNewline = false
+	}
+	fmt.Fprint(w, title+"\n")
 }

@@ -30,15 +30,26 @@ type StreamRenderer struct {
 	lineIsHeader bool
 	inBold       bool
 	inInlineCode bool
+
+	lastEndedWithNewline bool
+	hasWrittenText       bool
+	hasWrittenThoughts   bool
 }
 
 func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool) *StreamRenderer {
 	return &StreamRenderer{
-		w:                w,
-		theme:            theme,
-		showThinking:     showThinking,
-		showFullThinking: true, // Thinking is always full/expanded
+		w:                    w,
+		theme:                theme,
+		showThinking:         showThinking,
+		showFullThinking:     true, // Thinking is always full/expanded
+		lastEndedWithNewline: true,
 	}
+}
+
+func (sr *StreamRenderer) HasOutput() bool {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.hasWrittenText || sr.hasWrittenThoughts
 }
 
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
@@ -52,7 +63,10 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 		sr.inThinking = true
 		sr.reasoningStart = time.Now()
 		sr.reasoningText.Reset()
-		fmt.Fprint(sr.w, "\n")
+	}
+
+	if len(chunk) > 0 {
+		sr.hasWrittenThoughts = true
 	}
 
 	sr.reasoningText.WriteString(chunk)
@@ -76,10 +90,11 @@ func (sr *StreamRenderer) endThinking() {
 		iconStyle := style.NewStyle().Foreground(sr.theme.Success)
 		labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 
-		fmt.Fprintf(sr.w, "%s %s\n\n", 
+		fmt.Fprintf(sr.w, "%s %s\n", 
 			iconStyle.Render("✔"),
 			labelStyle.Render(fmt.Sprintf("Thought (%.1fs)", elapsed)),
 		)
+		sr.lastEndedWithNewline = true
 	}
 }
 
@@ -87,6 +102,11 @@ func (sr *StreamRenderer) Write(chunk string) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.endThinking()
+
+	if len(chunk) > 0 {
+		sr.hasWrittenText = true
+		sr.lastEndedWithNewline = strings.HasSuffix(chunk, "\n")
+	}
 
 	for _, char := range chunk {
 		if sr.inCodeBlock {
@@ -107,10 +127,13 @@ func (sr *StreamRenderer) Write(chunk string) {
 				}
 			} else {
 				sr.lineBuffer.WriteRune(char)
-				fmt.Fprint(sr.w, "\r\x1b[K")
-				err := quick.Highlight(sr.w, sr.lineBuffer.String(), sr.codeLanguage, "terminal16", "friendly")
-				if err != nil {
-					fmt.Fprint(sr.w, sr.lineBuffer.String())
+				// Suppress real-time rendering if the line starts with a backtick (e.g. closing tag)
+				if !strings.HasPrefix(strings.TrimSpace(sr.lineBuffer.String()), "`") {
+					fmt.Fprint(sr.w, "\r\x1b[K")
+					err := quick.Highlight(sr.w, sr.lineBuffer.String(), sr.codeLanguage, "terminal16", "friendly")
+					if err != nil {
+						fmt.Fprint(sr.w, sr.lineBuffer.String())
+					}
 				}
 			}
 		} else {
@@ -196,6 +219,7 @@ func (sr *StreamRenderer) Flush() {
 			}
 		}
 		sr.inCodeBlock = false
+		sr.lastEndedWithNewline = true
 		return
 	}
 
@@ -205,6 +229,12 @@ func (sr *StreamRenderer) Flush() {
 			sr.printNormalLine(rem)
 		}
 		sr.lineBuffer.Reset()
+		sr.lastEndedWithNewline = strings.HasSuffix(rem, "\n")
+	}
+
+	if sr.hasWrittenText && !sr.lastEndedWithNewline {
+		fmt.Fprint(sr.w, "\n")
+		sr.lastEndedWithNewline = true
 	}
 }
 

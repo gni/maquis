@@ -88,6 +88,7 @@ The `theme` parameter accepts the following visual styles (all designed to minim
 | `--resume` | `-r` | Resumes the most recently modified session. |
 | `--reasoning`| | Selects reasoning effort level (`low`, `medium`, `high`). |
 | `--steps` | | Maximum number of tool execution steps allowed per query. |
+| `--context-limit`| | Overrides the context window limit in tokens (before auto-compression). |
 
 ---
 

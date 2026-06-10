@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,17 +35,23 @@ type MCPTool struct {
 	InputSchema map[string]interface{} `json:"inputSchema"`
 }
 
-var (
-	mcpClients     = make(map[string]*mcpClient)
-	mcpClientsMu   sync.Mutex
-	McpStartErrors = make(map[string]error)
-)
+type mcpToolExecutor struct {
+	client   *mcpClient
+	toolName string
+	def      Tool
+}
 
-func StartMCPServers(configs map[string]config.MCPServerConfig) error {
-	mcpClientsMu.Lock()
-	mcpClientsMu.Unlock() // avoid double lock in start
+func (m *mcpToolExecutor) Name() string { return m.def.Function.Name }
+func (m *mcpToolExecutor) Definition() Tool { return m.def }
+func (m *mcpToolExecutor) Execute(a *Agent, arguments string) (string, error) {
+	return m.client.callTool(m.toolName, arguments)
+}
 
-	McpStartErrors = make(map[string]error)
+func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error {
+	a.McpClientsMu.Lock()
+	a.McpStartErrors = make(map[string]error)
+	a.McpClients = make(map[string]*mcpClient)
+	a.McpClientsMu.Unlock()
 
 	for name, cfg := range configs {
 		client := &mcpClient{
@@ -56,36 +63,17 @@ func StartMCPServers(configs map[string]config.MCPServerConfig) error {
 
 		err := client.start()
 		if err != nil {
-			McpStartErrors[name] = err
+			a.McpClientsMu.Lock()
+			a.McpStartErrors[name] = err
+			a.McpClientsMu.Unlock()
 			continue
 		}
 
-		mcpClientsMu.Lock()
-		mcpClients[name] = client
-		mcpClientsMu.Unlock()
+		a.McpClientsMu.Lock()
+		a.McpClients[name] = client
+		a.McpClientsMu.Unlock()
 		fmt.Fprintf(os.Stderr, "Started MCP server '%s'\n", name)
-	}
 
-	return nil
-}
-
-func StopMCPServers() {
-	mcpClientsMu.Lock()
-	defer mcpClientsMu.Unlock()
-
-	for name, client := range mcpClients {
-		client.close()
-		fmt.Fprintf(os.Stderr, "Stopped MCP server '%s'\n", name)
-	}
-	mcpClients = make(map[string]*mcpClient)
-}
-
-func GetMCPTools() []Tool {
-	mcpClientsMu.Lock()
-	defer mcpClientsMu.Unlock()
-
-	var allTools []Tool
-	for name, client := range mcpClients {
 		tools, err := client.listTools()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to list tools for MCP server '%s': %v\n", name, err)
@@ -101,37 +89,49 @@ func GetMCPTools() []Tool {
 				_ = json.Unmarshal(schemaBytes, &jsonSchema)
 			}
 
-			allTools = append(allTools, Tool{
-				Type: "function",
-				Function: FunctionDefinition{
-					Name:        prefixedName,
-					Description: fmt.Sprintf("[%s] %s", name, mcpTool.Description),
-					Parameters:  jsonSchema,
+			a.Registry.Register(&mcpToolExecutor{
+				client:   client,
+				toolName: mcpTool.Name,
+				def: Tool{
+					Type: "function",
+					Function: FunctionDefinition{
+						Name:        prefixedName,
+						Description: fmt.Sprintf("[%s] %s", name, mcpTool.Description),
+						Parameters:  jsonSchema,
+					},
 				},
 			})
 		}
 	}
-	return allTools
+
+	return nil
 }
 
-func ExecuteMCPTool(prefixedName string, arguments string) (string, error) {
-	parts := strings.SplitN(prefixedName, "__", 3)
-	if len(parts) < 3 || parts[0] != "mcp" {
-		return "", fmt.Errorf("invalid MCP tool name: %s", prefixedName)
+func (a *Agent) StopMCPServers() {
+	a.McpClientsMu.Lock()
+	defer a.McpClientsMu.Unlock()
+
+	for name, client := range a.McpClients {
+		client.close()
+		fmt.Fprintf(os.Stderr, "Stopped MCP server '%s'\n", name)
+	}
+	a.McpClients = make(map[string]*mcpClient)
+	a.Registry.UnregisterPrefix("mcp__")
+}
+
+func (a *Agent) GetMCPTools() []Tool {
+	var allTools []Tool
+	for name, t := range a.Registry.tools {
+		if strings.HasPrefix(name, "mcp__") {
+			allTools = append(allTools, t.Definition())
+		}
 	}
 
-	serverName := parts[1]
-	toolName := parts[2]
+	sort.Slice(allTools, func(i, j int) bool {
+		return allTools[i].Function.Name < allTools[j].Function.Name
+	})
 
-	mcpClientsMu.Lock()
-	client, exists := mcpClients[serverName]
-	mcpClientsMu.Unlock()
-
-	if !exists {
-		return "", fmt.Errorf("MCP server '%s' is not running", serverName)
-	}
-
-	return client.callTool(toolName, arguments)
+	return allTools
 }
 
 func (c *mcpClient) start() error {
@@ -411,12 +411,12 @@ func (c *mcpClient) callTool(name string, arguments string) (string, error) {
 	return joined, nil
 }
 
-func GetMCPServersStatus() map[string]string {
-	mcpClientsMu.Lock()
-	defer mcpClientsMu.Unlock()
+func (a *Agent) GetMCPServersStatus() map[string]string {
+	a.McpClientsMu.Lock()
+	defer a.McpClientsMu.Unlock()
 
 	status := make(map[string]string)
-	for name, client := range mcpClients {
+	for name, client := range a.McpClients {
 		if client.initialized {
 			status[name] = fmt.Sprintf("Connected (URL: %s)", client.config.URL)
 		} else {

@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"bidouille/pkg/config"
 	"bidouille/pkg/db"
 )
 
@@ -103,14 +102,22 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+type ChatTemplateKwargs struct {
+	EnableThinking bool `json:"enable_thinking"`
+}
+
 type ChatCompletionRequest struct {
-	Model           string         `json:"model"`
-	Messages        []db.Message   `json:"messages"`
-	Tools           []Tool         `json:"tools,omitempty"`
-	Temperature     float64        `json:"temperature"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   *StreamOptions `json:"stream_options,omitempty"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Model                string              `json:"model"`
+	Messages             []db.Message        `json:"messages"`
+	Tools                []Tool              `json:"tools,omitempty"`
+	Temperature          float64             `json:"temperature"`
+	Stream               bool                `json:"stream"`
+	StreamOptions        *StreamOptions      `json:"stream_options,omitempty"`
+	ReasoningEffort      string              `json:"reasoning_effort,omitempty"`
+	ReasoningFormat      string              `json:"reasoning_format,omitempty"`
+	ThinkingBudgetTokens int                 `json:"thinking_budget_tokens,omitempty"`
+	ReasoningControl     bool                `json:"reasoning_control,omitempty"`
+	ChatTemplateKwargs   *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
 }
 
 type ChatCompletionResponseChunk struct {
@@ -136,26 +143,78 @@ type ChatCompletionResponseChunk struct {
 
 
 
-func StreamChatCompletions(
+func (a *Agent) CheckThinkingSupport() bool {
+	url := fmt.Sprintf("%s/props?model=%s", strings.TrimSuffix(a.Config.Endpoint, "/"), a.Config.Model)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := a.HttpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func (a *Agent) StreamChatCompletions(
 	ctx context.Context,
-	cfg *config.Config,
-	client *http.Client,
 	messages []db.Message,
 	allowlist []string,
 	chunkChan chan<- StreamChunk,
 ) (*db.Message, error) {
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(cfg.Endpoint, "/"))
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(a.Config.Endpoint, "/"))
+
+	if !a.ThinkingSupportChecked {
+		a.ThinkingSupported = a.CheckThinkingSupport()
+		a.ThinkingSupportChecked = true
+	}
+
+	enableThinking := a.Config.ShowThinking
+	budget := -1
+	if enableThinking {
+		switch strings.ToLower(a.Config.ReasoningEffort) {
+		case "low":
+			budget = 512
+		case "medium":
+			budget = 2048
+		case "high":
+			budget = 8192
+		case "max":
+			budget = -1
+		default:
+			budget = 512
+		}
+	}
 
 	reqBody := ChatCompletionRequest{
-		Model:       cfg.Model,
+		Model:       a.Config.Model,
 		Messages:    messages,
-		Tools:       GetAvailableTools(allowlist),
-		Temperature: cfg.Temperature,
+		Tools:       a.Registry.GetAvailableTools(allowlist),
+		Temperature: a.Config.Temperature,
 		Stream:      true,
 		StreamOptions: &StreamOptions{
 			IncludeUsage: true,
 		},
-		ReasoningEffort: cfg.ReasoningEffort,
+		ReasoningEffort: a.Config.ReasoningEffort,
+	}
+
+	if a.ThinkingSupported {
+		reqBody.ReasoningControl = true
+		if enableThinking {
+			reqBody.ReasoningFormat = "auto"
+			reqBody.ChatTemplateKwargs = &ChatTemplateKwargs{
+				EnableThinking: true,
+			}
+			if budget >= 0 {
+				reqBody.ThinkingBudgetTokens = budget
+			}
+		} else {
+			reqBody.ReasoningFormat = "none"
+			reqBody.ChatTemplateKwargs = &ChatTemplateKwargs{
+				EnableThinking: false,
+			}
+		}
 	}
 
 	if len(reqBody.Tools) == 0 {
@@ -174,13 +233,13 @@ func StreamChatCompletions(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	if cfg.ApiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", cfg.ApiKey))
+	if a.Config.ApiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
 	}
 
-	resp, err := client.Do(req)
+	resp, err := a.HttpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", err, cfg.Endpoint)
+		return nil, fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", err, a.Config.Endpoint)
 	}
 	defer resp.Body.Close()
 

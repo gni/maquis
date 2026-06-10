@@ -71,7 +71,7 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/skills load <name>", "Explicitly load a reference skill into the context"},
 		{"/mcp", "List all configured MCP servers and active tool schemas"},
 		{"/rewind", "Clear conversation history"},
-		{"/help, ?", "Display this help menu"},
+		{"/help, /commands, ?", "Display this help menu"},
 		{"/exit, /quit", "Exit the Bidouille CLI application"},
 	}
 
@@ -83,6 +83,13 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	fmt.Fprintln(w, headerStyle.Render("Keyboard Shortcuts:"))
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+O"), descStyle.Render("Toggle tool results collapsing (COLLAPSED vs. FULL)"))
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, headerStyle.Render("Local Command Execution:"))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("!<command>"), descStyle.Render("Execute any local shell command (e.g. !git diff)"))
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("<direct_command>"), descStyle.Render("Execute common utilities directly (if enabled)"))
+	fmt.Fprintln(w, "  Supported direct utilities: ls, pwd, git, cat, cd")
 	fmt.Fprintln(w)
 }
 
@@ -108,6 +115,11 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		approveVal = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("Enabled (Auto-Approve)")
 	}
 
+	directVal := "Disabled"
+	if cfg.DirectCommands {
+		directVal = style.NewStyle().Foreground(theme.Success).Bold(true).Render("Enabled")
+	}
+
 	configStr := fmt.Sprintf(
 		"%s\n\n"+
 			"  %-20s %s\n"+
@@ -117,6 +129,8 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %v\n"+
 			"  %-20s %v\n"+
 			"  %-20s %v\n"+
+			"  %-20s %d tokens\n"+
+			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %v\n\n"+
@@ -129,6 +143,8 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		keyStyle.Render("Show Thinking:"), cfg.ShowThinking,
 		keyStyle.Render("Collapse Results:"), cfg.CollapseResults,
 		keyStyle.Render("Show Tokens:"), cfg.ShowTokens,
+		keyStyle.Render("Context Limit:"), cfg.ContextWindowLimit,
+		keyStyle.Render("Direct Commands:"), directVal,
 		keyStyle.Render("Client Cert:"), valStyle.Render(cfg.CertFile),
 		keyStyle.Render("Client Key:"), valStyle.Render(cfg.KeyFile),
 		keyStyle.Render("Skip SSL Verify:"), valStyle.Render(fmt.Sprintf("%v", cfg.SkipVerify)),
@@ -140,7 +156,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 func formatToolArguments(toolName string, argsJSON string, theme UITheme) string {
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
-		return "  Arguments: " + argsJSON
+		return "arguments: " + argsJSON
 	}
 
 	keyStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
@@ -193,7 +209,7 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 
 			// Pretty format multi-line text
 			var blockSb strings.Builder
-			blockSb.WriteString(fmt.Sprintf("  %s:\n", keyStyle.Render(k)))
+			blockSb.WriteString(fmt.Sprintf("%s:\n", keyStyle.Render(k)))
 			lines := strings.Split(highlightedStr, "\n")
 			for i, line := range lines {
 				// Don't print empty trailing line if it's the last one
@@ -204,14 +220,14 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 			}
 			blockLines = append(blockLines, strings.TrimSuffix(blockSb.String(), "\n"))
 
-		case "edits":
-			// Parse edits list
+		case "edits", "updates":
+			// Parse edits/updates list
 			edits, ok := v.([]interface{})
 			if !ok {
 				continue
 			}
 			var blockSb strings.Builder
-			blockSb.WriteString(fmt.Sprintf("  %s:\n", keyStyle.Render("edits")))
+			blockSb.WriteString(fmt.Sprintf("%s:\n", keyStyle.Render(k)))
 			for i, eVal := range edits {
 				eMap, ok := eVal.(map[string]interface{})
 				if !ok {
@@ -220,17 +236,17 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 				oldText, _ := eMap["oldText"].(string)
 				newText, _ := eMap["newText"].(string)
 
-				blockSb.WriteString(fmt.Sprintf("    %s %d:\n", valStyle.Render("Edit Block"), i+1))
+				blockSb.WriteString(fmt.Sprintf("edit block %d:\n", i+1))
 				if oldText != "" {
-					blockSb.WriteString(style.NewStyle().Foreground(theme.Error).Render("    - [Old text]:\n"))
+					blockSb.WriteString(style.NewStyle().Foreground(theme.Error).Render("- [old text]:\n"))
 					for _, line := range strings.Split(oldText, "\n") {
-						blockSb.WriteString(fmt.Sprintf("      %s\n", style.NewStyle().Foreground(theme.Error).Render(line)))
+						blockSb.WriteString(fmt.Sprintf("%s\n", style.NewStyle().Foreground(theme.Error).Render(line)))
 					}
 				}
 				if newText != "" {
-					blockSb.WriteString(style.NewStyle().Foreground(theme.Success).Render("    + [New text]:\n"))
+					blockSb.WriteString(style.NewStyle().Foreground(theme.Success).Render("+ [new text]:\n"))
 					for _, line := range strings.Split(newText, "\n") {
-						blockSb.WriteString(fmt.Sprintf("      %s\n", style.NewStyle().Foreground(theme.Success).Render(line)))
+						blockSb.WriteString(fmt.Sprintf("%s\n", style.NewStyle().Foreground(theme.Success).Render(line)))
 					}
 				}
 			}
@@ -239,7 +255,7 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 		default:
 			// Normal inline key value
 			valStr := fmt.Sprintf("%v", v)
-			simpleLines = append(simpleLines, fmt.Sprintf("  %s: %s", keyStyle.Render(k), valStyle.Render(valStr)))
+			simpleLines = append(simpleLines, fmt.Sprintf("%s: %s", keyStyle.Render(k), valStyle.Render(valStr)))
 		}
 	}
 
@@ -263,17 +279,17 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 
 	formattedArgs := formatToolArguments(toolName, arguments, theme)
 
-	fmt.Fprintln(w, titleStyle.Render(fmt.Sprintf("Tool Call: %s", toolName)))
-	fmt.Fprintln(w, formattedArgs)
-	fmt.Fprintln(w)
+	fmt.Fprintln(w, titleStyle.Render(fmt.Sprintf("tool call: %s", toolName)))
+	fmt.Fprint(w, formattedArgs)
 }
 
 func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme) {
+	fmt.Fprintln(w) // Print a leading blank line to separate from the tool call or previous elements
 	borderColor := theme.Success
-	title := "Tool Output"
+	title := "tool output"
 	if isError {
 		borderColor = theme.Error
-		title = "Tool Error"
+		title = "tool error"
 	}
 
 	titleStyle := style.NewStyle().
@@ -284,32 +300,38 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		Foreground(theme.Text)
 
 	body := output
+	if strings.HasPrefix(output, "Successfully edited ") || strings.Contains(output, "● Edit") || strings.Contains(output, "edit:") {
+		collapse = false
+	}
 	if !isError && len(strings.Split(output, "\n")) > 4 {
 		if collapse {
-			linesCount := len(strings.Split(output, "\n"))
-			bytesCount := len(output)
-			body = fmt.Sprintf("Success (returned %d lines, %d bytes) (Ctrl+O to expand)", linesCount, bytesCount)
+			body = fmt.Sprintf("success (returned %d lines, %d bytes) [/toggle or Ctrl+O to expand]", len(strings.Split(output, "\n")), len(output))
 		} else {
-			body = output + "\n(Ctrl+O to collapse)"
+			body = output + "\n[/toggle or Ctrl+O to collapse]"
 		}
 	} else if collapse {
 		lines := strings.Split(output, "\n")
 		if len(lines) > 10 {
 			truncated := lines[:10]
-			body = strings.Join(truncated, "\n") + fmt.Sprintf("\n... (%d more lines) (Ctrl+O to expand)", len(lines)-10)
+			body = strings.Join(truncated, "\n") + fmt.Sprintf("\n... (%d more lines) [/toggle or Ctrl+O to expand]", len(lines)-10)
 		}
 	} else {
 		lines := strings.Split(output, "\n")
 		if len(lines) > 10 {
-			body = output + "\n(Ctrl+O to collapse)"
+			body = output + "\n[/toggle or Ctrl+O to collapse]"
 		}
 	}
 
 	fmt.Fprintln(w, titleStyle.Render(title+":"))
 	for _, line := range strings.Split(body, "\n") {
-		fmt.Fprintln(w, "  "+bodyStyle.Render(line))
+		var renderedLine string
+		if strings.Contains(line, "\x1b[") {
+			renderedLine = line
+		} else {
+			renderedLine = bodyStyle.Render(line)
+		}
+		fmt.Fprintln(w, renderedLine)
 	}
-	fmt.Fprintln(w)
 }
 
 func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UITheme) {

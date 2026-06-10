@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"bidouille/pkg/ui/style"
+
+	"golang.org/x/term"
 
 	"bidouille/pkg/config"
 	"bidouille/pkg/db"
@@ -18,16 +20,14 @@ import (
 
 // HandleSlashCommand processes slash commands from the REPL.
 // It returns (handled, quit).
-func HandleSlashCommand(
+func (a *Agent) HandleSlashCommand(
 	line string,
-	cfg *config.Config,
-	configPath string,
-	httpClient *http.Client,
 	messages *[]db.Message,
 	allowedTools []string,
 	theme *ui.UITheme,
 	w io.Writer,
 	currentSessionID *string,
+	rlHistory term.History,
 ) (bool, bool) {
 	if !strings.HasPrefix(line, "/") && line != "?" {
 		return false, false
@@ -39,13 +39,79 @@ func HandleSlashCommand(
 	switch cmdName {
 	case "/exit", "/quit":
 		return true, true
-	case "/help", "?":
+	case "/toggle", "/collapse", "/expand":
+		a.Config.CollapseResults = !a.Config.CollapseResults
+		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		status := "EXPANDED"
+		if a.Config.CollapseResults {
+			status = "COLLAPSED"
+		}
+		fmt.Fprintf(w, "Tool results collapsing set to: %s\n", status)
+		if a.lastToolOutput != "" {
+			fmt.Fprintln(w, "Re-rendering last tool output:")
+			ui.RenderToolOutput(w, a.lastToolOutput, a.lastToolIsError, a.Config.CollapseResults, a.lastToolTheme)
+		}
+		return true, false
+	case "/task":
+		if len(parts) < 2 {
+			fmt.Fprintln(w, "Usage: /task [list | view <id> | stream <id> | kill <id>]")
+			return true, false
+		}
+		sub := parts[1]
+		switch sub {
+		case "list":
+			tasks := a.ListTasks()
+			if len(tasks) == 0 {
+				fmt.Fprintln(w, "No background tasks registered.")
+				return true, false
+			}
+			fmt.Fprintln(w, "Background Tasks:")
+			for _, t := range tasks {
+				fmt.Fprintf(w, "  - %s: %s (Duration: %v, Output Size: %d bytes) - `%s`\n", 
+					t.ID, t.Status, t.Duration.Round(time.Millisecond), t.BytesOut, t.Command)
+			}
+		case "view":
+			if len(parts) < 3 {
+				fmt.Fprintln(w, "Usage: /task view <id>")
+				return true, false
+			}
+			id := parts[2]
+			status, output, err := a.GetTaskStatus(id)
+			if err != nil {
+				fmt.Fprintf(w, "Error: %v\n", err)
+				return true, false
+			}
+			fmt.Fprintf(w, "Task %s Status: %s\nOutput:\n%s\n", id, status, output)
+		case "stream":
+			if len(parts) < 3 {
+				fmt.Fprintln(w, "Usage: /task stream <id>")
+				return true, false
+			}
+			id := parts[2]
+			a.ToggleStreaming(id, w)
+		case "kill":
+			if len(parts) < 3 {
+				fmt.Fprintln(w, "Usage: /task kill <id>")
+				return true, false
+			}
+			id := parts[2]
+			err := a.KillTask(id)
+			if err != nil {
+				fmt.Fprintf(w, "Error: %v\n", err)
+			} else {
+				fmt.Fprintf(w, "Task %s successfully terminated.\n", id)
+			}
+		default:
+			fmt.Fprintln(w, "Unknown task subcommand. Usage: /task [list | view <id> | stream <id> | kill <id>]")
+		}
+		return true, false
+	case "/help", "/commands", "?":
 		ui.RenderHelp(w, *theme)
 		return true, false
 	case "/config":
 		if len(parts) > 1 {
 			if parts[1] == "show" {
-				ui.RenderConfig(w, cfg, *theme)
+				ui.RenderConfig(w, a.Config, *theme)
 				return true, false
 			}
 
@@ -68,49 +134,58 @@ func HandleSlashCommand(
 
 			switch key {
 			case "endpoint", "url":
-				cfg.Endpoint = val
+				a.Config.Endpoint = val
 			case "model":
-				cfg.Model = val
+				a.Config.Model = val
 			case "temperature", "temp":
 				t, err := strconv.ParseFloat(val, 64)
 				if err != nil {
 					fmt.Fprintf(w, "Invalid temperature value: %v\n", err)
 					return true, false
 				}
-				cfg.Temperature = t
+				a.Config.Temperature = t
 			case "auto_approve", "yes", "yolo":
-				cfg.AutoApprove = val == "true" || val == "yes" || val == "1"
-				cfg.YoloMode = cfg.AutoApprove
+				a.Config.AutoApprove = val == "true" || val == "yes" || val == "1"
+				a.Config.YoloMode = a.Config.AutoApprove
 			case "show_thinking", "thinking":
-				cfg.ShowThinking = val == "true" || val == "yes" || val == "1"
+				a.Config.ShowThinking = val == "true" || val == "yes" || val == "1"
 			case "reasoning_effort", "reasoning":
-				cfg.ReasoningEffort = val
+				a.Config.ReasoningEffort = val
 			case "before_tool_hook", "before_hook":
-				cfg.BeforeToolHook = val
+				a.Config.BeforeToolHook = val
 			case "after_tool_hook", "after_hook":
-				cfg.AfterToolHook = val
+				a.Config.AfterToolHook = val
 			case "collapse_results", "collapse":
-				cfg.CollapseResults = val == "true" || val == "yes" || val == "1"
+				a.Config.CollapseResults = val == "true" || val == "yes" || val == "1"
 			case "show_tokens", "tokens":
-				cfg.ShowTokens = val == "true" || val == "yes" || val == "1"
+				a.Config.ShowTokens = val == "true" || val == "yes" || val == "1"
 			case "theme":
-				cfg.Theme = val
+				a.Config.Theme = val
 				*theme = ui.GetTheme(val)
+			case "context_window_limit", "context_limit", "context":
+				l, err := strconv.Atoi(val)
+				if err != nil || l <= 0 {
+					fmt.Fprintf(w, "Invalid context window limit value: %v\n", err)
+					return true, false
+				}
+				a.Config.ContextWindowLimit = l
+			case "direct_commands", "direct":
+				a.Config.DirectCommands = val == "true" || val == "yes" || val == "1"
 			case "cert_file", "cert":
-				cfg.CertFile = val
+				a.Config.CertFile = val
 			case "key_file", "key":
-				cfg.KeyFile = val
+				a.Config.KeyFile = val
 			case "ca_file", "ca":
-				cfg.CAFile = val
+				a.Config.CAFile = val
 			case "skip_verify", "skip":
-				cfg.SkipVerify = val == "true" || val == "yes" || val == "1"
+				a.Config.SkipVerify = val == "true" || val == "yes" || val == "1"
 			default:
 				fmt.Fprintf(w, "Unknown config key: %s\n", key)
 				return true, false
 			}
 
-			_ = config.SaveConfig(configPath, cfg)
-			fmt.Fprintf(w, "Config updated. Saved to %s\n", configPath)
+			_ = config.SaveConfig(a.ConfigPath, a.Config)
+			fmt.Fprintf(w, "Config updated. Saved to %s\n", a.ConfigPath)
 		} else {
 			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 			var input io.Reader = os.Stdin
@@ -121,12 +196,12 @@ func HandleSlashCommand(
 				output = tty
 			}
 
-			newConfig, err := ui.RunInteractiveConfig(cfg, *theme, input, output)
+			newConfig, err := ui.RunInteractiveConfig(a.Config, *theme, input, output)
 			if err == nil && newConfig != nil {
-				cfg = newConfig
-				*theme = ui.GetTheme(cfg.Theme)
-				_ = config.SaveConfig(configPath, cfg)
-				fmt.Fprintf(w, "Configuration updated and saved to %s\n", configPath)
+				a.Config = newConfig
+				*theme = ui.GetTheme(a.Config.Theme)
+				_ = config.SaveConfig(a.ConfigPath, a.Config)
+				fmt.Fprintf(w, "Configuration updated and saved to %s\n", a.ConfigPath)
 			} else {
 				fmt.Fprintln(w, "Interactive config cancelled.")
 			}
@@ -140,7 +215,7 @@ func HandleSlashCommand(
 			}
 			name := parts[2]
 			found := false
-			for _, s := range ActiveSkills {
+			for _, s := range a.ActiveSkills {
 				if s.Name == name {
 					*messages = append(*messages, db.Message{
 						Role:    "system",
@@ -157,15 +232,20 @@ func HandleSlashCommand(
 				fmt.Fprintf(w, "Error: Skill '%s' not found.\n", name)
 			}
 		} else {
-			RenderSkills(w, ActiveSkills, *theme)
+			RenderSkills(w, a.ActiveSkills, *theme)
 		}
 		return true, false
 	case "/rewind":
 		*messages = []db.Message{
-			{Role: "system", Content: GetSystemPrompt(cfg)},
+			{Role: "system", Content: a.GetSystemPrompt()},
 		}
 		_ = db.ClearSession(*currentSessionID)
 		_ = db.SaveMessage(*currentSessionID, (*messages)[0])
+		if ch, ok := rlHistory.(*customHistory); ok {
+			ch.entries = nil
+		}
+		// Clear terminal screen and scrollback
+		fmt.Fprint(w, "\x1b[H\x1b[2J")
 		fmt.Fprintln(w, "Conversation history cleared.")
 		return true, false
 	case "/session":
@@ -193,7 +273,7 @@ func HandleSlashCommand(
 			case "new":
 				*currentSessionID = db.NewUUID()
 				*messages = []db.Message{
-					{Role: "system", Content: GetSystemPrompt(cfg)},
+					{Role: "system", Content: a.GetSystemPrompt()},
 				}
 				fmt.Fprintln(w, "Started a new conversation session.")
 			case "branch":
@@ -222,7 +302,7 @@ func HandleSlashCommand(
 						*currentSessionID = selected
 						*messages = dbHistory
 						fmt.Fprintf(w, "Loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
-						printSessionHistory(w, *messages, *theme, cfg)
+						printSessionHistory(w, *messages, *theme, a.Config)
 					} else {
 						fmt.Fprintf(w, "Error: Session '%s' not found or empty.\n", selected)
 					}
@@ -243,7 +323,7 @@ func HandleSlashCommand(
 					if startNew {
 						*currentSessionID = db.NewUUID()
 						*messages = []db.Message{
-							{Role: "system", Content: GetSystemPrompt(cfg)},
+							{Role: "system", Content: a.GetSystemPrompt()},
 						}
 						fmt.Fprintln(w, "Started a new conversation session.")
 					} else if selected != "" {
@@ -252,7 +332,7 @@ func HandleSlashCommand(
 							*currentSessionID = selected
 							*messages = dbHistory
 							fmt.Fprintf(w, "Loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
-							printSessionHistory(w, *messages, *theme, cfg)
+							printSessionHistory(w, *messages, *theme, a.Config)
 						}
 					}
 				} else {
@@ -277,7 +357,7 @@ func HandleSlashCommand(
 
 		multilinePrompt, err := ui.RunMultilineEditor(input, output)
 		if err == nil && strings.TrimSpace(multilinePrompt) != "" {
-			RunAgentLoop(w, cfg, configPath, httpClient, messages, multilinePrompt, allowedTools, *theme, false, *currentSessionID)
+			a.RunAgentLoop(w, messages, multilinePrompt, allowedTools, *theme, false, *currentSessionID)
 		} else {
 			fmt.Fprintln(w, "Multiline input cancelled.")
 		}
@@ -288,7 +368,7 @@ func HandleSlashCommand(
 			return true, false
 		}
 		task := strings.TrimPrefix(line, "/goal ")
-		RunAgentLoop(w, cfg, configPath, httpClient, messages, task, allowedTools, *theme, false, *currentSessionID)
+		a.RunAgentLoop(w, messages, task, allowedTools, *theme, false, *currentSessionID)
 		return true, false
 	case "/schedule":
 		if len(parts) < 3 {
@@ -314,17 +394,17 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/mcp":
-		mcpStatuses := GetMCPServersStatus()
-		if len(cfg.MCPServers) == 0 {
+		mcpStatuses := a.GetMCPServersStatus()
+		if len(a.Config.MCPServers) == 0 {
 			fmt.Fprintln(w, "No MCP servers configured.")
 			return true, false
 		}
 
 		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("MCP Server Connections:"))
-		for name, serverCfg := range cfg.MCPServers {
+		for name, serverCfg := range a.Config.MCPServers {
 			status, active := mcpStatuses[name]
 			if !active {
-				if err, failed := McpStartErrors[name]; failed {
+				if err, failed := a.McpStartErrors[name]; failed {
 					status = fmt.Sprintf("Failed to Start (%v)", err)
 				} else {
 					status = fmt.Sprintf("Not Connected (Configured URL: %s)", serverCfg.URL)
@@ -334,7 +414,7 @@ func HandleSlashCommand(
 		}
 		fmt.Fprintln(w)
 
-		mcpTools := GetMCPTools()
+		mcpTools := a.GetMCPTools()
 		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("Available MCP Tools:"))
 		if len(mcpTools) == 0 {
 			fmt.Fprintln(w, "  (No tools registered)")
@@ -395,9 +475,9 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 						}
 					}
 					if path != "" {
-						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s %s", tc.Function.Name, path)))
+						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("tool call: %s %s", tc.Function.Name, path)))
 					} else {
-						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("Tool Call: %s", tc.Function.Name)))
+						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("tool call: %s", tc.Function.Name)))
 					}
 				}
 			}

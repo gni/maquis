@@ -69,159 +69,404 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 }
 
 func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, rlOutput io.Writer) (*config.Config, error) {
-	reader := bufio.NewReader(rlInput)
+	var fd int
+	if f, ok := rlInput.(*os.File); ok {
+		fd = int(f.Fd())
+	} else {
+		fd = int(os.Stdin.Fd())
+	}
 
-	fmt.Fprintln(rlOutput, "\n=== Bidouille Settings Configuration ===")
-	fmt.Fprintln(rlOutput, "Press Enter to keep current default value in brackets [].")
+	if !term.IsTerminal(fd) {
+		return cfg, nil
+	}
 
-	// 1. Endpoint URL
-	fmt.Fprintf(rlOutput, "Endpoint URL [%s]: ", cfg.Endpoint)
-	val, err := reader.ReadString('\n')
+	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return nil, err
 	}
-	val = strings.TrimSpace(val)
-	if val != "" {
-		cfg.Endpoint = val
+	defer term.Restore(fd, oldState)
+
+	// Save screen state, switch to alternate screen, and hide cursor
+	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
+	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
+
+	formatBool := func(v bool) string {
+		if v {
+			return "on"
+		}
+		return "off"
 	}
 
-	// 2. Model Name
-	fmt.Fprintf(rlOutput, "Model Name [%s]: ", cfg.Model)
-	val, err = reader.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	val = strings.TrimSpace(val)
-	if val != "" {
-		cfg.Model = val
+	// Create a copy of the config to allow cancellation if desired
+	cloned := *cfg
+
+	type settingItem struct {
+		id          string
+		name        string
+		value       func() string
+		description string
+		options     []string
+		isBool      bool
+		onToggle    func()
+		onEdit      func(newVal string) error
 	}
 
-	// 3. Temperature
+	var items []*settingItem
+	items = []*settingItem{
+		{
+			id:          "endpoint",
+			name:        "Endpoint URL",
+			value:       func() string { return cloned.Endpoint },
+			description: "API endpoint URL for the LLM service",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				cloned.Endpoint = newVal
+				return nil
+			},
+		},
+		{
+			id:          "model",
+			name:        "Model Name",
+			value:       func() string { return cloned.Model },
+			description: "Name of the LLM model to use",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				cloned.Model = newVal
+				return nil
+			},
+		},
+		{
+			id:          "temperature",
+			name:        "Temperature",
+			value:       func() string { return fmt.Sprintf("%.2f", cloned.Temperature) },
+			description: "Sampling temperature for response generation (0.0 to 2.0)",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				t, err := strconv.ParseFloat(newVal, 64)
+				if err != nil || t < 0.0 || t > 2.0 {
+					return fmt.Errorf("must be a number between 0.0 and 2.0")
+				}
+				cloned.Temperature = t
+				return nil
+			},
+		},
+		{
+			id:          "theme",
+			name:        "Visual Theme",
+			value:       func() string { return cloned.Theme },
+			description: "Visual aesthetic style of the terminal theme",
+			options:     []string{"dark", "neon", "light", "gruvbox"},
+			onToggle: func() {
+				themes := []string{"dark", "neon", "light", "gruvbox"}
+				idx := -1
+				for i, t := range themes {
+					if strings.ToLower(cloned.Theme) == t {
+						idx = i
+						break
+					}
+				}
+				nextIdx := (idx + 1) % len(themes)
+				cloned.Theme = themes[nextIdx]
+				theme = GetTheme(cloned.Theme) // dynamically apply theme visually in real-time
+			},
+		},
+		{
+			id:          "auto_approve",
+			name:        "Auto-Approve",
+			value:       func() string { return formatBool(cloned.AutoApprove) },
+			description: "Automatically approve all tool execution prompts",
+			isBool:      true,
+			onToggle: func() {
+				cloned.AutoApprove = !cloned.AutoApprove
+				cloned.YoloMode = cloned.AutoApprove
+			},
+		},
+		{
+			id:          "show_thinking",
+			name:        "Show Thinking",
+			value:       func() string { return formatBool(cloned.ShowThinking) },
+			description: "Stream the LLM thinking/reasoning process",
+			isBool:      true,
+			onToggle: func() {
+				cloned.ShowThinking = !cloned.ShowThinking
+			},
+		},
+		{
+			id:          "collapse_results",
+			name:        "Collapse Results",
+			value:       func() string { return formatBool(cloned.CollapseResults) },
+			description: "Collapse tool results output to keep history clean",
+			isBool:      true,
+			onToggle: func() {
+				cloned.CollapseResults = !cloned.CollapseResults
+			},
+		},
+		{
+			id:          "show_tokens",
+			name:        "Show Tokens",
+			value:       func() string { return formatBool(cloned.ShowTokens) },
+			description: "Display token usage metrics under each response",
+			isBool:      true,
+			onToggle: func() {
+				cloned.ShowTokens = !cloned.ShowTokens
+			},
+		},
+		{
+			id:          "context_window_limit",
+			name:        "Context Limit",
+			value:       func() string { return fmt.Sprintf("%d", cloned.ContextWindowLimit) },
+			description: "Maximum token context window limit before compression",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				l, err := strconv.Atoi(newVal)
+				if err != nil || l <= 0 {
+					return fmt.Errorf("must be a positive integer")
+				}
+				cloned.ContextWindowLimit = l
+				return nil
+			},
+		},
+		{
+			id:          "direct_commands",
+			name:        "Direct Commands",
+			value:       func() string { return formatBool(cloned.DirectCommands) },
+			description: "Enable direct execution of local shell commands",
+			isBool:      true,
+			onToggle: func() {
+				cloned.DirectCommands = !cloned.DirectCommands
+			},
+		},
+		{
+			id:          "cert_file",
+			name:        "Client Cert",
+			value:       func() string { return cloned.CertFile },
+			description: "Path to the SSL client certificate file",
+			onEdit: func(newVal string) error {
+				cloned.CertFile = newVal
+				return nil
+			},
+		},
+		{
+			id:          "key_file",
+			name:        "Client Key",
+			value:       func() string { return cloned.KeyFile },
+			description: "Path to the SSL client private key file",
+			onEdit: func(newVal string) error {
+				cloned.KeyFile = newVal
+				return nil
+			},
+		},
+		{
+			id:          "skip_verify",
+			name:        "Skip SSL Verify",
+			value:       func() string { return formatBool(cloned.SkipVerify) },
+			description: "Skip SSL/TLS certificate verification",
+			isBool:      true,
+			onToggle: func() {
+				cloned.SkipVerify = !cloned.SkipVerify
+			},
+		},
+	}
+
+	searchQuery := ""
+	selectedIdx := 0
+
 	for {
-		fmt.Fprintf(rlOutput, "Temperature [%.2f]: ", cfg.Temperature)
-		val, err = reader.ReadString('\n')
+		// Filter items based on search query
+		var filtered []*settingItem
+		for _, item := range items {
+			valStr := item.value()
+			match := searchQuery == "" ||
+				strings.Contains(strings.ToLower(item.name), strings.ToLower(searchQuery)) ||
+				strings.Contains(strings.ToLower(valStr), strings.ToLower(searchQuery)) ||
+				strings.Contains(strings.ToLower(item.description), strings.ToLower(searchQuery))
+			if match {
+				filtered = append(filtered, item)
+			}
+		}
+
+		// Keep selection index in bounds
+		if selectedIdx >= len(filtered) {
+			selectedIdx = len(filtered) - 1
+		}
+		if selectedIdx < 0 {
+			selectedIdx = 0
+		}
+
+		// Build output buffer
+		var buf strings.Builder
+		buf.WriteString("\x1b[H") // move cursor to top-left
+
+		// Draw Screen Title
+		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		buf.WriteString(titleStyle.Render("Settings"))
+		buf.WriteString("\n\n")
+
+		// Draw Search Box
+		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
+		buf.WriteString(searchLabelStyle.Render("  Search:  "))
+		
+		searchValStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+		buf.WriteString(searchValStyle.Render(searchQuery))
+		buf.WriteString("\n")
+		
+		underlineStyle := style.NewStyle().Foreground(theme.Border)
+		buf.WriteString(underlineStyle.Render("          ────────────────────"))
+		buf.WriteString("\n\n")
+
+		// Draw Settings List
+		if len(filtered) == 0 {
+			dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+			buf.WriteString(dimStyle.Render("  (No matching settings found)"))
+			buf.WriteString("\n")
+		} else {
+			for idx, item := range filtered {
+				marker := " "
+				if idx == selectedIdx {
+					marker = ">"
+				}
+
+				nameStr := item.name
+				valStr := item.value()
+
+				if idx == selectedIdx {
+					markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+					nameStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+					valStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+					buf.WriteString(fmt.Sprintf("%s %-24s %s\n", markerStyle.Render(marker), nameStyle.Render(nameStr), valStyle.Render(valStr)))
+				} else {
+					nameStyle := style.NewStyle().Foreground(theme.Text)
+					valStyle := style.NewStyle().Foreground(theme.Secondary)
+					buf.WriteString(fmt.Sprintf("%s %-24s %s\n", marker, nameStyle.Render(nameStr), valStyle.Render(valStr)))
+				}
+			}
+		}
+
+		buf.WriteString("\n")
+
+		// Draw Description of selected setting
+		if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
+			descStyle := style.NewStyle().Foreground(theme.Success)
+			buf.WriteString(fmt.Sprintf("  %s\n", descStyle.Render(filtered[selectedIdx].description)))
+		} else {
+			buf.WriteString("\n")
+		}
+
+		buf.WriteString("\n")
+
+		// Draw Instructions
+		navStyle := style.NewStyle().Foreground(theme.Border)
+		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ Navigate · enter Edit · Esc Clear Search/Exit")))
+		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("esc to cancel")))
+
+		buf.WriteString("\x1b[J") // clear from here to end of screen
+
+		// Write buffer to output, converting \n to \x1b[K\r\n for raw mode
+		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
+		_, _ = rlOutput.Write([]byte(outputStr))
+
+		// Read key input
+		var readBuf [16]byte
+		n, err := rlInput.Read(readBuf[:])
 		if err != nil {
 			return nil, err
 		}
-		val = strings.TrimSpace(val)
-		if val == "" {
-			break
-		}
-		t, err := strconv.ParseFloat(val, 64)
-		if err != nil || t < 0.0 || t > 2.0 {
-			fmt.Fprintln(rlOutput, "Error: must be a number between 0.0 and 2.0")
-			continue
-		}
-		cfg.Temperature = t
-		break
-	}
 
-	// 4. Visual Theme
-	for {
-		fmt.Fprintf(rlOutput, "Visual Theme (dark, neon, light) [%s]: ", cfg.Theme)
-		val, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		val = strings.TrimSpace(strings.ToLower(val))
-		if val == "" {
-			break
-		}
-		if val != "dark" && val != "neon" && val != "light" {
-			fmt.Fprintln(rlOutput, "Error: must be 'dark', 'neon', or 'light'")
-			continue
-		}
-		cfg.Theme = val
-		break
-	}
+		if n == 1 {
+			char := readBuf[0]
 
-	// 5. Auto-Approve Tool Executions
-	for {
-		fmt.Fprintf(rlOutput, "Auto-Approve Tool Executions? (y/n) [%t]: ", cfg.AutoApprove)
-		val, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		val = strings.TrimSpace(strings.ToLower(val))
-		if val == "" {
-			break
-		}
-		if val == "y" || val == "yes" || val == "true" || val == "1" {
-			cfg.AutoApprove = true
-			cfg.YoloMode = true
-			break
-		} else if val == "n" || val == "no" || val == "false" || val == "0" {
-			cfg.AutoApprove = false
-			cfg.YoloMode = false
-			break
-		}
-		fmt.Fprintln(rlOutput, "Error: must be 'y' or 'n'")
-	}
+			// Ctrl+C (Interrupt/Cancel)
+			if char == 3 {
+				return nil, fmt.Errorf("cancelled")
+			}
 
-	// 6. Show Streaming Thinking Process
-	for {
-		fmt.Fprintf(rlOutput, "Show Streaming Thinking Process? (y/n) [%t]: ", cfg.ShowThinking)
-		val, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		val = strings.TrimSpace(strings.ToLower(val))
-		if val == "" {
-			break
-		}
-		if val == "y" || val == "yes" || val == "true" || val == "1" {
-			cfg.ShowThinking = true
-			break
-		} else if val == "n" || val == "no" || val == "false" || val == "0" {
-			cfg.ShowThinking = false
-			break
-		}
-		fmt.Fprintln(rlOutput, "Error: must be 'y' or 'n'")
-	}
+			// Enter Key (Edit / Toggle)
+			if char == 13 || char == 10 {
+				if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
+					item := filtered[selectedIdx]
+					if item.isBool || len(item.options) > 0 {
+						// instant action for boolean or option cycles
+						if item.onToggle != nil {
+							item.onToggle()
+						}
+					} else if item.onEdit != nil {
+						// prompt editing for text/numeric fields
+						term.Restore(fd, oldState)
+						fmt.Fprint(rlOutput, "\x1b[?25h") // Show cursor
 
-	// 7. Collapse Tool Outputs
-	for {
-		fmt.Fprintf(rlOutput, "Collapse Tool Outputs? (y/n) [%t]: ", cfg.CollapseResults)
-		val, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		val = strings.TrimSpace(strings.ToLower(val))
-		if val == "" {
-			break
-		}
-		if val == "y" || val == "yes" || val == "true" || val == "1" {
-			cfg.CollapseResults = true
-			break
-		} else if val == "n" || val == "no" || val == "false" || val == "0" {
-			cfg.CollapseResults = false
-			break
-		}
-		fmt.Fprintln(rlOutput, "Error: must be 'y' or 'n'")
-	}
+						fmt.Fprintf(rlOutput, "\r\n\r\n  Edit %s (current: %s):\r\n", item.name, item.value())
+						fmt.Fprint(rlOutput, "  Enter new value: ")
 
-	// 8. Show Token Usage Metrics
-	for {
-		fmt.Fprintf(rlOutput, "Show Token Usage Metrics? (y/n) [%t]: ", cfg.ShowTokens)
-		val, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		val = strings.TrimSpace(strings.ToLower(val))
-		if val == "" {
-			break
-		}
-		if val == "y" || val == "yes" || val == "true" || val == "1" {
-			cfg.ShowTokens = true
-			break
-		} else if val == "n" || val == "no" || val == "false" || val == "0" {
-			cfg.ShowTokens = false
-			break
-		}
-		fmt.Fprintln(rlOutput, "Error: must be 'y' or 'n'")
-	}
+						reader := bufio.NewReader(rlInput)
+						newVal, err := reader.ReadString('\n')
+						if err == nil {
+							newVal = strings.TrimSpace(newVal)
+							err = item.onEdit(newVal)
+							if err != nil {
+								fmt.Fprintf(rlOutput, "\r\n  Error: %v. Press Enter to continue...", err)
+								_, _ = reader.ReadString('\n')
+							}
+						}
 
-	return cfg, nil
+						// Restore raw mode and hide cursor
+						fmt.Fprint(rlOutput, "\x1b[?25l")
+						rawState, err := term.MakeRaw(fd)
+						if err == nil {
+							oldState = rawState
+						}
+					}
+				}
+				continue
+			}
+
+			// Escape Key (Clear Search / Exit)
+			if char == 27 {
+				if searchQuery != "" {
+					searchQuery = ""
+				} else {
+					// cancelled/exited, return the modified configuration clone
+					return &cloned, nil
+				}
+				continue
+			}
+
+			// Backspace Key
+			if char == 127 || char == 8 {
+				if len(searchQuery) > 0 {
+					searchQuery = searchQuery[:len(searchQuery)-1]
+				}
+				continue
+			}
+
+			// Standard printable characters
+			if char >= 32 && char <= 126 {
+				searchQuery += string(char)
+				continue
+			}
+		}
+
+		// Parse multi-byte key escape sequences (like arrows)
+		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
+			switch readBuf[2] {
+			case 'A': // Arrow Up
+				if len(filtered) > 0 {
+					selectedIdx = (selectedIdx - 1 + len(filtered)) % len(filtered)
+				}
+			case 'B': // Arrow Down
+				if len(filtered) > 0 {
+					selectedIdx = (selectedIdx + 1) % len(filtered)
+				}
+			}
+		}
+	}
 }
 
 func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rlOutput io.Writer) (string, error) {
