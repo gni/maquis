@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"bidouille/pkg/ui/style"
 	"golang.org/x/term"
@@ -38,9 +41,13 @@ type Agent struct {
 	ThinkingSupported      bool
 	ThinkingSupportChecked bool
 
-	lastToolOutput  string
-	lastToolIsError bool
-	lastToolTheme   ui.UITheme
+	PasteBuffer            string
+
+	lastToolOutput         string
+	lastToolIsError        bool
+	lastToolTheme          ui.UITheme
+	lastToolWasEdit        bool
+	lastGenerationDuration time.Duration
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -97,6 +104,15 @@ func (a *Agent) SafePath(inputPath string) (string, error) {
 
 	if cleanTarget == cleanRoot {
 		return cleanTarget, nil
+	}
+
+	// Surgical allowlist: allow writing to global memory files
+	home, err := os.UserHomeDir()
+	if err == nil {
+		globalBidouille := filepath.Clean(filepath.Join(home, ".bidouille", "BIDOUILLE.md"))
+		if cleanTarget == globalBidouille {
+			return cleanTarget, nil
+		}
 	}
 
 	prefix := cleanRoot
@@ -218,14 +234,25 @@ type customHistory struct {
 	entries []string
 }
 
+func Deduplicate(entries []string) []string {
+	seen := make(map[string]bool)
+	var unique []string
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if !seen[entry] {
+			seen[entry] = true
+			unique = append([]string{entry}, unique...)
+		}
+	}
+	return unique
+}
+
 func (h *customHistory) Add(entry string) {
 	if entry == "" {
 		return
 	}
-	if len(h.entries) > 0 && h.entries[len(h.entries)-1] == entry {
-		return
-	}
 	h.entries = append(h.entries, entry)
+	h.entries = Deduplicate(h.entries)
 }
 
 func (h *customHistory) Len() int {
@@ -236,7 +263,29 @@ func (h *customHistory) At(idx int) string {
 	if idx < 0 || idx >= len(h.entries) {
 		return ""
 	}
-	return h.entries[idx]
+	// Return from the end (newest first: idx 0 is the last entry in h.entries)
+	return h.entries[len(h.entries)-1-idx]
+}
+
+type crnlWriter struct {
+	w io.Writer
+}
+
+func (cw crnlWriter) Write(p []byte) (int, error) {
+	var buf []byte
+	for i := 0; i < len(p); i++ {
+		if p[i] == '\n' {
+			if i == 0 || p[i-1] != '\r' {
+				buf = append(buf, '\r')
+			}
+		}
+		buf = append(buf, p[i])
+	}
+	_, err := cw.w.Write(buf)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 type keyInterceptorReader struct {
@@ -259,6 +308,50 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	n, err := ki.r.Read(p)
 	if err != nil {
 		return n, err
+	}
+
+	// Detect multiline paste (multiple characters read at once containing newline)
+	hasNewlines := false
+	for i := 0; i < n; i++ {
+		if p[i] == '\n' || p[i] == '\r' {
+			hasNewlines = true
+			break
+		}
+	}
+	isMultilinePaste := (n > 1 && hasNewlines)
+
+	if isMultilinePaste {
+		var pasteBytes []byte
+		pasteBytes = append(pasteBytes, p[:n]...)
+
+		// Read all remaining buffered bytes from stdin non-blockingly
+		if f, ok := ki.r.(*os.File); ok {
+			fd := int(f.Fd())
+			_ = syscall.SetNonblock(fd, true)
+			defer syscall.SetNonblock(fd, false)
+
+			tempBuf := make([]byte, 4096)
+			for {
+				n2, err2 := ki.r.Read(tempBuf)
+				if err2 != nil || n2 == 0 {
+					break
+				}
+				pasteBytes = append(pasteBytes, tempBuf[:n2]...)
+			}
+		}
+
+		// Store complete paste
+		prefix := string(ki.lineBuffer)
+		ki.lineBuffer = nil
+		ki.agent.PasteBuffer = prefix + string(pasteBytes)
+
+		// Print paste remainder to terminal (using \r\n to format correctly in raw mode)
+		outputStr := strings.ReplaceAll(string(pasteBytes), "\r\n", "\r\n")
+		outputStr = strings.ReplaceAll(outputStr, "\n", "\r\n")
+		fmt.Fprint(ki.w, outputStr)
+
+		p[0] = '\n'
+		return 1, nil
 	}
 
 	writeIdx := 0
@@ -290,15 +383,15 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 				promptStyle := style.NewStyle().Foreground(ki.theme.Primary).Bold(true)
 				promptStr := promptStyle.Render("> ")
 				ki.rl.SetPrompt(promptStr)
-				fmt.Fprintf(ki.w, "\x1b[1A\r\x1b[K")
-				ki.agent.PrintPromptSeparator(ki.w, ki.theme)
-				fmt.Fprintf(ki.w, "\r\x1b[K%s", promptStr)
+
+				cw := crnlWriter{w: ki.w}
+				fmt.Fprintf(cw, "\x1b[1A\r\x1b[K")
+				ki.agent.PrintPromptSeparator(cw, ki.theme)
+				fmt.Fprintf(cw, "\r\x1b[K%s%s", promptStr, string(ki.lineBuffer))
 			}
 			// Skip returning this byte to term.Terminal
 		} else if b == 13 || b == 10 { // Enter
-			trimmed := strings.TrimSpace(string(ki.lineBuffer))
-			if len(trimmed) == 0 {
-				// User didn't write anything substantial (only whitespace or empty), ignore Enter!
+			if strings.TrimSpace(string(ki.lineBuffer)) == "" {
 				continue
 			}
 			ki.lineBuffer = nil
@@ -352,6 +445,14 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 	ui.PrintBanner(os.Stderr, a.Config)
 	a.PrintPromptSeparator(os.Stderr, theme)
 
+	// Initialize status bar with estimated session tokens
+	initialPromptTokens, initialCompletionTokens := a.GetGlobalTokens(messages, allowedTools)
+
+	ui.InitStatusBar(os.Stderr)
+	defer ui.ShutdownStatusBar(os.Stderr)
+	ui.UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0)
+	ui.DrawStatusBar(os.Stderr, theme)
+
 	fd := int(os.Stdin.Fd())
 
 	// Load command history
@@ -391,9 +492,16 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			break
 		}
 
+		if kiReader.agent.PasteBuffer != "" {
+			line = kiReader.agent.PasteBuffer
+			kiReader.agent.PasteBuffer = ""
+		}
+
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+
+		hist.Add(line)
 
 		fmt.Fprintln(os.Stderr, style.NewStyle().Foreground(theme.Border).Render("──────────────────────────────────────────────────────────"))
 
@@ -418,10 +526,14 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 				messages = append(messages, db.Message{Role: "user", Content: contextMsg})
 				_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
 				a.PrintPromptSeparator(os.Stderr, theme)
+				ui.DrawStatusBar(os.Stderr, theme)
 				continue
 			}
 
 			fmt.Fprintf(os.Stderr, "Executing: %s\n", cmdStr)
+
+			// Temporarily disable status bar during manual shell commands
+			ui.ShutdownStatusBar(os.Stderr)
 
 			cmd := exec.Command("bash", "-c", cmdStr)
 			cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C.UTF-8")
@@ -430,6 +542,10 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 			cmd.Stdin = os.Stdin
 			err := cmd.Run()
+
+			// Re-enable status bar after manual command execution
+			ui.InitStatusBar(os.Stderr)
+			ui.DrawStatusBar(os.Stderr, theme)
 
 			output := sanitizeUTF8(stdout.Bytes())
 			errOutput := sanitizeUTF8(stderr.Bytes())
@@ -460,6 +576,7 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, successStyle.Render("Command output appended to conversation context."))
 			a.PrintPromptSeparator(os.Stderr, theme)
+			ui.DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
@@ -468,11 +585,13 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 				break
 			}
 			a.PrintPromptSeparator(os.Stderr, theme)
+			ui.DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
 		a.RunAgentLoop(os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
 		a.PrintPromptSeparator(os.Stderr, theme)
+		ui.DrawStatusBar(os.Stderr, theme)
 	}
 
 	var finalStatus string
@@ -541,6 +660,78 @@ func (a *Agent) PrintPromptSeparator(w io.Writer, theme ui.UITheme) {
 	}
 	dashes := strings.Repeat("─", dashesCount)
 	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
+}
+
+func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (int, int) {
+	// Find the last assistant message
+	lastAssistantIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
+	globalPrompt := 0
+	globalCompletion := 0
+
+	// Sum all completion tokens
+	for _, m := range messages {
+		if m.Role == "assistant" {
+			if m.CompletionTokens > 0 {
+				globalCompletion += m.CompletionTokens
+			} else {
+				globalCompletion += (len(m.Content) + len(m.ReasoningContent)) / 4
+			}
+		}
+	}
+
+	tools := a.Registry.GetAvailableTools(allowedTools)
+	var toolsChars int
+	if len(tools) > 0 {
+		if toolsData, err := json.Marshal(tools); err == nil {
+			toolsChars = len(toolsData)
+		}
+	}
+	toolsEst := toolsChars / 4
+
+	if lastAssistantIdx != -1 {
+		// We have an assistant message.
+		// Start with the prompt tokens of that turn.
+		if messages[lastAssistantIdx].PromptTokens > 0 {
+			globalPrompt = messages[lastAssistantIdx].PromptTokens
+		} else {
+			// Fallback if not stored
+			for i := 0; i <= lastAssistantIdx; i++ {
+				m := messages[i]
+				if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+					globalPrompt += len(m.Content) / 4
+				}
+			}
+			globalPrompt += toolsEst
+		}
+
+		// Add estimation for any messages after the last assistant message
+		for i := lastAssistantIdx + 1; i < len(messages); i++ {
+			m := messages[i]
+			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+				globalPrompt += len(m.Content) / 4
+			}
+		}
+	} else {
+		// No assistant messages yet. Estimate everything.
+		for _, m := range messages {
+			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+				globalPrompt += len(m.Content) / 4
+			}
+		}
+		if globalPrompt == 0 {
+			globalPrompt = len(a.GetSystemPrompt()) / 4
+		}
+		globalPrompt += toolsEst
+	}
+
+	return globalPrompt, globalCompletion
 }
 
 

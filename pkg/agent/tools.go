@@ -287,6 +287,11 @@ func (t *writeTool) Execute(a *Agent, arguments string) (string, error) {
 		return "", err
 	}
 
+	// Code Omission Protection
+	if placeholders := DetectOmissionPlaceholders(args.Content); len(placeholders) > 0 {
+		return "", fmt.Errorf("refusing to write file: detected code omission placeholder(s) like: %q. Please provide the complete file content without shorthand placeholders or comments like '// ... rest of code'.", placeholders)
+	}
+
 	dir := filepath.Dir(safePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create directory: %w", err)
@@ -348,6 +353,13 @@ func (t *editTool) Execute(a *Agent, arguments string) (string, error) {
 		edits = append(edits, ReplaceEdit{OldText: args.OldText, NewText: args.NewText})
 	}
 
+	// Code Omission Protection
+	for _, edit := range edits {
+		if placeholders := DetectOmissionPlaceholders(edit.NewText); len(placeholders) > 0 {
+			return "", fmt.Errorf("refusing to edit file: detected code omission placeholder(s) in replacement text: %q. Please provide the complete new code replacement block without shorthand placeholders or comments like '// ... rest of code'.", placeholders)
+		}
+	}
+
 	if len(edits) == 0 {
 		return "", fmt.Errorf("no edits specified to apply")
 	}
@@ -356,11 +368,82 @@ func (t *editTool) Execute(a *Agent, arguments string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	content := string(data)
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 
 	var diffBuilder strings.Builder
-	for i, edit := range edits {
+	for i := range edits {
+		edit := &edits[i]
+		edit.OldText = strings.ReplaceAll(edit.OldText, "\r\n", "\n")
+		edit.NewText = strings.ReplaceAll(edit.NewText, "\r\n", "\n")
+
 		indexOfOldText := strings.Index(content, edit.OldText)
+		if indexOfOldText == -1 {
+			// Try resilient line-by-line whitespace-insensitive matching
+			oldLines := strings.Split(edit.OldText, "\n")
+			var cleanOldLines []string
+			for _, l := range oldLines {
+				cleanOldLines = append(cleanOldLines, strings.TrimSpace(l))
+			}
+
+			// Strip leading and trailing empty lines from cleanOldLines to find the core matching block
+			startIdx := 0
+			for startIdx < len(cleanOldLines) && cleanOldLines[startIdx] == "" {
+				startIdx++
+			}
+			endIdx := len(cleanOldLines)
+			for endIdx > startIdx && cleanOldLines[endIdx-1] == "" {
+				endIdx--
+			}
+			coreOldLines := cleanOldLines[startIdx:endIdx]
+
+			if len(coreOldLines) > 0 {
+				fileLines := strings.Split(content, "\n")
+				matchStart := -1
+				matchEnd := -1
+				matchesCount := 0
+
+				for fs := 0; fs <= len(fileLines)-len(coreOldLines); fs++ {
+					matched := true
+					for j := 0; j < len(coreOldLines); j++ {
+						fileLineTrimmed := strings.TrimSpace(fileLines[fs+j])
+						if fileLineTrimmed != coreOldLines[j] {
+							matched = false
+							break
+						}
+					}
+					if matched {
+						matchStart = fs
+						matchEnd = fs + len(coreOldLines)
+						matchesCount++
+					}
+				}
+
+				if matchesCount == 1 {
+					// Found a unique resilient match!
+					// Expand back to include leading/trailing empty lines matching original request
+					actualStart := matchStart
+					for actualStart > 0 && matchStart-actualStart < startIdx {
+						if strings.TrimSpace(fileLines[actualStart-1]) == "" {
+							actualStart--
+						} else {
+							break
+						}
+					}
+					actualEnd := matchEnd
+					for actualEnd < len(fileLines) && actualEnd-matchEnd < (len(cleanOldLines) - endIdx) {
+						if strings.TrimSpace(fileLines[actualEnd]) == "" {
+							actualEnd++
+						} else {
+							break
+						}
+					}
+					actualOldText := strings.Join(fileLines[actualStart:actualEnd], "\n")
+					edit.OldText = actualOldText
+					indexOfOldText = strings.Index(content, edit.OldText)
+				}
+			}
+		}
+
 		if indexOfOldText == -1 {
 			return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s", i, args.Path)
 		}
@@ -376,9 +459,6 @@ func (t *editTool) Execute(a *Agent, arguments string) (string, error) {
 
 		allLines := strings.Split(content, "\n")
 		content = strings.Replace(content, edit.OldText, edit.NewText, 1)
-
-		// Format header
-		diffBuilder.WriteString(fmt.Sprintf("\x1b[1medit:%s\x1b[0m\n", args.Path))
 
 		// Context before (3 lines)
 		contextStart := startLine - 3

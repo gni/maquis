@@ -161,9 +161,9 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			name:        "Visual Theme",
 			value:       func() string { return cloned.Theme },
 			description: "Visual aesthetic style of the terminal theme",
-			options:     []string{"dark", "neon", "light", "gruvbox"},
+			options:     []string{"dark", "neon", "light", "gruvbox", "mono"},
 			onToggle: func() {
-				themes := []string{"dark", "neon", "light", "gruvbox"}
+				themes := []string{"dark", "neon", "light", "gruvbox", "mono"}
 				idx := -1
 				for i, t := range themes {
 					if strings.ToLower(cloned.Theme) == t {
@@ -231,6 +231,23 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 					return fmt.Errorf("must be a positive integer")
 				}
 				cloned.ContextWindowLimit = l
+				return nil
+			},
+		},
+		{
+			id:          "max_reasoning_steps",
+			name:        "Max Reasoning Steps",
+			value:       func() string { return fmt.Sprintf("%d", cloned.MaxReasoningSteps) },
+			description: "Maximum number of sequential reasoning steps before termination",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				steps, err := strconv.Atoi(newVal)
+				if err != nil || steps <= 0 {
+					return fmt.Errorf("must be a positive integer")
+				}
+				cloned.MaxReasoningSteps = steps
 				return nil
 			},
 		},

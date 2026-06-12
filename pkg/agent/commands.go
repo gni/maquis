@@ -36,21 +36,15 @@ func (a *Agent) HandleSlashCommand(
 	parts := strings.Fields(line)
 	cmdName := parts[0]
 
+	calcHistoryTokens := func() (int, int) {
+		return a.GetGlobalTokens(*messages, allowedTools)
+	}
+
 	switch cmdName {
 	case "/exit", "/quit":
 		return true, true
 	case "/toggle", "/collapse", "/expand":
-		a.Config.CollapseResults = !a.Config.CollapseResults
-		_ = config.SaveConfig(a.ConfigPath, a.Config)
-		status := "EXPANDED"
-		if a.Config.CollapseResults {
-			status = "COLLAPSED"
-		}
-		fmt.Fprintf(w, "Tool results collapsing set to: %s\n", status)
-		if a.lastToolOutput != "" {
-			fmt.Fprintln(w, "Re-rendering last tool output:")
-			ui.RenderToolOutput(w, a.lastToolOutput, a.lastToolIsError, a.Config.CollapseResults, a.lastToolTheme)
-		}
+		fmt.Fprintln(w, "Results collapsing is currently disabled.")
 		return true, false
 	case "/task":
 		if len(parts) < 2 {
@@ -169,6 +163,13 @@ func (a *Agent) HandleSlashCommand(
 					return true, false
 				}
 				a.Config.ContextWindowLimit = l
+			case "max_reasoning_steps", "max_steps", "steps":
+				steps, err := strconv.Atoi(val)
+				if err != nil || steps <= 0 {
+					fmt.Fprintf(w, "Invalid max reasoning steps value: %v\n", err)
+					return true, false
+				}
+				a.Config.MaxReasoningSteps = steps
 			case "direct_commands", "direct":
 				a.Config.DirectCommands = val == "true" || val == "yes" || val == "1"
 			case "cert_file", "cert":
@@ -186,6 +187,9 @@ func (a *Agent) HandleSlashCommand(
 
 			_ = config.SaveConfig(a.ConfigPath, a.Config)
 			fmt.Fprintf(w, "Config updated. Saved to %s\n", a.ConfigPath)
+			pTok, cTok := calcHistoryTokens()
+			ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+			ui.DrawStatusBar(w, *theme)
 		} else {
 			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 			var input io.Reader = os.Stdin
@@ -196,7 +200,9 @@ func (a *Agent) HandleSlashCommand(
 				output = tty
 			}
 
+			ui.ShutdownStatusBar(os.Stderr)
 			newConfig, err := ui.RunInteractiveConfig(a.Config, *theme, input, output)
+			ui.InitStatusBar(os.Stderr)
 			if err == nil && newConfig != nil {
 				a.Config = newConfig
 				*theme = ui.GetTheme(a.Config.Theme)
@@ -205,6 +211,9 @@ func (a *Agent) HandleSlashCommand(
 			} else {
 				fmt.Fprintln(w, "Interactive config cancelled.")
 			}
+			pTok, cTok := calcHistoryTokens()
+			ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+			ui.DrawStatusBar(os.Stderr, *theme)
 		}
 		return true, false
 	case "/skills":
@@ -247,6 +256,9 @@ func (a *Agent) HandleSlashCommand(
 		// Clear terminal screen and scrollback
 		fmt.Fprint(w, "\x1b[H\x1b[2J")
 		fmt.Fprintln(w, "Conversation history cleared.")
+		pTok, cTok := calcHistoryTokens()
+		ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+		ui.DrawStatusBar(os.Stderr, *theme)
 		return true, false
 	case "/session":
 		if len(parts) > 1 {
@@ -276,6 +288,9 @@ func (a *Agent) HandleSlashCommand(
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
 				fmt.Fprintln(w, "Started a new conversation session.")
+				pTok, cTok := calcHistoryTokens()
+				ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+				ui.DrawStatusBar(os.Stderr, *theme)
 			case "branch":
 				if len(parts) < 3 {
 					fmt.Fprintln(w, "Usage: /session branch <new_session_id>")
@@ -294,6 +309,7 @@ func (a *Agent) HandleSlashCommand(
 				}
 				*currentSessionID = branchID
 				fmt.Fprintf(w, "Successfully branched session into '%s'. Active session is now '%s'.\n", branchID, branchID)
+				ui.DrawStatusBar(os.Stderr, *theme)
 			case "load":
 				if len(parts) > 2 {
 					selected := parts[2]
@@ -303,6 +319,10 @@ func (a *Agent) HandleSlashCommand(
 						*messages = dbHistory
 						fmt.Fprintf(w, "Loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
 						printSessionHistory(w, *messages, *theme, a.Config)
+
+						pTok, cTok := calcHistoryTokens()
+						ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+						ui.DrawStatusBar(os.Stderr, *theme)
 					} else {
 						fmt.Fprintf(w, "Error: Session '%s' not found or empty.\n", selected)
 					}
@@ -318,7 +338,9 @@ func (a *Agent) HandleSlashCommand(
 					output = tty
 				}
 
+				ui.ShutdownStatusBar(os.Stderr)
 				selected, startNew, err := ui.RunSessionExplorer(*theme, input, output)
+				ui.InitStatusBar(os.Stderr)
 				if err == nil {
 					if startNew {
 						*currentSessionID = db.NewUUID()
@@ -326,6 +348,9 @@ func (a *Agent) HandleSlashCommand(
 							{Role: "system", Content: a.GetSystemPrompt()},
 						}
 						fmt.Fprintln(w, "Started a new conversation session.")
+						pTok, cTok := calcHistoryTokens()
+						ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+						ui.DrawStatusBar(os.Stderr, *theme)
 					} else if selected != "" {
 						dbHistory, err := db.LoadMessages(selected)
 						if err == nil && len(dbHistory) > 0 {
@@ -333,11 +358,16 @@ func (a *Agent) HandleSlashCommand(
 							*messages = dbHistory
 							fmt.Fprintf(w, "Loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
 							printSessionHistory(w, *messages, *theme, a.Config)
+
+							pTok, cTok := calcHistoryTokens()
+							ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+							ui.DrawStatusBar(os.Stderr, *theme)
 						}
 					}
 				} else {
 					fmt.Fprintln(w, "Session Explorer cancelled.")
 				}
+				ui.DrawStatusBar(os.Stderr, *theme)
 			default:
 				fmt.Fprintln(w, "Usage: /session [list | new | load | branch <new_session_id>]")
 			}
@@ -355,7 +385,10 @@ func (a *Agent) HandleSlashCommand(
 			output = tty
 		}
 
+		ui.ShutdownStatusBar(os.Stderr)
 		multilinePrompt, err := ui.RunMultilineEditor(input, output)
+		ui.InitStatusBar(os.Stderr)
+		ui.DrawStatusBar(os.Stderr, *theme)
 		if err == nil && strings.TrimSpace(multilinePrompt) != "" {
 			a.RunAgentLoop(w, messages, multilinePrompt, allowedTools, *theme, false, *currentSessionID)
 		} else {
@@ -436,7 +469,6 @@ func (a *Agent) HandleSlashCommand(
 func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, cfg *config.Config) {
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-	titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 
 	for _, msg := range messages {
 		if msg.Role == "system" {
@@ -474,15 +506,44 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 							path = c
 						}
 					}
-					if path != "" {
-						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("tool call: %s %s", tc.Function.Name, path)))
+					isPathTool := tc.Function.Name == "read" || tc.Function.Name == "write" || tc.Function.Name == "edit" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find"
+					var symbol string
+					if tc.Function.Name == "write" {
+						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
 					} else {
-						fmt.Fprintf(w, "\n%s\n", titleStyle.Render(fmt.Sprintf("tool call: %s", tc.Function.Name)))
+						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
 					}
+					var title string
+					if isPathTool && path != "" {
+						title = ui.FormatToolTitle(symbol, tc.Function.Name, path, theme)
+					} else {
+						title = ui.FormatToolTitle(symbol, tc.Function.Name, "", theme)
+					}
+					fmt.Fprintf(w, "\n%s\n", title)
 				}
 			}
 		} else if msg.Role == "tool" {
-			ui.RenderToolOutput(w, msg.Content, false, cfg.CollapseResults, theme)
+			var toolName string
+			var argsJSON string
+			for i := len(messages) - 1; i >= 0; i-- {
+				m := messages[i]
+				if m.Role == "assistant" {
+					for _, tc := range m.ToolCalls {
+						if tc.ID == msg.ToolCallID {
+							toolName = tc.Function.Name
+							argsJSON = tc.Function.Arguments
+							break
+						}
+					}
+				}
+				if toolName != "" {
+					break
+				}
+			}
+			if toolName == "" {
+				toolName = msg.Name
+			}
+			ui.RenderToolOutput(w, msg.Content, false, cfg.CollapseResults, theme, toolName, argsJSON, -1)
 		}
 	}
 }

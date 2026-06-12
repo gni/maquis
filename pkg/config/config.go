@@ -73,7 +73,7 @@ func DefaultConfig() *Config {
 		AutoApprove:       false,
 		ShowThinking:      true,
 		ShowFullThinking:  true,
-		CollapseResults:   true,
+		CollapseResults:   false,
 		ShowTokens:        false,
 		Theme:             "dark",
 		DirectCommands:    true,

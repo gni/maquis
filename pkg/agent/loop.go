@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"bidouille/pkg/ui/style"
-	"github.com/alecthomas/chroma/v2/quick"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
@@ -31,6 +30,22 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 	if prompt == "" {
 		return
 	}
+
+	var totalCompletionTokens int
+	var totalPromptTokens int
+	var totalApiDuration time.Duration
+
+	startTime := time.Now()
+	timePrinted := false
+	defer func() {
+		if !timePrinted && prompt != "" {
+			elapsed := time.Since(startTime)
+			timeStr := fmt.Sprintf("%s (%.1fs)", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
+			timeStyled := style.NewStyle().Foreground(theme.Border).Render(timeStr)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, timeStyled)
+		}
+	}()
 
 	*messages = append(*messages, db.Message{Role: "user", Content: prompt})
 	if sessionID != "" {
@@ -68,7 +83,13 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		}
 
 		if iter > 1 {
+			width, _, err := term.GetSize(int(os.Stderr.Fd()))
+			if err != nil || width <= 0 {
+				width = 80
+			}
+			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", width))
 			fmt.Fprintln(w)
+			fmt.Fprintln(w, divider)
 		}
 
 		chunkChan := make(chan StreamChunk, 200)
@@ -84,7 +105,8 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			close(chunkChan)
 		}()
 
-		sr := ui.NewStreamRenderer(w, theme, a.Config.ShowThinking)
+		ncw := &newlineCounterWriter{Writer: w}
+		sr := ui.NewStreamRenderer(ncw, theme, a.Config.ShowThinking)
 
 		stopKeyListen := make(chan struct{})
 		keyListenDone := make(chan struct{})
@@ -175,22 +197,57 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			}
 		}()
 
-		parser := &jsonStreamParser{}
+		parser := &jsonStreamParser{activeToolIndex: -1}
+
+		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
+
+		var reasoningChars int
+		var textChars int
+		var toolCallChars int
+		var generationStart time.Time
 
 		for chunk := range chunkChan {
 			if chunk.Type == "reasoning" {
+				if generationStart.IsZero() {
+					generationStart = time.Now()
+				}
 				sr.WriteReasoning(chunk.Content)
+				reasoningChars += len(chunk.Content)
 			} else if chunk.Type == "text" {
+				if generationStart.IsZero() {
+					generationStart = time.Now()
+				}
 				sr.Write(chunk.Content)
+				textChars += len(chunk.Content)
 			} else if chunk.Type == "tool_name" {
-				sr.Flush()
-				parser.needsLeadingNewline = sr.HasOutput()
-				parser.activeToolName = chunk.Content
-				parser.titlePrinted = false
-				parser.path = ""
-				parser.pathPrinted = false
+				if parser.activeToolIndex != chunk.ToolCallIndex || parser.activeToolName == "" {
+					sr.Flush()
+					parser.needsLeadingNewline = sr.HasOutput()
+					parser.activeToolName = chunk.Content
+					parser.activeToolIndex = chunk.ToolCallIndex
+					parser.titlePrinted = false
+					parser.path = ""
+					parser.pathPrinted = false
+				} else {
+					parser.activeToolName = chunk.Content
+				}
 			} else if chunk.Type == "tool_call" {
-				parser.feed(chunk.Content, w, theme)
+				parser.feed(chunk.Content, ncw, theme)
+				toolCallChars += len(chunk.Content)
+			}
+
+			if !isNonInteractive {
+				currentCompletionTokensEst := (reasoningChars + textChars + toolCallChars) / 4
+				globalCompletionTokensEst := priorCompletionTokens + currentCompletionTokensEst
+				var tps float64
+				if !generationStart.IsZero() {
+					elapsed := time.Since(generationStart).Seconds()
+					if elapsed > 0 {
+						tps = float64(currentCompletionTokensEst) / elapsed
+					}
+				}
+				ui.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps)
+				ui.DrawStatusBar(ncw, theme)
 			}
 		}
 		close(stopKeyListen)
@@ -200,16 +257,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		// Fallback if title was never printed
 		if parser.activeToolName != "" {
 			if !parser.titlePrinted {
-				parser.titlePrinted = true
-				titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-				if parser.path != "" {
-					parser.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", parser.activeToolName, parser.path)))
-				} else {
-					parser.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s", parser.activeToolName)))
-				}
+				parser.printStreamTitle(ncw, theme)
 			}
 			if parser.outputBuf.Len() > 0 {
-				fmt.Fprint(w, parser.outputBuf.String())
+				fmt.Fprint(ncw, parser.outputBuf.String())
 				parser.outputBuf.Reset()
 			}
 		}
@@ -217,7 +268,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		if err := <-streamErrChan; err != nil {
 			if ctx.Err() == nil {
 				errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-				fmt.Fprintf(w, "\n%s %v\n", errStyle.Render("Error during generation:"), err)
+				fmt.Fprintf(ncw, "\n%s %v\n", errStyle.Render("Error during generation:"), err)
 			}
 			return
 		}
@@ -226,48 +277,76 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			return
 		}
 
+		totalCompletionTokens += assistantMsg.CompletionTokens
+		totalPromptTokens += assistantMsg.PromptTokens
+		totalApiDuration += a.lastGenerationDuration
+
 		*messages = append(*messages, *assistantMsg)
 		if sessionID != "" {
 			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 		}
 
-		totalTokens := assistantMsg.PromptTokens + assistantMsg.CompletionTokens
-		pct := (float64(totalTokens) / float64(a.Config.ContextWindowLimit)) * 100.0
+		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
-		pStr := fmt.Sprintf("%d in", assistantMsg.PromptTokens)
-		if assistantMsg.PromptTokens >= 1000 {
-			pStr = fmt.Sprintf("%.1fk in", float64(assistantMsg.PromptTokens)/1000.0)
-		}
-		cStr := fmt.Sprintf("%d out", assistantMsg.CompletionTokens)
-		if assistantMsg.CompletionTokens >= 1000 {
-			cStr = fmt.Sprintf("%.1fk out", float64(assistantMsg.CompletionTokens)/1000.0)
-		}
-
-		totStr := fmt.Sprintf("%d", totalTokens)
-		if totalTokens >= 1000 {
-			totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
-		}
-		limitStr := fmt.Sprintf("%d", a.Config.ContextWindowLimit)
-		if a.Config.ContextWindowLimit >= 1000 {
-			limitStr = fmt.Sprintf("%dk", a.Config.ContextWindowLimit/1000)
-		}
-
-		pStyled := style.NewStyle().Foreground(theme.Secondary).Render(pStr)
-		cStyled := style.NewStyle().Foreground(theme.Highlight).Render(cStr)
-		ctxStyled := style.NewStyle().Foreground(theme.Primary).Render(fmt.Sprintf("Context: %s/%s (%.1f%%)", totStr, limitStr, pct))
-		dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
-
-		if a.Config.ShowTokens && (assistantMsg.PromptTokens > 0 || assistantMsg.CompletionTokens > 0) {
-			fmt.Fprintf(w, "%s%s%s%s%s\n", pStyled, dotStyled, cStyled, dotStyled, ctxStyled)
-		}
-
-		if totalTokens >= int(a.Config.CompressionThreshold * float64(a.Config.ContextWindowLimit)) {
+		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold * float64(a.Config.ContextWindowLimit)) {
 			a.compressHistory(ctx, messages, sessionID, theme, w)
 		}
 
+		var finalTps float64
+		if a.lastGenerationDuration > 0 {
+			finalTps = float64(assistantMsg.CompletionTokens) / a.lastGenerationDuration.Seconds()
+		}
+
 		if len(assistantMsg.ToolCalls) == 0 {
+			timePrinted = true
+			elapsed := time.Since(startTime)
+			timeStr := fmt.Sprintf("%s (%.1fs)", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
+			timeStyled := style.NewStyle().Foreground(theme.Border).Render(timeStr)
+
+			currentCStr := fmt.Sprintf("%d out", assistantMsg.CompletionTokens)
+			if assistantMsg.CompletionTokens >= 1000 {
+				currentCStr = fmt.Sprintf("%.1fk out", float64(assistantMsg.CompletionTokens)/1000.0)
+			}
+
+
+			cStyled := style.NewStyle().Foreground(theme.Highlight).Render(currentCStr)
+			dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
+
 			fmt.Fprintln(w)
+			if !isNonInteractive {
+				ui.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps)
+				ui.DrawStatusBar(w, theme)
+
+				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
+					fmt.Fprintf(w, "%s%s%s\n", cStyled, dotStyled, timeStyled)
+				} else {
+					fmt.Fprintln(w, timeStyled)
+				}
+			} else {
+				// Non-interactive fallback showing Context too
+				totalTokens := assistantMsg.PromptTokens + assistantMsg.CompletionTokens
+				pct := (float64(totalTokens) / float64(a.Config.ContextWindowLimit)) * 100.0
+				totStr := fmt.Sprintf("%d", totalTokens)
+				if totalTokens >= 1000 {
+					totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
+				}
+				limitStr := fmt.Sprintf("%d", a.Config.ContextWindowLimit)
+				if a.Config.ContextWindowLimit >= 1000 {
+					limitStr = fmt.Sprintf("%dk", a.Config.ContextWindowLimit/1000)
+				}
+				ctxStyled := style.NewStyle().Foreground(theme.Primary).Render(fmt.Sprintf("Context: %s/%s (%.1f%%)", totStr, limitStr, pct))
+				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
+					fmt.Fprintf(ncw, "%s%s%s%s%s\n", cStyled, dotStyled, ctxStyled, dotStyled, timeStyled)
+				} else {
+					fmt.Fprintln(ncw, timeStyled)
+				}
+			}
 			return
+		}
+
+		if !isNonInteractive {
+			ui.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps)
+			ui.DrawStatusBar(ncw, theme)
 		}
 
 		type toolExecutionResult struct {
@@ -292,7 +371,8 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			approved := a.Config.IsAutoApprove()
 			if !approved {
 				var always bool
-				approved, always = ui.AskForApproval(w, theme)
+				approved, always = ui.AskForApproval(ncw, theme)
+				ncw.count++
 				if always {
 					a.Config.AutoApprove = true
 					a.Config.YoloMode = true
@@ -310,8 +390,8 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		if len(rejectedBatch) > 0 {
 			for _, tc := range rejectedBatch {
 				toolOutput := "Tool execution rejected by user."
-				fmt.Fprintln(w, "Tool execution rejected.")
-				ui.RenderToolOutput(w, toolOutput, true, a.Config.CollapseResults, theme)
+				fmt.Fprintln(ncw, "Tool execution rejected.")
+				ui.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, -1)
 
 				*messages = append(*messages, db.Message{
 					Role:       "tool",
@@ -346,7 +426,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 					default:
 						frame := frames[i%len(frames)]
 						i++
-						fmt.Fprintf(w, "\r\x1b[K%s Executing %d tools (%s)...",
+						fmt.Fprintf(ncw, "\r\x1b[K%s Executing %d tools (%s)...",
 							style.NewStyle().Foreground(theme.Secondary).Render(frame),
 							len(approvedBatch),
 							toolsStr,
@@ -388,7 +468,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			wg.Wait()
 			close(stopSpinner)
 			<-spinnerDone
-			fmt.Fprint(w, "\r\x1b[K")
+			fmt.Fprint(ncw, "\r\x1b[K")
 			close(resultsChan)
 
 			// Collect results and sort them to preserve call order
@@ -397,6 +477,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				sortedResults[r.index] = r
 			}
 
+			toolTitleLineNumbers := parser.toolTitleLineNumbers
 			for _, r := range sortedResults {
 				toolOutput := r.output
 				toolErr := r.err
@@ -408,11 +489,23 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 					toolOutput = "(no output)"
 				}
 
-				ui.RenderToolOutput(w, toolOutput, toolErr != nil, a.Config.CollapseResults, theme)
+				newlineDist := -1
+				if r.index < len(toolTitleLineNumbers) {
+					newlineDist = ncw.count - toolTitleLineNumbers[r.index]
+				}
 
-				a.lastToolOutput = toolOutput
-				a.lastToolIsError = toolErr != nil
-				a.lastToolTheme = theme
+				ui.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, r.tc.Function.Name, r.tc.Function.Arguments, newlineDist)
+
+				// Prefer keeping edit diffs in lastToolOutput over read-only tools output
+				isReadOnlyTool := r.tc.Function.Name == "read" || r.tc.Function.Name == "ls" || r.tc.Function.Name == "grep" || r.tc.Function.Name == "find"
+				isPrevEdit := a.lastToolWasEdit
+
+				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
+					a.lastToolOutput = toolOutput
+					a.lastToolIsError = toolErr != nil
+					a.lastToolTheme = theme
+					a.lastToolWasEdit = (r.tc.Function.Name == "edit")
+				}
 
 				*messages = append(*messages, db.Message{
 					Role:       "tool",
@@ -556,10 +649,12 @@ type jsonStreamParser struct {
 	outputBuf strings.Builder
 
 	needsLeadingNewline bool
+	toolTitleLineNumbers []int
+	activeToolIndex      int
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit"
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find"
 }
 
 type parserWriter struct {
@@ -575,8 +670,6 @@ func (pw parserWriter) Write(data []byte) (int, error) {
 }
 
 func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
-	keyStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-	valStyle := style.NewStyle().Foreground(theme.Text)
 	pw := parserWriter{p: p, w: w}
 
 	for i := 0; i < len(chunk); i++ {
@@ -602,64 +695,16 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 				if p.inValue {
 					if p.isContent {
 						if unescaped == "\n" {
-							line := p.lineBuffer.String()
-							p.lineBuffer.Reset()
-							
-							if p.guessedLang == "" || p.guessedLang == "plaintext" {
-								p.guessedLang = guessLanguage(line)
-							}
-
-							lang := "plaintext"
-							if p.currentKey == "command" {
-								lang = "bash"
-							} else if p.path != "" {
-								ext := filepath.Ext(p.path)
-								if len(ext) > 1 {
-									lang = strings.ToLower(ext[1:])
-								}
-							} else if p.guessedLang != "" {
-								lang = p.guessedLang
-							}
-							fmt.Fprint(pw, "\r\x1b[K")
-							_ = quick.Highlight(pw, line+"\n", lang, "terminal16", "friendly")
+							fmt.Fprint(pw, "\n")
 						} else {
-							p.lineBuffer.WriteString(unescaped)
-							
-							if p.guessedLang == "" || p.guessedLang == "plaintext" {
-								p.guessedLang = guessLanguage(p.lineBuffer.String())
-							}
-
-							fmt.Fprint(pw, "\r\x1b[K")
-							lang := "plaintext"
-							if p.currentKey == "command" {
-								lang = "bash"
-							} else if p.path != "" {
-								ext := filepath.Ext(p.path)
-								if len(ext) > 1 {
-									lang = strings.ToLower(ext[1:])
-								}
-							} else if p.guessedLang != "" {
-								lang = p.guessedLang
-							}
-							_ = quick.Highlight(pw, p.lineBuffer.String(), lang, "terminal16", "friendly")
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(unescaped))
 						}
 					} else if p.isPath {
 						p.path += unescaped
-						if p.titlePrinted && !p.pathPrinted {
-							fmt.Fprint(pw, valStyle.Render(unescaped))
-						}
 					} else if p.isOldText {
-						if unescaped == "\n" {
-							fmt.Fprint(pw, "\n      ")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(unescaped))
-						}
+						// Suppress raw oldText from stream output
 					} else if p.isNewText {
-						if unescaped == "\n" {
-							fmt.Fprint(pw, "\n      ")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(unescaped))
-						}
+						// Suppress raw newText from stream output
 					}
 				} else {
 					p.buf.WriteString(unescaped)
@@ -675,38 +720,17 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 					p.currentKey = strVal
 				} else {
 					if p.isPath {
-						p.path = strVal
 						if !p.titlePrinted {
-							p.titlePrinted = true
 							p.pathPrinted = true
-							titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
+							p.printStreamTitle(w, theme)
 							if p.outputBuf.Len() > 0 {
 								fmt.Fprint(w, p.outputBuf.String())
 								p.outputBuf.Reset()
 							}
 						} else if !p.pathPrinted {
 							p.pathPrinted = true
-							titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-							fmt.Fprintf(w, "%s\n", titleStyle.Render(fmt.Sprintf("  [Path Resolved: %s]", p.path)))
+							p.updateStreamTitleWithPath(w, theme)
 						}
-					}
-					if p.isContent && p.lineBuffer.Len() > 0 {
-						line := p.lineBuffer.String()
-						p.lineBuffer.Reset()
-						lang := "plaintext"
-						if p.currentKey == "command" {
-							lang = "bash"
-						} else if p.path != "" {
-							ext := filepath.Ext(p.path)
-							if len(ext) > 1 {
-								lang = strings.ToLower(ext[1:])
-							}
-						} else if p.guessedLang != "" {
-							lang = p.guessedLang
-						}
-						fmt.Fprint(pw, "\r\x1b[K")
-						_ = quick.Highlight(pw, line+"\n", lang, "terminal16", "friendly")
 					}
 					p.inValue = false
 					p.isContent = false
@@ -719,64 +743,16 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 					charStr := string(char)
 					if p.isContent {
 						if char == '\n' {
-							line := p.lineBuffer.String()
-							p.lineBuffer.Reset()
-							
-							if p.guessedLang == "" || p.guessedLang == "plaintext" {
-								p.guessedLang = guessLanguage(line)
-							}
-
-							lang := "plaintext"
-							if p.currentKey == "command" {
-								lang = "bash"
-							} else if p.path != "" {
-								ext := filepath.Ext(p.path)
-								if len(ext) > 1 {
-									lang = strings.ToLower(ext[1:])
-								}
-							} else if p.guessedLang != "" {
-								lang = p.guessedLang
-							}
-							fmt.Fprint(pw, "\r\x1b[K")
-							_ = quick.Highlight(pw, line+"\n", lang, "terminal16", "friendly")
+							fmt.Fprint(pw, "\n")
 						} else {
-							p.lineBuffer.WriteByte(char)
-							
-							if p.guessedLang == "" || p.guessedLang == "plaintext" {
-								p.guessedLang = guessLanguage(p.lineBuffer.String())
-							}
-
-							fmt.Fprint(pw, "\r\x1b[K")
-							lang := "plaintext"
-							if p.currentKey == "command" {
-								lang = "bash"
-							} else if p.path != "" {
-								ext := filepath.Ext(p.path)
-								if len(ext) > 1 {
-									lang = strings.ToLower(ext[1:])
-								}
-							} else if p.guessedLang != "" {
-								lang = p.guessedLang
-							}
-							_ = quick.Highlight(pw, p.lineBuffer.String(), lang, "terminal16", "friendly")
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(charStr))
 						}
 					} else if p.isPath {
 						p.path += charStr
-						if p.titlePrinted && !p.pathPrinted {
-							fmt.Fprint(pw, valStyle.Render(charStr))
-						}
 					} else if p.isOldText {
-						if char == '\n' {
-							fmt.Fprint(pw, "\n      ")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(charStr))
-						}
+						// Suppress raw oldText from stream output
 					} else if p.isNewText {
-						if char == '\n' {
-							fmt.Fprint(pw, "\n      ")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(charStr))
-						}
+						// Suppress raw newText from stream output
 					}
 				} else {
 					p.buf.WriteByte(char)
@@ -791,59 +767,38 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 					p.isContent = true
 					p.guessedLang = ""
 					if !p.titlePrinted {
-						p.titlePrinted = true
-						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-						if p.path != "" {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
-						} else {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
-						}
+						p.printStreamTitle(w, theme)
 						if p.outputBuf.Len() > 0 {
 							fmt.Fprint(w, p.outputBuf.String())
 							p.outputBuf.Reset()
 						}
 					}
-					fmt.Fprintf(pw, "%s:\n", keyStyle.Render(p.currentKey))
+					// Suppress redundant argument labels (content:, write_content:, command:) to keep streaming clean
+					// fmt.Fprintf(pw, "%s:\n", keyStyle.Render(p.currentKey))
 				} else if p.currentKey == "path" {
 					p.isPath = true
 					p.path = ""
-					if p.titlePrinted && !p.pathPrinted {
-						fmt.Fprintf(pw, "%s: ", keyStyle.Render("path"))
-					}
+					// Do not print "path: " inline
 				} else if p.currentKey == "oldText" {
 					p.isOldText = true
 					if !p.titlePrinted {
-						p.titlePrinted = true
-						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-						if p.path != "" {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
-						} else {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
-						}
+						p.printStreamTitle(w, theme)
 						if p.outputBuf.Len() > 0 {
 							fmt.Fprint(w, p.outputBuf.String())
 							p.outputBuf.Reset()
 						}
 					}
-					fmt.Fprintf(pw, "%s:\n  ", style.NewStyle().Foreground(theme.Error).Render("- [old text]"))
 				} else if p.currentKey == "newText" {
 					p.isNewText = true
 					if !p.titlePrinted {
-						p.titlePrinted = true
-						titleStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-						if p.path != "" {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s %s", p.activeToolName, p.path)))
-						} else {
-							p.printTitle(w, titleStyle.Render(fmt.Sprintf("tool call: %s (path pending)", p.activeToolName)))
-						}
+						p.printStreamTitle(w, theme)
 						if p.outputBuf.Len() > 0 {
 							fmt.Fprint(w, p.outputBuf.String())
 							p.outputBuf.Reset()
 						}
 					}
-					fmt.Fprintf(pw, "%s:\n  ", style.NewStyle().Foreground(theme.Success).Render("+ [new text]"))
 				}
-			} else if char == ',' {
+			} else if char == ',' || char == '{' || char == '[' {
 				p.inValue = false
 				p.isContent = false
 				p.isPath = false
@@ -987,4 +942,111 @@ func (p *jsonStreamParser) printTitle(w io.Writer, title string) {
 		p.needsLeadingNewline = false
 	}
 	fmt.Fprint(w, title+"\n")
+}
+
+func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme ui.UITheme) {
+	if p.titlePrinted {
+		return
+	}
+	p.titlePrinted = true
+
+	startCount := getNewlineCount(w)
+	if p.needsLeadingNewline {
+		startCount++
+	}
+	p.toolTitleLineNumbers = append(p.toolTitleLineNumbers, startCount)
+
+	var dotStr string
+	if p.activeToolName == "write" {
+		dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
+	} else {
+		// Yellow arrow next to streaming title
+		dotStyle := style.NewStyle().Foreground(style.Color("#fbbf24")).Bold(true)
+		dotStr = dotStyle.Render("▸")
+	}
+
+	var title string
+	if p.needsPath() && p.path != "" {
+		title = ui.FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
+	} else {
+		title = ui.FormatToolTitle(dotStr, p.activeToolName, "", theme)
+	}
+	p.printTitle(w, title)
+}
+
+func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme ui.UITheme) {
+	if len(p.toolTitleLineNumbers) == 0 {
+		return
+	}
+	titleLine := p.toolTitleLineNumbers[len(p.toolTitleLineNumbers)-1]
+	currentCount := getNewlineCount(w)
+	diff := currentCount - titleLine
+
+	_, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err == nil && diff >= 0 && diff < height-1 {
+		var dotStr string
+		if p.activeToolName == "write" {
+			dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
+		} else {
+			dotStyle := style.NewStyle().Foreground(style.Color("#fbbf24")).Bold(true)
+			dotStr = dotStyle.Render("▸")
+		}
+
+		newTitle := ui.FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
+
+		// Save cursor position
+		fmt.Fprint(w, "\x1b[s")
+		// Move up diff lines
+		fmt.Fprintf(w, "\x1b[%dA", diff)
+		// Move to column 1 absolutely
+		fmt.Fprint(w, "\x1b[1G")
+		// Overwrite the entire line and clear to the end of the line
+		fmt.Fprintf(w, "\x1b[0m%s\x1b[K", newTitle)
+		// Restore cursor position
+		fmt.Fprint(w, "\x1b[u")
+	}
+}
+
+
+func getRelativePath(path string) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return path
+	}
+	rel, err := filepath.Rel(wd, path)
+	if err != nil {
+		return path
+	}
+	return rel
+}
+
+func getNewlineCount(w io.Writer) int {
+	type countGetter interface {
+		GetCount() int
+	}
+	if cg, ok := w.(countGetter); ok {
+		return cg.GetCount()
+	}
+	if pw, ok := w.(parserWriter); ok {
+		return getNewlineCount(pw.w)
+	}
+	return 0
+}
+
+type newlineCounterWriter struct {
+	io.Writer
+	count int
+}
+
+func (n *newlineCounterWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\n' {
+			n.count++
+		}
+	}
+	return n.Writer.Write(p)
+}
+
+func (n *newlineCounterWriter) GetCount() int {
+	return n.count
 }

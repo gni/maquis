@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -117,23 +118,18 @@ func (sr *StreamRenderer) Write(chunk string) {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "```") {
 					sr.inCodeBlock = false
-					fmt.Fprint(sr.w, "\r\x1b[K")
 				} else {
-					fmt.Fprint(sr.w, "\r\x1b[K")
-					err := quick.Highlight(sr.w, line+"\n", sr.codeLanguage, "terminal16", "friendly")
-					if err != nil {
-						fmt.Fprint(sr.w, line+"\n")
+					if strings.HasPrefix(trimmed, "`") {
+						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(line+"\n"))
+					} else {
+						fmt.Fprint(sr.w, "\n")
 					}
 				}
 			} else {
 				sr.lineBuffer.WriteRune(char)
 				// Suppress real-time rendering if the line starts with a backtick (e.g. closing tag)
 				if !strings.HasPrefix(strings.TrimSpace(sr.lineBuffer.String()), "`") {
-					fmt.Fprint(sr.w, "\r\x1b[K")
-					err := quick.Highlight(sr.w, sr.lineBuffer.String(), sr.codeLanguage, "terminal16", "friendly")
-					if err != nil {
-						fmt.Fprint(sr.w, sr.lineBuffer.String())
-					}
+					fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(string(char)))
 				}
 			}
 		} else {
@@ -212,10 +208,7 @@ func (sr *StreamRenderer) Flush() {
 		sr.lineBuffer.Reset()
 		if rem != "" {
 			if !strings.HasPrefix(strings.TrimSpace(rem), "```") {
-				err := quick.Highlight(sr.w, rem+"\n", sr.codeLanguage, "terminal16", "friendly")
-				if err != nil {
-					fmt.Fprint(sr.w, rem+"\n")
-				}
+				fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(rem+"\n"))
 			}
 		}
 		sr.inCodeBlock = false
@@ -255,4 +248,27 @@ func (sr *StreamRenderer) printNormalLine(line string) {
 	}
 
 	fmt.Fprint(sr.w, styled)
+}
+
+func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle string) error {
+	if chromaStyle == "" {
+		chromaStyle = "friendly"
+	}
+	var buf bytes.Buffer
+	err := quick.Highlight(&buf, source, lang, "terminal16", chromaStyle)
+	if err != nil {
+		return err
+	}
+	data := buf.Bytes()
+	if !strings.Contains(source, "\n") {
+		var stripped []byte
+		for _, b := range data {
+			if b != '\n' && b != '\r' {
+				stripped = append(stripped, b)
+			}
+		}
+		data = stripped
+	}
+	_, err = w.Write(data)
+	return err
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"bidouille/pkg/db"
 )
@@ -89,8 +90,9 @@ type SchemaProp struct {
 }
 
 type StreamChunk struct {
-	Type    string // "text" or "reasoning"
-	Content string
+	Type          string // "text" or "reasoning"
+	Content       string
+	ToolCallIndex int
 }
 
 type ReplaceEdit struct {
@@ -226,27 +228,53 @@ func (a *Agent) StreamChatCompletions(
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	var resp *http.Response
+	var lastErr error
+	maxRetries := 3
 
-	if a.Config.ApiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+
+		if a.Config.ApiKey != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
+		}
+
+		var doErr error
+		resp, doErr = a.HttpClient.Do(req)
+		if doErr != nil {
+			lastErr = fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", doErr, a.Config.Endpoint)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("server returned non-200 status: %d. Body: %s", resp.StatusCode, string(body))
+
+			if resp.StatusCode >= 500 {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Request succeeded
+		lastErr = nil
+		break
 	}
 
-	resp, err := a.HttpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", err, a.Config.Endpoint)
+	if lastErr != nil {
+		return nil, fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("server returned non-200 status: %d. Body: %s", resp.StatusCode, string(body))
-	}
 
 	reader := bufio.NewReader(resp.Body)
 	var textBuilder strings.Builder
@@ -254,6 +282,7 @@ func (a *Agent) StreamChatCompletions(
 	var toolCallsMap = make(map[int]*db.ToolCall)
 
 	var promptTokens, completionTokens int
+	var generationStart time.Time
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -294,6 +323,12 @@ func (a *Agent) StreamChatCompletions(
 
 		choice := chunk.Choices[0]
 
+		if choice.Delta.ReasoningContent != "" || choice.Delta.Content != "" {
+			if generationStart.IsZero() {
+				generationStart = time.Now()
+			}
+		}
+
 		// 1. Process reasoning/thinking delta
 		if choice.Delta.ReasoningContent != "" {
 			reasoningBuilder.WriteString(choice.Delta.ReasoningContent)
@@ -319,7 +354,7 @@ func (a *Agent) StreamChatCompletions(
 					newTC := tc
 					toolCallsMap[idx] = &newTC
 					if tc.Function.Name != "" {
-						chunkChan <- StreamChunk{Type: "tool_name", Content: tc.Function.Name}
+						chunkChan <- StreamChunk{Type: "tool_name", Content: tc.Function.Name, ToolCallIndex: idx}
 					}
 				} else {
 					if tc.ID != "" {
@@ -330,15 +365,21 @@ func (a *Agent) StreamChatCompletions(
 					}
 					if tc.Function.Name != "" {
 						existing.Function.Name = tc.Function.Name
-						chunkChan <- StreamChunk{Type: "tool_name", Content: tc.Function.Name}
+						chunkChan <- StreamChunk{Type: "tool_name", Content: tc.Function.Name, ToolCallIndex: idx}
 					}
 					existing.Function.Arguments += tc.Function.Arguments
 				}
 				if tc.Function.Arguments != "" {
-					chunkChan <- StreamChunk{Type: "tool_call", Content: tc.Function.Arguments}
+					chunkChan <- StreamChunk{Type: "tool_call", Content: tc.Function.Arguments, ToolCallIndex: idx}
 				}
 			}
 		}
+	}
+
+	if !generationStart.IsZero() {
+		a.lastGenerationDuration = time.Since(generationStart)
+	} else {
+		a.lastGenerationDuration = 0
 	}
 
 	// Fallback token estimation if not provided by stream metadata

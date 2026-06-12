@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 
 	"bidouille/pkg/config"
 	"github.com/alecthomas/chroma/v2/quick"
+	"golang.org/x/term"
 )
 
 func PrintBanner(w io.Writer, cfg *config.Config) {
@@ -130,6 +132,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %v\n"+
 			"  %-20s %v\n"+
 			"  %-20s %d tokens\n"+
+			"  %-20s %d\n"+
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
@@ -144,6 +147,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		keyStyle.Render("Collapse Results:"), cfg.CollapseResults,
 		keyStyle.Render("Show Tokens:"), cfg.ShowTokens,
 		keyStyle.Render("Context Limit:"), cfg.ContextWindowLimit,
+		keyStyle.Render("Max Reasoning Steps:"), cfg.MaxReasoningSteps,
 		keyStyle.Render("Direct Commands:"), directVal,
 		keyStyle.Render("Client Cert:"), valStyle.Render(cfg.CertFile),
 		keyStyle.Render("Client Key:"), valStyle.Render(cfg.KeyFile),
@@ -283,7 +287,57 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 	fmt.Fprint(w, formattedArgs)
 }
 
-func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme) {
+func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, newlineCount int) {
+	if newlineCount >= 0 {
+		_, height, err := term.GetSize(int(os.Stdout.Fd()))
+		if err == nil && newlineCount < height-1 {
+			var finalDot string
+			if toolName == "write" {
+				if !isError {
+					finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
+				} else {
+					finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
+				}
+			} else {
+				if !isError {
+					finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
+				} else {
+					finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("▸")
+				}
+			}
+
+			// Extract path from argsJSON if possible
+			pathVal := ""
+			var args struct {
+				Path string `json:"path"`
+			}
+			if argsJSON != "" {
+				_ = json.Unmarshal([]byte(argsJSON), &args)
+				pathVal = args.Path
+			}
+
+			finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
+
+			// Save cursor position
+			fmt.Fprint(w, "\x1b[s")
+			// Move up newlineCount lines
+			fmt.Fprintf(w, "\x1b[%dA", newlineCount)
+			// Move to column 1 absolutely
+			fmt.Fprint(w, "\x1b[1G")
+			// Overwrite the entire line and clear to the end of the line
+			fmt.Fprintf(w, "\x1b[0m%s\x1b[K", finalTitle)
+			// Restore cursor position
+			fmt.Fprint(w, "\x1b[u")
+		}
+	}
+
+	if toolName == "write" {
+		if isError {
+			errorStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
+			fmt.Fprintln(w, errorStyle.Render("◆ "+output))
+		}
+		return
+	}
 	fmt.Fprintln(w) // Print a leading blank line to separate from the tool call or previous elements
 	borderColor := theme.Success
 	title := "tool output"
@@ -300,29 +354,33 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		Foreground(theme.Text)
 
 	body := output
-	if strings.HasPrefix(output, "Successfully edited ") || strings.Contains(output, "● Edit") || strings.Contains(output, "edit:") {
-		collapse = false
-	}
-	if !isError && len(strings.Split(output, "\n")) > 4 {
-		if collapse {
-			body = fmt.Sprintf("success (returned %d lines, %d bytes) [/toggle or Ctrl+O to expand]", len(strings.Split(output, "\n")), len(output))
-		} else {
-			body = output + "\n[/toggle or Ctrl+O to collapse]"
+	if !isError && toolName == "read" {
+		lang := "plaintext"
+		var args struct {
+			Path string `json:"path"`
 		}
-	} else if collapse {
-		lines := strings.Split(output, "\n")
-		if len(lines) > 10 {
-			truncated := lines[:10]
-			body = strings.Join(truncated, "\n") + fmt.Sprintf("\n... (%d more lines) [/toggle or Ctrl+O to expand]", len(lines)-10)
+		if argsJSON != "" {
+			_ = json.Unmarshal([]byte(argsJSON), &args)
+			if args.Path != "" {
+				ext := filepath.Ext(args.Path)
+				if len(ext) > 1 {
+					lang = ext[1:]
+				}
+			}
 		}
-	} else {
-		lines := strings.Split(output, "\n")
-		if len(lines) > 10 {
-			body = output + "\n[/toggle or Ctrl+O to collapse]"
+
+		var codeBuf bytes.Buffer
+		err := quick.Highlight(&codeBuf, output, lang, "terminal16", "friendly")
+		if err == nil {
+			body = codeBuf.String()
 		}
 	}
 
-	fmt.Fprintln(w, titleStyle.Render(title+":"))
+	isEditDiff := !isError && (toolName == "edit")
+
+	if !isEditDiff {
+		fmt.Fprintln(w, titleStyle.Render(title+":"))
+	}
 	for _, line := range strings.Split(body, "\n") {
 		var renderedLine string
 		if strings.Contains(line, "\x1b[") {
@@ -360,4 +418,21 @@ func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UIT
 
 	fmt.Fprint(w, borderStyle.Render(strings.TrimSuffix(sb.String(), "\n")))
 	fmt.Fprintln(w)
+}
+
+func FormatToolTitle(symbol string, toolName string, path string, theme UITheme) string {
+	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+	pathStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
+
+	if path != "" {
+		relPath := path
+		wd, err := os.Getwd()
+		if err == nil {
+			if rel, err := filepath.Rel(wd, path); err == nil {
+				relPath = rel
+			}
+		}
+		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
+	}
+	return fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
 }
