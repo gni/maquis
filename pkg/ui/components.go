@@ -33,7 +33,7 @@ func PrintBanner(w io.Writer, cfg *config.Config) {
   (  =^=  )
    \_____/`
 
-	info := fmt.Sprintf("Bidouille CLI v1.0.0\nEndpoint: %s\nModel:    %s", cfg.Endpoint, cfg.Model)
+	info := fmt.Sprintf("bidouille v1.0.0\nendpoint: %s\nmodel:    %s", cfg.Endpoint, cfg.Model)
 
 	joined := style.JoinHorizontal(
 		style.Center,
@@ -331,13 +331,6 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	if toolName == "write" {
-		if isError {
-			errorStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-			fmt.Fprintln(w, errorStyle.Render("◆ "+output))
-		}
-		return
-	}
 	fmt.Fprintln(w) // Print a leading blank line to separate from the tool call or previous elements
 	borderColor := theme.Success
 	title := "tool output"
@@ -354,13 +347,18 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		Foreground(theme.Text)
 
 	body := output
-	if !isError && toolName == "read" {
+	if !isError && (toolName == "read" || toolName == "write") {
 		lang := "plaintext"
 		var args struct {
-			Path string `json:"path"`
+			Path         string `json:"path"`
+			Content      string `json:"content"`
+			WriteContent string `json:"write_content"`
 		}
 		if argsJSON != "" {
 			_ = json.Unmarshal([]byte(argsJSON), &args)
+			if args.Content == "" && args.WriteContent != "" {
+				args.Content = args.WriteContent
+			}
 			if args.Path != "" {
 				ext := filepath.Ext(args.Path)
 				if len(ext) > 1 {
@@ -369,19 +367,30 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 			}
 		}
 
+		if toolName == "write" && args.Content != "" {
+			body = args.Content
+		}
+
+		chromaStyle := theme.ChromaStyle
+		if chromaStyle == "" {
+			chromaStyle = "friendly"
+		}
 		var codeBuf bytes.Buffer
-		err := quick.Highlight(&codeBuf, output, lang, "terminal16", "friendly")
+		err := quick.Highlight(&codeBuf, body, lang, "terminal16", chromaStyle)
 		if err == nil {
 			body = codeBuf.String()
 		}
 	}
 
-	isEditDiff := !isError && (toolName == "edit")
+	isQuietTitle := !isError
 
-	if !isEditDiff {
+	if !isQuietTitle {
 		fmt.Fprintln(w, titleStyle.Render(title+":"))
 	}
-	for _, line := range strings.Split(body, "\n") {
+
+	body = strings.TrimRight(body, "\r\n")
+	lines := strings.Split(body, "\n")
+	printLine := func(line string) {
 		var renderedLine string
 		if strings.Contains(line, "\x1b[") {
 			renderedLine = line
@@ -389,6 +398,19 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 			renderedLine = bodyStyle.Render(line)
 		}
 		fmt.Fprintln(w, renderedLine)
+	}
+
+	if collapse && len(lines) > 8 {
+		for i := 0; i < 8; i++ {
+			printLine(lines[i])
+		}
+		collapsedCount := len(lines) - 8
+		collapsedMsg := fmt.Sprintf("  ... [%d lines collapsed. Press Ctrl+O or type /expand to view full output] ...", collapsedCount)
+		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Border).Italic(true).Render(collapsedMsg))
+	} else {
+		for _, line := range lines {
+			printLine(line)
+		}
 	}
 }
 

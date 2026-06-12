@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ type mcpClient struct {
 	requestMu   sync.Mutex
 	nextID      int64
 	initialized bool
+	client      *http.Client
 }
 
 type MCPTool struct {
@@ -60,6 +62,9 @@ func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error
 			config:   cfg,
 			requests: make(map[int64]chan string),
 			nextID:   1,
+			client: &http.Client{
+				Timeout: 30 * time.Second,
+			},
 		}
 
 		err := client.start()
@@ -144,13 +149,16 @@ func (c *mcpClient) start() error {
 }
 
 func (c *mcpClient) startSSE() error {
-	req, err := http.NewRequest("GET", c.config.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", c.config.URL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -180,7 +188,10 @@ func (c *mcpClient) startSSE() error {
 							postURL = parsedBase.ResolveReference(parsedRel).String()
 						}
 					}
-					endpointChan <- postURL
+					select {
+					case endpointChan <- postURL:
+					default:
+					}
 				} else {
 					c.handleMessage(data)
 				}
@@ -229,7 +240,10 @@ func (c *mcpClient) handleMessage(data string) {
 		ch, exists := c.requests[*msg.ID]
 		if exists {
 			delete(c.requests, *msg.ID)
-			ch <- data
+			select {
+			case ch <- data:
+			default:
+			}
 		}
 		c.requestMu.Unlock()
 	}
@@ -243,21 +257,36 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 	c.requests[id] = ch
 	c.requestMu.Unlock()
 
-	req := map[string]interface{}{
+	reqMap := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  method,
 	}
 	if params != nil {
-		req["params"] = params
+		reqMap["params"] = params
 	}
 
-	data, err := json.Marshal(req)
+	data, err := json.Marshal(reqMap)
 	if err != nil {
+		c.requestMu.Lock()
+		delete(c.requests, id)
+		c.requestMu.Unlock()
 		return "", err
 	}
 
-	resp, err := http.Post(c.postURL, "application/json", bytes.NewBuffer(data))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.postURL, bytes.NewBuffer(data))
+	if err != nil {
+		c.requestMu.Lock()
+		delete(c.requests, id)
+		c.requestMu.Unlock()
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
 	if err != nil {
 		c.requestMu.Lock()
 		delete(c.requests, id)
@@ -265,6 +294,7 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		c.requestMu.Lock()
 		delete(c.requests, id)
@@ -275,11 +305,11 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 	select {
 	case res := <-ch:
 		return res, nil
-	case <-time.After(15 * time.Second):
+	case <-ctx.Done():
 		c.requestMu.Lock()
 		delete(c.requests, id)
 		c.requestMu.Unlock()
-		return "", fmt.Errorf("request timeout")
+		return "", fmt.Errorf("request timeout or cancellation")
 	}
 }
 
@@ -315,13 +345,22 @@ func (c *mcpClient) handshake() error {
 		return fmt.Errorf("MCP error: %s", resp.Error.Message)
 	}
 
-	// Send initialized notification
-	req := map[string]interface{}{
+	reqMap := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
 	}
-	data, _ := json.Marshal(req)
-	_, _ = http.Post(c.postURL, "application/json", bytes.NewBuffer(data))
+	data, _ := json.Marshal(reqMap)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.postURL, bytes.NewBuffer(data))
+	if err == nil {
+		req.Header.Set("Content-Type", "application/json")
+		if respDrop, errDrop := c.client.Do(req); errDrop == nil {
+			respDrop.Body.Close()
+		}
+	}
 
 	c.initialized = true
 	return nil
@@ -399,9 +438,9 @@ func (c *mcpClient) callTool(name string, arguments string) (string, error) {
 	}
 
 	var output []string
-	for _, c := range resp.Result.Content {
-		if c.Type == "text" {
-			output = append(output, c.Text)
+	for _, comp := range resp.Result.Content {
+		if comp.Type == "text" {
+			output = append(output, comp.Text)
 		}
 	}
 

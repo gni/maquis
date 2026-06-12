@@ -40,8 +40,6 @@ type Agent struct {
 	ThinkingSupported      bool
 	ThinkingSupportChecked bool
 
-	PasteBuffer            string
-
 	lastToolOutput         string
 	lastToolIsError        bool
 	lastToolTheme          ui.UITheme
@@ -141,13 +139,14 @@ func (a *Agent) compressHistory(
 	theme ui.UITheme,
 	w io.Writer,
 ) {
-	if len(*messages) <= 12 {
-		return
+	keepMsgCount := 10
+	if len(*messages) <= keepMsgCount+2 {
+		keepMsgCount = 4
 	}
 
-	keepIdx := len(*messages) - 10
-	if keepIdx < 1 {
-		keepIdx = 1
+	keepIdx := len(*messages) - keepMsgCount
+	if keepIdx <= 1 {
+		return
 	}
 
 	toCompress := (*messages)[1:keepIdx]

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 type bashTool struct{}
@@ -72,18 +73,18 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	output := SanitizeUTF8(stdout.Bytes())
 	errOutput := SanitizeUTF8(stderr.Bytes())
 
-	combined := ""
-	if output != "" {
-		combined += fmt.Sprintf("STDOUT:\n%s\n", output)
-	}
+	combined := output
 	if errOutput != "" {
-		combined += fmt.Sprintf("STDERR:\n%s\n", errOutput)
-	}
-	if combined == "" {
-		combined = "(command completed with no output)"
+		if combined != "" && !strings.HasSuffix(combined, "\n") {
+			combined += "\n"
+		}
+		combined += errOutput
 	}
 
 	if err != nil {
+		if combined == "" {
+			combined = fmt.Sprintf("command failed: %v", err)
+		}
 		return combined, fmt.Errorf("command failed: %w", err)
 	}
 	return combined, nil

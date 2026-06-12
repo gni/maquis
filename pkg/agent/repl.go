@@ -181,12 +181,14 @@ func (cw crnlWriter) Write(p []byte) (int, error) {
 }
 
 type keyInterceptorReader struct {
-	r          io.Reader
-	agent      *Agent
-	theme      ui.UITheme
-	w          io.Writer
-	rl         *term.Terminal
-	lineBuffer []byte
+	r                io.Reader
+	agent            *Agent
+	theme            ui.UITheme
+	w                io.Writer
+	rl               *term.Terminal
+	currentInputLine string
+	messages         *[]db.Message
+	pasteRemaining   []byte
 }
 
 func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
@@ -197,6 +199,12 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 }
 
 func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
+	if len(ki.pasteRemaining) > 0 {
+		n := copy(p, ki.pasteRemaining)
+		ki.pasteRemaining = ki.pasteRemaining[n:]
+		return n, nil
+	}
+
 	n, err := ki.r.Read(p)
 	if err != nil {
 		return n, err
@@ -232,28 +240,33 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			}
 		}
 
-		// Store complete paste
-		prefix := string(ki.lineBuffer)
-		ki.lineBuffer = nil
-		ki.agent.PasteBuffer = prefix + string(pasteBytes)
+		// Replace newlines/carriage returns with ↵ symbol for visual representation and to prevent instant submission
+		var cleanedBytes []byte
+		for _, b := range pasteBytes {
+			if b == '\n' || b == '\r' {
+				cleanedBytes = append(cleanedBytes, []byte("↵")...)
+			} else {
+				cleanedBytes = append(cleanedBytes, b)
+			}
+		}
 
-		// Print paste remainder to terminal (using \r\n to format correctly in raw mode)
-		outputStr := strings.ReplaceAll(string(pasteBytes), "\r\n", "\r\n")
-		outputStr = strings.ReplaceAll(outputStr, "\n", "\r\n")
-		fmt.Fprint(ki.w, outputStr)
+		// Copy to p and buffer the rest
+		nCopied := copy(p, cleanedBytes)
+		if nCopied < len(cleanedBytes) {
+			ki.pasteRemaining = cleanedBytes[nCopied:]
+		}
 
-		p[0] = '\n'
-		return 1, nil
+		return nCopied, nil
 	}
 
 	writeIdx := 0
 	for i := 0; i < n; i++ {
 		b := p[i]
-		if b == 20 || b == 18 { // Ctrl+T or Ctrl+R
+		if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
 			if b == 20 { // Ctrl+T
 				ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-			} else { // Ctrl+R
+			} else if b == 18 { // Ctrl+R
 				nextEffort := "low"
 				switch strings.ToLower(ki.agent.Config.ReasoningEffort) {
 				case "low":
@@ -269,40 +282,35 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 				}
 				ki.agent.Config.ReasoningEffort = nextEffort
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+			} else if b == 15 { // Ctrl+O
+				ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
+				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+				ui.SetCollapseStatus(ki.agent.Config.CollapseResults)
 			}
 
 			if ki.rl != nil {
-				promptStyle := style.NewStyle().Foreground(ki.theme.Primary).Bold(true)
+				activeTheme := ui.GetTheme(ki.agent.Config.Theme)
+				promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
 				promptStr := promptStyle.Render("> ")
 				ki.rl.SetPrompt(promptStr)
 
 				cw := crnlWriter{w: ki.w}
-				fmt.Fprintf(cw, "\x1b[1A\r\x1b[K")
-				ki.agent.PrintPromptSeparator(cw, ki.theme)
-				fmt.Fprintf(cw, "\r\x1b[K%s%s", promptStr, string(ki.lineBuffer))
+				// Clear screen and scrollback
+				fmt.Fprint(cw, "\x1b[H\x1b[2J")
+				// Print banner
+				ui.PrintBanner(cw, ki.agent.Config)
+				// Print history with updated settings
+				if ki.messages != nil {
+					printSessionHistory(cw, *ki.messages, activeTheme, ki.agent.Config)
+				}
+				// Print prompt separator
+				ki.agent.PrintPromptSeparator(cw, activeTheme)
+				// Draw status bar
+				ui.DrawStatusBar(cw, activeTheme)
+				// Restore prompt and typed input
+				fmt.Fprintf(cw, "\r\x1b[K%s%s", promptStr, ki.currentInputLine)
 			}
 			// Skip returning this byte to term.Terminal
-		} else if b == 13 || b == 10 { // Enter
-			if strings.TrimSpace(string(ki.lineBuffer)) == "" {
-				continue
-			}
-			ki.lineBuffer = nil
-			p[writeIdx] = b
-			writeIdx++
-		} else if b == 127 || b == 8 { // Backspace
-			if len(ki.lineBuffer) > 0 {
-				ki.lineBuffer = ki.lineBuffer[:len(ki.lineBuffer)-1]
-			}
-			p[writeIdx] = b
-			writeIdx++
-		} else if (b >= 32 && b <= 126) || b == 9 { // Printable character or Tab
-			if b == 9 {
-				ki.lineBuffer = append(ki.lineBuffer, '_') // Append dummy non-whitespace character for Tab autocomplete
-			} else {
-				ki.lineBuffer = append(ki.lineBuffer, b)
-			}
-			p[writeIdx] = b
-			writeIdx++
 		} else {
 			p[writeIdx] = b
 			writeIdx++
@@ -342,6 +350,7 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 
 	ui.InitStatusBar(os.Stderr)
 	defer ui.ShutdownStatusBar(os.Stderr)
+	ui.SetCollapseStatus(a.Config.CollapseResults)
 	ui.UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0)
 	ui.DrawStatusBar(os.Stderr, theme)
 
@@ -355,18 +364,21 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 	}
 
 	kiReader := &keyInterceptorReader{
-		r:     os.Stdin,
-		agent: a,
-		theme: theme,
-		w:     os.Stderr,
+		r:        os.Stdin,
+		agent:    a,
+		theme:    theme,
+		w:        os.Stderr,
+		messages: &messages,
 	}
 	rl := term.NewTerminal(kiReader, "")
 	kiReader.rl = rl
 	rl.History = hist
-	rl.AutoCompleteCallback = autoCompleteCallback
+	rl.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
+		kiReader.currentInputLine = line
+		return autoCompleteCallback(line, pos, key)
+	}
 
 	for {
-		kiReader.lineBuffer = nil
 		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		promptStr := promptStyle.Render("> ")
 		rl.SetPrompt(promptStr)
@@ -384,13 +396,12 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			break
 		}
 
-		if kiReader.agent.PasteBuffer != "" {
-			line = kiReader.agent.PasteBuffer
-			kiReader.agent.PasteBuffer = ""
-		}
+		kiReader.currentInputLine = ""
+
+		// Restore original newlines for pasted multiline content
+		line = strings.ReplaceAll(line, "↵", "\n")
 
 		if strings.TrimSpace(line) == "" {
-			a.PrintPromptSeparator(os.Stderr, theme)
 			ui.DrawStatusBar(os.Stderr, theme)
 			continue
 		}

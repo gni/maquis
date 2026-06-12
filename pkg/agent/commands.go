@@ -44,7 +44,22 @@ func (a *Agent) HandleSlashCommand(
 	case "/exit", "/quit":
 		return true, true
 	case "/toggle", "/collapse", "/expand":
-		fmt.Fprintln(w, "Results collapsing is currently disabled.")
+		if cmdName == "/collapse" {
+			a.Config.CollapseResults = true
+		} else if cmdName == "/expand" {
+			a.Config.CollapseResults = false
+		} else {
+			a.Config.CollapseResults = !a.Config.CollapseResults
+		}
+		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		pTok, cTok := calcHistoryTokens()
+		ui.SetCollapseStatus(a.Config.CollapseResults)
+		ui.UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0)
+
+		// Clear screen and redraw everything up to history
+		fmt.Fprint(w, "\x1b[H\x1b[2J")
+		ui.PrintBanner(w, a.Config)
+		printSessionHistory(w, *messages, *theme, a.Config)
 		return true, false
 	case "/task":
 		if len(parts) < 2 {
@@ -390,6 +405,8 @@ func (a *Agent) HandleSlashCommand(
 		ui.InitStatusBar(os.Stderr)
 		ui.DrawStatusBar(os.Stderr, *theme)
 		if err == nil && strings.TrimSpace(multilinePrompt) != "" {
+			promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+			fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), multilinePrompt)
 			a.RunAgentLoop(w, messages, multilinePrompt, allowedTools, *theme, false, *currentSessionID)
 		} else {
 			fmt.Fprintln(w, "Multiline input cancelled.")
@@ -401,6 +418,8 @@ func (a *Agent) HandleSlashCommand(
 			return true, false
 		}
 		task := strings.TrimPrefix(line, "/goal ")
+		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), task)
 		a.RunAgentLoop(w, messages, task, allowedTools, *theme, false, *currentSessionID)
 		return true, false
 	case "/schedule":
@@ -470,16 +489,48 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 
+	var lastRole string
 	for _, msg := range messages {
 		if msg.Role == "system" {
 			continue
 		}
 
 		if msg.Role == "user" {
+			if strings.HasPrefix(msg.Content, "[User manually executed local shell command: `") {
+				firstTick := strings.Index(msg.Content, "`")
+				if firstTick != -1 {
+					rest := msg.Content[firstTick+1:]
+					secondTick := strings.Index(rest, "`")
+					if secondTick != -1 {
+						cmdStr := rest[:secondTick]
+						output := ""
+						newLineIdx := strings.Index(rest, "\n")
+						if newLineIdx != -1 {
+							output = rest[newLineIdx+1:]
+						}
+						if lastRole != "" {
+							fmt.Fprintln(w)
+						}
+						fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> !"), cmdStr)
+						if output != "" {
+							fmt.Fprint(w, output)
+						}
+						lastRole = "user"
+						continue
+					}
+				}
+			}
+
+			if lastRole != "" {
+				fmt.Fprintln(w)
+			}
 			fmt.Fprintln(w, borderStyle.Render("─── Prompt ───────────────────────────────────────────────"))
 			fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), msg.Content)
-			fmt.Fprintln(w, borderStyle.Render("──────────────────────────────────────────────────────────"))
 		} else if msg.Role == "assistant" {
+			if lastRole == "tool" {
+				fmt.Fprintln(w)
+			}
+			hasPrintedAnything := false
 			if msg.ReasoningContent != "" && cfg.ShowThinking {
 				dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 				fmt.Fprintln(w, dimStyle.Render(msg.ReasoningContent))
@@ -487,16 +538,23 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 
 				iconStyle := style.NewStyle().Foreground(theme.Success)
 				labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-				fmt.Fprintf(w, "%s %s\n\n", iconStyle.Render("✔"), labelStyle.Render("Thought"))
+				fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("Thought"))
+				hasPrintedAnything = true
 			}
 
 			if msg.Content != "" {
+				if hasPrintedAnything {
+					fmt.Fprintln(w)
+				}
 				fmt.Fprintln(w, msg.Content)
-				fmt.Fprintln(w)
+				hasPrintedAnything = true
 			}
 
 			if len(msg.ToolCalls) > 0 {
 				for _, tc := range msg.ToolCalls {
+					if hasPrintedAnything {
+						fmt.Fprintln(w)
+					}
 					var path string
 					var argsMap map[string]interface{}
 					if json.Unmarshal([]byte(tc.Function.Arguments), &argsMap) == nil {
@@ -519,7 +577,8 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 					} else {
 						title = ui.FormatToolTitle(symbol, tc.Function.Name, "", theme)
 					}
-					fmt.Fprintf(w, "\n%s\n", title)
+					fmt.Fprintln(w, title)
+					hasPrintedAnything = true
 				}
 			}
 		} else if msg.Role == "tool" {
@@ -545,5 +604,6 @@ func printSessionHistory(w io.Writer, messages []db.Message, theme ui.UITheme, c
 			}
 			ui.RenderToolOutput(w, msg.Content, false, cfg.CollapseResults, theme, toolName, argsJSON, -1)
 		}
+		lastRole = msg.Role
 	}
 }

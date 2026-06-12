@@ -155,7 +155,8 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				if p.currentKey == "content" || p.currentKey == "write_content" || p.currentKey == "command" {
+				isContentKey := p.currentKey == "content" || p.currentKey == "write_content" || p.currentKey == "command"
+				if isContentKey && p.activeToolName != "write" {
 					p.isContent = true
 					p.guessedLang = ""
 					if !p.titlePrinted {

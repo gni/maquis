@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"bidouille/pkg/agent/tool"
+	"bidouille/pkg/config"
 )
 
 func TestParseManualCommand(t *testing.T) {
@@ -380,6 +381,63 @@ def other():
 	}
 	if !strings.Contains(err.Error(), "is not unique") {
 		t.Errorf("Case 5 expected uniqueness error, got: %v", err)
+	}
+}
+
+func TestKeyInterceptorReader(t *testing.T) {
+	a := &Agent{
+		Config: &config.Config{
+			CollapseResults: false,
+			ShowThinking:    true,
+			ReasoningEffort: "low",
+		},
+	}
+
+	var buf bytes.Buffer
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader([]byte{15, 20, 18}), // Ctrl+O, Ctrl+T, Ctrl+R
+		agent: a,
+		w:     &buf,
+	}
+
+	p := make([]byte, 1)
+
+	// Read Ctrl+O (15)
+	n, err := ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read Ctrl+O: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+O, got %d", n)
+	}
+	if !a.Config.CollapseResults {
+		t.Errorf("expected CollapseResults to be true, got false")
+	}
+
+	// Read Ctrl+T (20)
+	ki.r = bytes.NewReader([]byte{20})
+	n, err = ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read Ctrl+T: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+T, got %d", n)
+	}
+	if a.Config.ShowThinking {
+		t.Errorf("expected ShowThinking to be false, got true")
+	}
+
+	// Read Ctrl+R (18)
+	ki.r = bytes.NewReader([]byte{18})
+	n, err = ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read Ctrl+R: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+R, got %d", n)
+	}
+	if a.Config.ReasoningEffort != "medium" {
+		t.Errorf("expected ReasoningEffort to be 'medium', got %q", a.Config.ReasoningEffort)
 	}
 }
 

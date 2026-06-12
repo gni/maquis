@@ -25,11 +25,36 @@ type StatusBarState struct {
 }
 
 var (
-	state      StatusBarState
-	stateMu    sync.Mutex
-	lastH      int
-	enabled    bool
+	state              StatusBarState
+	stateMu            sync.Mutex
+	lastH              int
+	enabled            bool
+	scrollRegionOffset int // extra lines reserved above the status bar (e.g. prompt separator + input)
+	collapseResults    bool
 )
+
+// SetCollapseStatus updates the results collapsing state in the status bar.
+func SetCollapseStatus(collapsed bool) {
+	stateMu.Lock()
+	collapseResults = collapsed
+	stateMu.Unlock()
+}
+
+// SetScrollRegionOffset reserves extra lines above the status bar's normal 2-line area.
+// For example, offset=2 reserves lines for a prompt separator and prompt input,
+// making the scroll region 1..height-4 instead of 1..height-2.
+func SetScrollRegionOffset(offset int) {
+	stateMu.Lock()
+	scrollRegionOffset = offset
+	stateMu.Unlock()
+}
+
+// ClearScrollRegionOffset resets the scroll region to the default (1..height-2).
+func ClearScrollRegionOffset() {
+	stateMu.Lock()
+	scrollRegionOffset = 0
+	stateMu.Unlock()
+}
 
 func getTerminalSize() (int, int) {
 	if w, h, err := term.GetSize(int(os.Stderr.Fd())); err == nil && h > 0 {
@@ -54,7 +79,7 @@ func InitStatusBar(w io.Writer) {
 		// Print newline and cursor up to ensure we scroll if we are near the bottom
 		fmt.Fprint(w, "\n\n\x1b[2A")
 		// Save cursor, set scroll region, restore cursor to prevent jumping to top
-		fmt.Fprintf(w, "\x1b[s\x1b[1;%dr\x1b[u", height-2)
+		fmt.Fprintf(w, "\x1b7\x1b[1;%dr\x1b8", height-2-scrollRegionOffset)
 		lastH = height
 	}
 }
@@ -102,12 +127,18 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 		return
 	}
 
-	// Always set the scrolling region to ensure it is not reset/overwritten by the terminal
-	fmt.Fprintf(w, "\x1b[s\x1b[1;%dr\x1b[u", height-2)
-	lastH = height
+	// Only set the scrolling region when the terminal height changes
+	scrollBottom := height - 2 - scrollRegionOffset
+	if scrollBottom < 1 {
+		scrollBottom = 1
+	}
+	if height != lastH {
+		fmt.Fprintf(w, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
+		lastH = height
+	}
 
 	// Save cursor
-	fmt.Fprint(w, "\x1b[s")
+	fmt.Fprint(w, "\x1b7")
 
 	// Draw separator line at height-1
 	fmt.Fprintf(w, "\x1b[%d;1H", height-1)
@@ -134,7 +165,7 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 	fmt.Fprintf(w, "%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
  
 	// Restore cursor
-	fmt.Fprint(w, "\x1b[u")
+	fmt.Fprint(w, "\x1b8")
 }
 
 func formatLeft(theme UITheme) string {
@@ -185,7 +216,14 @@ func formatRight(theme UITheme) string {
 		return ""
 	}
 	modelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-	return modelStyle.Render(state.Model) + " "
+
+	collapseStr := ""
+	if collapseResults {
+		collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+		collapseStr = collapseStyle.Render("[collapsed]") + " "
+	}
+
+	return collapseStr + modelStyle.Render(state.Model) + " "
 }
 
 func stripAnsi(str string) string {

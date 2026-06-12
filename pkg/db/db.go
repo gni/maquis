@@ -7,10 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+
+func validateSessionID(sessionID string) error {
+	if !sessionIDRegex.MatchString(sessionID) {
+		return fmt.Errorf("security violation: invalid session ID format")
+	}
+	return nil
+}
 
 func NewUUID() string {
 	b := make([]byte, 16)
@@ -20,10 +30,9 @@ func NewUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-
 type ToolFunction struct {
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // JSON string
+	Arguments string `json:"arguments"`
 }
 
 type ToolCall struct {
@@ -52,7 +61,6 @@ type SessionInfo struct {
 	TotalTokens int
 }
 
-// JSONLRecord wraps a message with metadata for JSONLines storage
 type JSONLRecord struct {
 	Timestamp string  `json:"timestamp"`
 	Message   Message `json:"message"`
@@ -61,7 +69,7 @@ type JSONLRecord struct {
 var sessionsDir string
 
 func InitDB(dirPath string) error {
-	sessionsDir = dirPath
+	sessionsDir = filepath.Clean(dirPath)
 	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create sessions directory: %w", err)
 	}
@@ -69,11 +77,13 @@ func InitDB(dirPath string) error {
 }
 
 func SaveMessage(sessionID string, msg Message) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
 	if sessionsDir == "" {
 		return fmt.Errorf("sessions directory not initialized")
 	}
 
-	// Filter out empty messages that aren't assistant role (matching SQLite cleanup logic)
 	if msg.Role != "assistant" && msg.Content == "" {
 		return nil
 	}
@@ -103,6 +113,9 @@ func SaveMessage(sessionID string, msg Message) error {
 }
 
 func LoadMessages(sessionID string) ([]Message, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
+	}
 	if sessionsDir == "" {
 		return nil, fmt.Errorf("sessions directory not initialized")
 	}
@@ -158,6 +171,10 @@ func ClearHistory() error {
 
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+			name := strings.TrimSuffix(entry.Name(), ".jsonl")
+			if err := validateSessionID(name); err != nil {
+				continue
+			}
 			filePath := filepath.Join(sessionsDir, entry.Name())
 			if err := os.Remove(filePath); err != nil {
 				return fmt.Errorf("failed to remove session file %s: %w", entry.Name(), err)
@@ -169,6 +186,9 @@ func ClearHistory() error {
 }
 
 func HasMessages(sessionID string) bool {
+	if err := validateSessionID(sessionID); err != nil {
+		return false
+	}
 	if sessionsDir == "" {
 		return false
 	}
@@ -181,6 +201,9 @@ func HasMessages(sessionID string) bool {
 }
 
 func ClearSession(sessionID string) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
 	if sessionsDir == "" {
 		return fmt.Errorf("sessions directory not initialized")
 	}
@@ -209,6 +232,10 @@ func GetLatestSessionID() (string, error) {
 
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+			name := strings.TrimSuffix(entry.Name(), ".jsonl")
+			if err := validateSessionID(name); err != nil {
+				continue
+			}
 			info, err := entry.Info()
 			if err != nil {
 				continue
@@ -248,6 +275,9 @@ func GetSessions() ([]SessionInfo, error) {
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
+		if err := validateSessionID(sessionID); err != nil {
+			continue
+		}
 		filePath := filepath.Join(sessionsDir, entry.Name())
 
 		f, err := os.Open(filePath)
@@ -325,7 +355,6 @@ func GetSessions() ([]SessionInfo, error) {
 		})
 	}
 
-	// Sort sessions by Timestamp descending, so latest session is first
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].Timestamp > sessions[j].Timestamp
 	})
@@ -355,6 +384,11 @@ func GetUserHistory() ([]string, error) {
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+
+		sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
+		if err := validateSessionID(sessionID); err != nil {
 			continue
 		}
 
@@ -388,7 +422,6 @@ func GetUserHistory() ([]string, error) {
 		})
 	}
 
-	// Sort sessions chronologically (ascending)
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].startTime < files[j].startTime
 	})

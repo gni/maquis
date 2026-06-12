@@ -14,7 +14,7 @@ import (
 type Task struct {
 	ID        string
 	Command   string
-	Status    string // "running", "completed", "failed", "killed"
+	Status    string
 	Stdout    *bytes.Buffer
 	Stderr    *bytes.Buffer
 	Cmd       *exec.Cmd
@@ -99,8 +99,6 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 	go func() {
 		waitErr := cmd.Wait()
 		task.mu.Lock()
-		defer task.mu.Unlock()
-
 		task.EndTime = time.Now()
 		if task.Status == "running" {
 			if waitErr != nil {
@@ -110,12 +108,13 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 				task.Status = "completed"
 			}
 		}
+		finalStatus := task.Status
+		task.mu.Unlock()
 
-		// If this was the streaming task, stop streaming when it exits
 		a.TasksMu.Lock()
 		if a.StreamingTask == task.ID {
 			a.StreamingTask = ""
-			fmt.Fprintf(w, "\n[Task %s finished with status: %s]\n", task.ID, task.Status)
+			fmt.Fprintf(w, "\n[Task %s finished with status: %s]\n", task.ID, finalStatus)
 		}
 		a.TasksMu.Unlock()
 	}()

@@ -21,7 +21,7 @@ type JSONSchema = tool.JSONSchema
 type SchemaProp = tool.SchemaProp
 
 type StreamChunk struct {
-	Type          string // "text" or "reasoning"
+	Type          string
 	Content       string
 	ToolCallIndex int
 }
@@ -53,10 +53,10 @@ type ChatCompletionRequest struct {
 type ChatCompletionResponseChunk struct {
 	ID      string `json:"id"`
 	Choices []struct {
-		Index        int `json:"index"`
-		Delta        struct {
+		Index int `json:"index"`
+		Delta struct {
 			Content          string        `json:"content"`
-			ReasoningContent string        `json:"reasoning_content"` // Support reasoning step
+			ReasoningContent string        `json:"reasoning_content"`
 			ToolCalls        []db.ToolCall `json:"tool_calls"`
 			Role             string        `json:"role"`
 		} `json:"delta"`
@@ -69,13 +69,12 @@ type ChatCompletionResponseChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-
-
-
-
 func (a *Agent) CheckThinkingSupport() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	url := fmt.Sprintf("%s/props?model=%s", strings.TrimSuffix(a.Config.Endpoint, "/"), a.Config.Model)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
@@ -162,7 +161,11 @@ func (a *Agent) StreamChatCompletions(
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
 		}
 
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
@@ -194,7 +197,6 @@ func (a *Agent) StreamChatCompletions(
 			return nil, lastErr
 		}
 
-		// Request succeeded
 		lastErr = nil
 		break
 	}
@@ -213,6 +215,12 @@ func (a *Agent) StreamChatCompletions(
 	var generationStart time.Time
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -257,19 +265,16 @@ func (a *Agent) StreamChatCompletions(
 			}
 		}
 
-		// 1. Process reasoning/thinking delta
 		if choice.Delta.ReasoningContent != "" {
 			reasoningBuilder.WriteString(choice.Delta.ReasoningContent)
 			chunkChan <- StreamChunk{Type: "reasoning", Content: choice.Delta.ReasoningContent}
 		}
 
-		// 2. Process regular content delta
 		if choice.Delta.Content != "" {
 			textBuilder.WriteString(choice.Delta.Content)
 			chunkChan <- StreamChunk{Type: "text", Content: choice.Delta.Content}
 		}
 
-		// 3. Process tool calls
 		if len(choice.Delta.ToolCalls) > 0 {
 			for _, tc := range choice.Delta.ToolCalls {
 				idx := 0
@@ -310,7 +315,6 @@ func (a *Agent) StreamChatCompletions(
 		a.lastGenerationDuration = 0
 	}
 
-	// Fallback token estimation if not provided by stream metadata
 	if promptTokens == 0 {
 		totalChars := 0
 		for _, msg := range messages {
@@ -346,7 +350,3 @@ func (a *Agent) StreamChatCompletions(
 
 	return assistantMsg, nil
 }
-
-
-
-

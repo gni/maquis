@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -65,6 +66,9 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	unlock := lockPath(safePath)
+	defer unlock()
 
 	info, err := os.Stat(safePath)
 	if err != nil {
@@ -144,17 +148,24 @@ func (t *writeTool) Definition() Tool {
 
 func (t *writeTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
-		Path    string `json:"path"`
-		Content string `json:"write_content"`
+		Path         string `json:"path"`
+		Content      string `json:"content"`
+		WriteContent string `json:"write_content"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Content == "" && args.WriteContent != "" {
+		args.Content = args.WriteContent
 	}
 
 	safePath, err := ctx.SafePath(args.Path)
 	if err != nil {
 		return "", err
 	}
+
+	unlock := lockPath(safePath)
+	defer unlock()
 
 	// Code Omission Protection
 	if placeholders := DetectOmissionPlaceholders(args.Content); len(placeholders) > 0 {
@@ -221,6 +232,9 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", err
 	}
 
+	unlock := lockPath(safePath)
+	defer unlock()
+
 	edits := args.Edits
 	if args.OldText != "" && args.NewText != "" {
 		edits = append(edits, ReplaceEdit{OldText: args.OldText, NewText: args.NewText})
@@ -278,8 +292,9 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 				for fs := 0; fs <= len(fileLines)-len(coreOldLines); fs++ {
 					matched := true
 					for j := 0; j < len(coreOldLines); j++ {
-						fileLineTrimmed := strings.TrimSpace(fileLines[fs+j])
-						if fileLineTrimmed != coreOldLines[j] {
+						fileLineNormalized := normalizeSpace(fileLines[fs+j])
+						oldLineNormalized := normalizeSpace(coreOldLines[j])
+						if fileLineNormalized != oldLineNormalized {
 							matched = false
 							break
 						}
@@ -497,4 +512,32 @@ func DetectOmissionPlaceholders(text string) []string {
 		}
 	}
 	return matches
+}
+
+var (
+	fileLocks   = make(map[string]*sync.Mutex)
+	fileLocksMu sync.Mutex
+)
+
+func lockPath(path string) func() {
+	fileLocksMu.Lock()
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	mu, exists := fileLocks[absPath]
+	if !exists {
+		mu = &sync.Mutex{}
+		fileLocks[absPath] = mu
+	}
+	fileLocksMu.Unlock()
+
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
+
+func normalizeSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

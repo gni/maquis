@@ -20,11 +20,16 @@ import (
 	"bidouille/pkg/ui"
 )
 
-
+// RunAgentLoop executes the main agent reasoning, inference, and tool execution cycle.
 func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme ui.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return
+	}
+
+	writerToUse := w
+	if !isNonInteractive {
+		ui.DrawStatusBar(w, theme)
 	}
 
 	var totalCompletionTokens int
@@ -101,7 +106,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			close(chunkChan)
 		}()
 
-		ncw := &newlineCounterWriter{Writer: w}
+		ncw := &newlineCounterWriter{Writer: writerToUse}
 		sr := ui.NewStreamRenderer(ncw, theme, a.Config.ShowThinking)
 
 		stopKeyListen := make(chan struct{})
@@ -154,6 +159,8 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 								}
 								infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
 								fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+O: Tool results will be %s]", status)))
+								ui.SetCollapseStatus(a.Config.CollapseResults)
+								ui.DrawStatusBar(w, theme)
 							}
 						} else if buf[0] == 20 { // Ctrl+T
 							a.Config.ShowThinking = !a.Config.ShowThinking
@@ -202,6 +209,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		var toolCallChars int
 		var generationStart time.Time
 
+		var lastDraw time.Time
 		for chunk := range chunkChan {
 			if chunk.Type == "reasoning" {
 				if generationStart.IsZero() {
@@ -233,24 +241,27 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			}
 
 			if !isNonInteractive {
-				currentCompletionTokensEst := (reasoningChars + textChars + toolCallChars) / 4
-				globalCompletionTokensEst := priorCompletionTokens + currentCompletionTokensEst
-				var tps float64
-				if !generationStart.IsZero() {
-					elapsed := time.Since(generationStart).Seconds()
-					if elapsed > 0 {
-						tps = float64(currentCompletionTokensEst) / elapsed
+				now := time.Now()
+				if lastDraw.IsZero() || now.Sub(lastDraw) >= 200*time.Millisecond {
+					currentCompletionTokensEst := (reasoningChars + textChars + toolCallChars) / 4
+					globalCompletionTokensEst := priorCompletionTokens + currentCompletionTokensEst
+					var tps float64
+					if !generationStart.IsZero() {
+						elapsed := now.Sub(generationStart).Seconds()
+						if elapsed > 0 {
+							tps = float64(currentCompletionTokensEst) / elapsed
+						}
 					}
+					ui.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps)
+					ui.DrawStatusBar(w, theme)
+					lastDraw = now
 				}
-				ui.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps)
-				ui.DrawStatusBar(ncw, theme)
 			}
 		}
 		close(stopKeyListen)
 		<-keyListenDone
 		sr.Flush()
 
-		// Fallback if title was never printed
 		if parser.activeToolName != "" {
 			if !parser.titlePrinted {
 				parser.printStreamTitle(ncw, theme)
@@ -304,7 +315,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				currentCStr = fmt.Sprintf("%.1fk out", float64(assistantMsg.CompletionTokens)/1000.0)
 			}
 
-
 			cStyled := style.NewStyle().Foreground(theme.Highlight).Render(currentCStr)
 			dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
 
@@ -319,7 +329,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 					fmt.Fprintln(w, timeStyled)
 				}
 			} else {
-				// Non-interactive fallback showing Context too
 				totalTokens := assistantMsg.PromptTokens + assistantMsg.CompletionTokens
 				pct := (float64(totalTokens) / float64(a.Config.ContextWindowLimit)) * 100.0
 				totStr := fmt.Sprintf("%d", totalTokens)
@@ -342,7 +351,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 
 		if !isNonInteractive {
 			ui.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps)
-			ui.DrawStatusBar(ncw, theme)
+			ui.DrawStatusBar(w, theme)
 		}
 
 		type toolExecutionResult struct {
@@ -355,7 +364,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		resultsChan := make(chan toolExecutionResult, len(assistantMsg.ToolCalls))
 		var wg sync.WaitGroup
 
-		// Ask for approvals sequentially to avoid stdout race conditions
 		var approvedBatch []db.ToolCall
 		var rejectedBatch []db.ToolCall
 
@@ -368,7 +376,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			if !approved {
 				var always bool
 				approved, always = ui.AskForApproval(ncw, theme)
-				ncw.count++
 				if always {
 					a.Config.AutoApprove = true
 					a.Config.YoloMode = true
@@ -382,7 +389,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			}
 		}
 
-		// If any tools were rejected, we fail-fast immediately (same as before)
 		if len(rejectedBatch) > 0 {
 			for _, tc := range rejectedBatch {
 				toolOutput := "Tool execution rejected by user."
@@ -402,7 +408,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			return
 		}
 
-		// Execute approved tools in parallel
 		if len(approvedBatch) > 0 {
 			stopSpinner := make(chan struct{})
 			spinnerDone := make(chan struct{})
@@ -416,7 +421,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 				toolsStr := strings.Join(toolNames, ", ")
 
-				// Render the first frame immediately so it shows up even for sub-millisecond execution
 				fmt.Fprintf(ncw, "\r\x1b[K%s Executing %d tools (%s)...",
 					style.NewStyle().Foreground(theme.Secondary).Render(frames[0]),
 					len(approvedBatch),
@@ -463,7 +467,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 					}
 
 					out, err := a.Registry.Execute(a, call.Function.Name, call.Function.Arguments)
-
 					out, err = a.runAfterToolHook(call, out, err)
 
 					resultsChan <- toolExecutionResult{
@@ -481,7 +484,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			fmt.Fprint(ncw, "\r\x1b[K")
 			close(resultsChan)
 
-			// Collect results and sort them to preserve call order
 			sortedResults := make([]toolExecutionResult, len(approvedBatch))
 			for r := range resultsChan {
 				sortedResults[r.index] = r
@@ -506,7 +508,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 
 				ui.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, r.tc.Function.Name, r.tc.Function.Arguments, newlineDist)
 
-				// Prefer keeping edit diffs in lastToolOutput over read-only tools output
 				isReadOnlyTool := r.tc.Function.Name == "read" || r.tc.Function.Name == "ls" || r.tc.Function.Name == "grep" || r.tc.Function.Name == "find"
 				isPrevEdit := a.lastToolWasEdit
 

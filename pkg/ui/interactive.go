@@ -27,6 +27,7 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 		fd = int(tty.Fd())
 	}
 
+
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 	fmt.Fprint(output, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
 
@@ -41,28 +42,48 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	buf := make([]byte, 1)
 	n, err := input.Read(buf)
 	if err != nil || n == 0 {
-		fmt.Fprintln(output)
+		if isTerm {
+			fmt.Fprint(output, "\r\x1b[K")
+		} else {
+			fmt.Fprintln(output)
+		}
 		return false, false
 	}
 
 	char := buf[0]
 	// Handle Ctrl+C (3) or Esc (27)
 	if char == 3 || char == 27 {
-		fmt.Fprintln(output, "rejected")
+		if isTerm {
+			fmt.Fprint(output, "\r\x1b[K")
+		} else {
+			fmt.Fprintln(output, "rejected")
+		}
 		return false, false
 	}
 
 	if char == 'y' || char == 'Y' {
-		fmt.Fprintln(output, "y")
+		if isTerm {
+			fmt.Fprint(output, "\r\x1b[K")
+		} else {
+			fmt.Fprintln(output, "y")
+		}
 		return true, false
 	} else if char == 'a' || char == 'A' {
-		fmt.Fprintln(output, "always")
+		if isTerm {
+			fmt.Fprint(output, "\r\x1b[K")
+		} else {
+			fmt.Fprintln(output, "always")
+		}
 		return true, true
 	} else {
-		if char == '\r' || char == '\n' {
-			fmt.Fprintln(output, "n")
+		if isTerm {
+			fmt.Fprint(output, "\r\x1b[K")
 		} else {
-			fmt.Fprintf(output, "%c\n", char)
+			if char == '\r' || char == '\n' {
+				fmt.Fprintln(output, "n")
+			} else {
+				fmt.Fprintf(output, "%c\n", char)
+			}
 		}
 		return false, false
 	}

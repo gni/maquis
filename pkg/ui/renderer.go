@@ -91,7 +91,7 @@ func (sr *StreamRenderer) endThinking() {
 		iconStyle := style.NewStyle().Foreground(sr.theme.Success)
 		labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 
-		fmt.Fprintf(sr.w, "%s %s\n", 
+		fmt.Fprintf(sr.w, "%s %s\n\n", 
 			iconStyle.Render("✔"),
 			labelStyle.Render(fmt.Sprintf("Thought (%.1fs)", elapsed)),
 		)
