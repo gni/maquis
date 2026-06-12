@@ -8,86 +8,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
+	"bidouille/pkg/agent/tool"
 	"bidouille/pkg/db"
 )
 
-type Tool struct {
-	Type     string             `json:"type"`
-	Function FunctionDefinition `json:"function"`
-}
-
-type FunctionDefinition struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Parameters  interface{} `json:"parameters"`
-}
-
-type JSONSchema struct {
-	Type       string                `json:"type"`
-	Properties map[string]SchemaProp `json:"properties"`
-	Required   []string              `json:"required,omitempty"`
-}
-
-func (j JSONSchema) MarshalJSON() ([]byte, error) {
-	var propsParts []string
-
-	orderedKeys := []string{"path", "command"}
-	for _, key := range orderedKeys {
-		if prop, ok := j.Properties[key]; ok {
-			propBytes, err := json.Marshal(prop)
-			if err != nil {
-				return nil, err
-			}
-			propsParts = append(propsParts, fmt.Sprintf("%q:%s", key, string(propBytes)))
-		}
-	}
-
-	var otherKeys []string
-	for k := range j.Properties {
-		isOrdered := false
-		for _, ok := range orderedKeys {
-			if k == ok {
-				isOrdered = true
-				break
-			}
-		}
-		if !isOrdered {
-			otherKeys = append(otherKeys, k)
-		}
-	}
-	sort.Strings(otherKeys)
-
-	for _, k := range otherKeys {
-		propBytes, err := json.Marshal(j.Properties[k])
-		if err != nil {
-			return nil, err
-		}
-		propsParts = append(propsParts, fmt.Sprintf("%q:%s", k, string(propBytes)))
-	}
-
-	propsJSON := "{" + strings.Join(propsParts, ",") + "}"
-
-	var requiredJSON string
-	if len(j.Required) > 0 {
-		reqBytes, err := json.Marshal(j.Required)
-		if err != nil {
-			return nil, err
-		}
-		requiredJSON = fmt.Sprintf(",%q:%s", "required", string(reqBytes))
-	}
-
-	fullJSON := fmt.Sprintf("{%q:%q,%q:%s%s}", "type", j.Type, "properties", propsJSON, requiredJSON)
-	return []byte(fullJSON), nil
-}
-
-type SchemaProp struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
-}
+type Tool = tool.Tool
+type FunctionDefinition = tool.FunctionDefinition
+type JSONSchema = tool.JSONSchema
+type SchemaProp = tool.SchemaProp
 
 type StreamChunk struct {
 	Type          string // "text" or "reasoning"
@@ -95,10 +26,7 @@ type StreamChunk struct {
 	ToolCallIndex int
 }
 
-type ReplaceEdit struct {
-	OldText string `json:"oldText"`
-	NewText string `json:"newText"`
-}
+type ReplaceEdit = tool.ReplaceEdit
 
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`

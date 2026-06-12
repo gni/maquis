@@ -102,11 +102,9 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 		return
 	}
 
-	// If terminal height changed, update the scrolling region
-	if height != lastH {
-		fmt.Fprintf(w, "\x1b[s\x1b[1;%dr\x1b[u", height-2)
-		lastH = height
-	}
+	// Always set the scrolling region to ensure it is not reset/overwritten by the terminal
+	fmt.Fprintf(w, "\x1b[s\x1b[1;%dr\x1b[u", height-2)
+	lastH = height
 
 	// Save cursor
 	fmt.Fprint(w, "\x1b[s")

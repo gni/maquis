@@ -4,36 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-var omissionRegexes = []*regexp.Regexp{
-	// Matches lines containing "rest of code", "rest of method(s)", "unchanged code", etc.
-	regexp.MustCompile(`(?i)(?:rest of|unchanged|same as|original|existing)\s+(?:code|methods?|functions?|class(?:es)?|files?|implementations?)\s*\.{3,}`),
-	// Matches lines with just comments and dots: e.g. // ... or # ... or /* ... */
-	regexp.MustCompile(`(?i)^\s*(?://|#|/\*)\s*\.{3,}\s*(?:\*/)?\s*$`),
-	// Matches brackets with dots: (...)
-	regexp.MustCompile(`^\s*\(\s*\.{3,}\s*\)\s*$`),
-	// Matches TODO comments that suggest omission: e.g. // TODO: implement the rest or // TODO ...
-	regexp.MustCompile(`(?i)(?://|#|/\*)\s*todo\s*[\:\-\s]*\.*(?:\s*(?:implement|add|write)\s+(?:the\s+)?(rest|remaining|code|methods?))?\s*\.{3,}`),
-}
-
-// DetectOmissionPlaceholders searches for code omission comments like '// ... rest of code'.
-func DetectOmissionPlaceholders(text string) []string {
-	var matches []string
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		for _, rx := range omissionRegexes {
-			if rx.MatchString(trimmed) {
-				matches = append(matches, line)
-				break
-			}
-		}
-	}
-	return matches
-}
 
 // LoadMemoryContext loads global (~/.bidouille/BIDOUILLE.md) and project (MEMORY.md) memory context.
 func (a *Agent) LoadMemoryContext() string {

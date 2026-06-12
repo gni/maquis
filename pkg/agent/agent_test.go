@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"bidouille/pkg/agent/tool"
 )
 
 func TestParseManualCommand(t *testing.T) {
@@ -103,7 +105,7 @@ func TestOmissionPlaceholders(t *testing.T) {
 	}
 
 	for i, tt := range tests {
-		matches := DetectOmissionPlaceholders(tt.input)
+		matches := tool.DetectOmissionPlaceholders(tt.input)
 		got := len(matches) > 0
 		if got != tt.expect {
 			t.Errorf("Test %d failed for input %q: got %v, want %v. Matches: %v", i, tt.input, got, tt.expect, matches)
@@ -294,11 +296,11 @@ def world():
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	tool := &editTool{}
+	tTool := tool.NewEditTool()
 
 	// Case 1: Exact match
 	argsJson := `{"path": "test_file.py", "updates": [{"oldText": "def hello():\n    print(\"hello\")", "newText": "def hello():\n    print(\"hello, exact\")"}]}`
-	_, err = tool.Execute(a, argsJson)
+	_, err = tTool.Execute(a, argsJson)
 	if err != nil {
 		t.Fatalf("Case 1 (exact match) failed: %v", err)
 	}
@@ -315,7 +317,7 @@ def world():
 
 	// Case 2: Indentation discrepancy (e.g. 2 spaces instead of 4)
 	argsJson = `{"path": "test_file.py", "updates": [{"oldText": "def hello():\n  print(\"hello\")\n  \n  # some comment\n  return True", "newText": "def hello():\n    print(\"hello, resilient\")\n    \n    # some comment\n    return True"}]}`
-	_, err = tool.Execute(a, argsJson)
+	_, err = tTool.Execute(a, argsJson)
 	if err != nil {
 		t.Fatalf("Case 2 (resilient match) failed: %v", err)
 	}
@@ -333,7 +335,7 @@ def world():
 	fileContentCRLF := "def hello():\r\n    print(\"hello\")\r\n"
 	os.WriteFile(fullPath, []byte(fileContentCRLF), 0644)
 	argsJson = `{"path": "test_file.py", "updates": [{"oldText": "def hello():\n    print(\"hello\")", "newText": "def hello():\n    print(\"hello, crlf\")"}]}`
-	_, err = tool.Execute(a, argsJson)
+	_, err = tTool.Execute(a, argsJson)
 	if err != nil {
 		t.Fatalf("Case 3 (CRLF) failed: %v", err)
 	}
@@ -349,7 +351,7 @@ def world():
 
 	// Case 4: Request has leading/trailing newlines/spaces
 	argsJson = `{"path": "test_file.py", "updates": [{"oldText": "\n\ndef hello():\n  print(\"hello\")\n\n\n", "newText": "def hello():\n    print(\"hello, trimmed\")"}]}`
-	_, err = tool.Execute(a, argsJson)
+	_, err = tTool.Execute(a, argsJson)
 	if err != nil {
 		t.Fatalf("Case 4 (trimmed newlines) failed: %v", err)
 	}
@@ -372,7 +374,7 @@ def other():
 `
 	os.WriteFile(fullPath, []byte(fileContentAmbiguous), 0644)
 	argsJson = `{"path": "test_file.py", "updates": [{"oldText": "print(\"hello\")", "newText": "print(\"hello, duplicate\")"}]}`
-	_, err = tool.Execute(a, argsJson)
+	_, err = tTool.Execute(a, argsJson)
 	if err == nil {
 		t.Fatalf("Case 5 (ambiguous match) expected to fail but succeeded")
 	}

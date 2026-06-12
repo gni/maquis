@@ -9,15 +9,11 @@ import (
 
 	"bidouille/pkg/ui/style"
 
+	"bidouille/pkg/agent/tool"
 	"bidouille/pkg/ui"
 )
 
-type Skill struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Path        string `json:"path"`
-	Content     string `json:"content"`
-}
+type Skill = tool.Skill
 
 var ActiveSkills []Skill
 

@@ -1,0 +1,500 @@
+package tool
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"unicode/utf8"
+)
+
+type ReplaceEdit struct {
+	OldText string `json:"oldText"`
+	NewText string `json:"newText"`
+}
+
+type readTool struct{}
+
+func NewReadTool() ToolExecutor {
+	return &readTool{}
+}
+
+func (t *readTool) Name() string { return "read" }
+
+func (t *readTool) Definition() Tool {
+	return Tool{
+		Type: "function",
+		Function: FunctionDefinition{
+			Name:        "read",
+			Description: "Read the contents of a file with optional line offsets and limits.",
+			Parameters: JSONSchema{
+				Type: "object",
+				Properties: map[string]SchemaProp{
+					"path": {
+						Type:        "string",
+						Description: "Path to the file to read (relative or absolute).",
+					},
+					"offset": {
+						Type:        "number",
+						Description: "Line number to start reading from (1-indexed, optional).",
+					},
+					"limit": {
+						Type:        "number",
+						Description: "Maximum number of lines to read (optional).",
+					},
+				},
+				Required: []string{"path"},
+			},
+		},
+	}
+}
+
+func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
+	var args struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	safePath, err := ctx.SafePath(args.Path)
+	if err != nil {
+		return "", err
+	}
+
+	info, err := os.Stat(safePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file info: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("cannot read: path '%s' is a directory", args.Path)
+	}
+	if info.Size() > 2*1024*1024 { // 2MB limit
+		return "", fmt.Errorf("file size (%d bytes) is too large; maximum allowed size is 2MB", info.Size())
+	}
+
+	data, err := os.ReadFile(safePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Check if file is binary
+	if isBinary(data) {
+		return "", fmt.Errorf("cannot read binary file; the read tool only supports text files")
+	}
+
+	contentStr := SanitizeUTF8(data)
+	if strings.TrimSpace(contentStr) == "" {
+		return "", fmt.Errorf("file is empty or contains only whitespace")
+	}
+
+	lines := strings.Split(contentStr, "\n")
+	offset := args.Offset
+	if offset <= 0 {
+		offset = 1
+	}
+	if offset > len(lines) {
+		return "", nil
+	}
+	end := len(lines)
+	if args.Limit > 0 {
+		end = offset + args.Limit - 1
+		if end > len(lines) {
+			end = len(lines)
+		}
+	}
+	return strings.Join(lines[offset-1:end], "\n"), nil
+}
+
+type writeTool struct{}
+
+func NewWriteTool() ToolExecutor {
+	return &writeTool{}
+}
+
+func (t *writeTool) Name() string { return "write" }
+
+func (t *writeTool) Definition() Tool {
+	return Tool{
+		Type: "function",
+		Function: FunctionDefinition{
+			Name:        "write",
+			Description: "Create a new file or overwrite an existing file with the specified content.",
+			Parameters: JSONSchema{
+				Type: "object",
+				Properties: map[string]SchemaProp{
+					"path": {
+						Type:        "string",
+						Description: "Path to the target file.",
+					},
+					"write_content": {
+						Type:        "string",
+						Description: "Complete content to write into the file.",
+					},
+				},
+				Required: []string{"path", "write_content"},
+			},
+		},
+	}
+}
+
+func (t *writeTool) Execute(ctx AgentContext, arguments string) (string, error) {
+	var args struct {
+		Path    string `json:"path"`
+		Content string `json:"write_content"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	safePath, err := ctx.SafePath(args.Path)
+	if err != nil {
+		return "", err
+	}
+
+	// Code Omission Protection
+	if placeholders := DetectOmissionPlaceholders(args.Content); len(placeholders) > 0 {
+		return "", fmt.Errorf("refusing to write file: detected code omission placeholder(s) like: %q. Please provide the complete file content without shorthand placeholders or comments like '// ... rest of code'.", placeholders)
+	}
+
+	dir := filepath.Dir(safePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	err = os.WriteFile(safePath, []byte(args.Content), 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path), nil
+}
+
+type editTool struct{}
+
+func NewEditTool() ToolExecutor {
+	return &editTool{}
+}
+
+func (t *editTool) Name() string { return "edit" }
+
+func (t *editTool) Definition() Tool {
+	return Tool{
+		Type: "function",
+		Function: FunctionDefinition{
+			Name:        "edit",
+			Description: "Edit a single file using exact search and replace text blocks. oldText must match exactly.",
+			Parameters: JSONSchema{
+				Type: "object",
+				Properties: map[string]SchemaProp{
+					"path": {
+						Type:        "string",
+						Description: "Path to the file to edit.",
+					},
+					"updates": {
+						Type:        "array",
+						Description: "List of replacement blocks. Each contains 'oldText' and 'newText'.",
+					},
+				},
+				Required: []string{"path", "updates"},
+			},
+		},
+	}
+}
+
+func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
+	var args struct {
+		Path    string        `json:"path"`
+		Edits   []ReplaceEdit `json:"updates"`
+		OldText string        `json:"oldText,omitempty"`
+		NewText string        `json:"newText,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	safePath, err := ctx.SafePath(args.Path)
+	if err != nil {
+		return "", err
+	}
+
+	edits := args.Edits
+	if args.OldText != "" && args.NewText != "" {
+		edits = append(edits, ReplaceEdit{OldText: args.OldText, NewText: args.NewText})
+	}
+
+	// Code Omission Protection
+	for _, edit := range edits {
+		if placeholders := DetectOmissionPlaceholders(edit.NewText); len(placeholders) > 0 {
+			return "", fmt.Errorf("refusing to edit file: detected code omission placeholder(s) in replacement text: %q. Please provide the complete new code replacement block without shorthand placeholders or comments like '// ... rest of code'.", placeholders)
+		}
+	}
+
+	if len(edits) == 0 {
+		return "", fmt.Errorf("no edits specified to apply")
+	}
+
+	data, err := os.ReadFile(safePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+
+	var diffBuilder strings.Builder
+	for i := range edits {
+		edit := &edits[i]
+		edit.OldText = strings.ReplaceAll(edit.OldText, "\r\n", "\n")
+		edit.NewText = strings.ReplaceAll(edit.NewText, "\r\n", "\n")
+
+		indexOfOldText := strings.Index(content, edit.OldText)
+		if indexOfOldText == -1 {
+			// Try resilient line-by-line whitespace-insensitive matching
+			oldLines := strings.Split(edit.OldText, "\n")
+			var cleanOldLines []string
+			for _, l := range oldLines {
+				cleanOldLines = append(cleanOldLines, strings.TrimSpace(l))
+			}
+
+			// Strip leading and trailing empty lines from cleanOldLines to find the core matching block
+			startIdx := 0
+			for startIdx < len(cleanOldLines) && cleanOldLines[startIdx] == "" {
+				startIdx++
+			}
+			endIdx := len(cleanOldLines)
+			for endIdx > startIdx && cleanOldLines[endIdx-1] == "" {
+				endIdx--
+			}
+			coreOldLines := cleanOldLines[startIdx:endIdx]
+
+			if len(coreOldLines) > 0 {
+				fileLines := strings.Split(content, "\n")
+				matchStart := -1
+				matchEnd := -1
+				matchesCount := 0
+
+				for fs := 0; fs <= len(fileLines)-len(coreOldLines); fs++ {
+					matched := true
+					for j := 0; j < len(coreOldLines); j++ {
+						fileLineTrimmed := strings.TrimSpace(fileLines[fs+j])
+						if fileLineTrimmed != coreOldLines[j] {
+							matched = false
+							break
+						}
+					}
+					if matched {
+						matchStart = fs
+						matchEnd = fs + len(coreOldLines)
+						matchesCount++
+					}
+				}
+
+				if matchesCount == 1 {
+					// Found a unique resilient match!
+					// Expand back to include leading/trailing empty lines matching original request
+					actualStart := matchStart
+					for actualStart > 0 && matchStart-actualStart < startIdx {
+						if strings.TrimSpace(fileLines[actualStart-1]) == "" {
+							actualStart--
+						} else {
+							break
+						}
+					}
+					actualEnd := matchEnd
+					for actualEnd < len(fileLines) && actualEnd-matchEnd < (len(cleanOldLines) - endIdx) {
+						if strings.TrimSpace(fileLines[actualEnd]) == "" {
+							actualEnd++
+						} else {
+							break
+						}
+					}
+					actualOldText := strings.Join(fileLines[actualStart:actualEnd], "\n")
+					edit.OldText = actualOldText
+					indexOfOldText = strings.Index(content, edit.OldText)
+				}
+			}
+		}
+
+		if indexOfOldText == -1 {
+			return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s", i, args.Path)
+		}
+		occurrences := strings.Count(content, edit.OldText)
+		if occurrences > 1 {
+			return "", fmt.Errorf("edit[%d]: oldText block is not unique; found %d occurrences in %s", i, occurrences, args.Path)
+		}
+
+		startLine := strings.Count(content[:indexOfOldText], "\n") + 1
+		oldLines := strings.Split(edit.OldText, "\n")
+		newLines := strings.Split(edit.NewText, "\n")
+		numOldLines := len(oldLines)
+
+		allLines := strings.Split(content, "\n")
+		content = strings.Replace(content, edit.OldText, edit.NewText, 1)
+
+		// Context before (3 lines)
+		contextStart := startLine - 3
+		if contextStart < 1 {
+			contextStart = 1
+		}
+		for lineNum := contextStart; lineNum < startLine; lineNum++ {
+			if lineNum <= len(allLines) {
+				diffBuilder.WriteString(fmt.Sprintf("%-4d   %s\n", lineNum, allLines[lineNum-1]))
+			}
+		}
+
+		// Deleted lines (red)
+		for j, oldLine := range oldLines {
+			lineNum := startLine + j
+			diffBuilder.WriteString(fmt.Sprintf("\x1b[31m%-4d - %s\x1b[0m\n", lineNum, oldLine))
+		}
+
+		// Added lines (green)
+		for j, newLine := range newLines {
+			lineNum := startLine + j
+			diffBuilder.WriteString(fmt.Sprintf("\x1b[32m%-4d + %s\x1b[0m\n", lineNum, newLine))
+		}
+
+		// Context after (3 lines)
+		contextEnd := startLine + numOldLines + 2
+		if contextEnd > len(allLines) {
+			contextEnd = len(allLines)
+		}
+		for lineNum := startLine + numOldLines; lineNum <= contextEnd; lineNum++ {
+			diffBuilder.WriteString(fmt.Sprintf("%-4d   %s\n", lineNum, allLines[lineNum-1]))
+		}
+	}
+
+	err = os.WriteFile(safePath, []byte(content), 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to write modified content back: %w", err)
+	}
+
+	return diffBuilder.String(), nil
+}
+
+type lsTool struct{}
+
+func NewLsTool() ToolExecutor {
+	return &lsTool{}
+}
+
+func (t *lsTool) Name() string { return "ls" }
+
+func (t *lsTool) Definition() Tool {
+	return Tool{
+		Type: "function",
+		Function: FunctionDefinition{
+			Name:        "ls",
+			Description: "List files and directories in a path.",
+			Parameters: JSONSchema{
+				Type: "object",
+				Properties: map[string]SchemaProp{
+					"path": {
+						Type:        "string",
+						Description: "Path of the directory to list.",
+					},
+				},
+				Required: []string{},
+			},
+		},
+	}
+}
+
+func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+	}
+
+	searchPath := args.Path
+	if searchPath == "" {
+		searchPath = "."
+	}
+
+	safePath, err := ctx.SafePath(searchPath)
+	if err != nil {
+		return "", err
+	}
+
+	entries, err := os.ReadDir(safePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Contents of %s:\n", searchPath))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		typeStr := "file"
+		size := int64(0)
+		if entry.IsDir() {
+			typeStr = "dir "
+		} else if err == nil {
+			size = info.Size()
+		}
+
+		sb.WriteString(fmt.Sprintf("  [%s]  %-25s  %d bytes\n", typeStr, entry.Name(), size))
+	}
+	return sb.String(), nil
+}
+
+func isBinary(data []byte) bool {
+	limit := len(data)
+	if limit > 8000 {
+		limit = 8000
+	}
+	for i := 0; i < limit; i++ {
+		if data[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func SanitizeUTF8(data []byte) string {
+	if utf8.Valid(data) {
+		return string(data)
+	}
+
+	var r []rune
+	for len(data) > 0 {
+		run, size := utf8.DecodeRune(data)
+		if run == utf8.RuneError && size == 1 {
+			r = append(r, ' ')
+		} else {
+			r = append(r, run)
+		}
+		data = data[size:]
+	}
+	return string(r)
+}
+
+var omissionRegexes = []*regexp.Regexp{
+	// Matches lines containing "rest of code", "rest of method(s)", "unchanged code", etc.
+	regexp.MustCompile(`(?i)(?:rest of|unchanged|same as|original|existing)\s+(?:code|methods?|functions?|class(?:es)?|files?|implementations?)\s*\.{3,}`),
+	// Matches lines with just comments and dots: e.g. // ... or # ... or /* ... */
+	regexp.MustCompile(`(?i)^\s*(?://|#|/\*)\s*\.{3,}\s*(?:\*/)?\s*$`),
+	// Matches brackets with dots: (...)
+	regexp.MustCompile(`^\s*\(\s*\.{3,}\s*\)\s*$`),
+	// Matches TODO comments that suggest omission: e.g. // TODO: implement the rest or // TODO ...
+	regexp.MustCompile(`(?i)(?://|#|/\*)\s*todo\s*[\:\-\s]*\.*(?:\s*(?:implement|add|write)\s+(?:the\s+)?(rest|remaining|code|methods?))?\s*\.{3,}`),
+}
+
+// DetectOmissionPlaceholders searches for code omission comments like '// ... rest of code'.
+func DetectOmissionPlaceholders(text string) []string {
+	var matches []string
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, rx := range omissionRegexes {
+			if rx.MatchString(trimmed) {
+				matches = append(matches, line)
+				break
+			}
+		}
+	}
+	return matches
+}

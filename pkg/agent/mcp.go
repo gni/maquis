@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"bidouille/pkg/agent/tool"
 	"bidouille/pkg/config"
 )
 
@@ -43,7 +44,7 @@ type mcpToolExecutor struct {
 
 func (m *mcpToolExecutor) Name() string { return m.def.Function.Name }
 func (m *mcpToolExecutor) Definition() Tool { return m.def }
-func (m *mcpToolExecutor) Execute(a *Agent, arguments string) (string, error) {
+func (m *mcpToolExecutor) Execute(ctx tool.AgentContext, arguments string) (string, error) {
 	return m.client.callTool(m.toolName, arguments)
 }
 
@@ -121,7 +122,7 @@ func (a *Agent) StopMCPServers() {
 
 func (a *Agent) GetMCPTools() []Tool {
 	var allTools []Tool
-	for name, t := range a.Registry.tools {
+	for name, t := range a.Registry.GetAllExecutors() {
 		if strings.HasPrefix(name, "mcp__") {
 			allTools = append(allTools, t.Definition())
 		}
