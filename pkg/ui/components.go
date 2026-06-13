@@ -8,13 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"bidouille/pkg/ui/style"
 
 	"bidouille/pkg/config"
+	"bidouille/pkg/db"
 	"github.com/alecthomas/chroma/v2/quick"
-	"golang.org/x/term"
 )
+
+var TerminalMu sync.Mutex
 
 func PrintBanner(w io.Writer, cfg *config.Config) {
 	theme := GetTheme(cfg.Theme)
@@ -28,12 +32,13 @@ func PrintBanner(w io.Writer, cfg *config.Config) {
 		Bold(true).
 		MarginLeft(4)
 
-	icon := `   /\___/\
-  (  o.o  )
-  (  =^=  )
-   \_____/`
+	icon := `
+  /\___/\
+ (  o.o  )
+ (  =^=  )
+  \_____/`
 
-	info := fmt.Sprintf("bidouille v1.0.0\nendpoint: %s\nmodel:    %s", cfg.Endpoint, cfg.Model)
+	info := fmt.Sprintf("\n\nbidouille v1.0.0\nendpoint: %s\nmodel:    %s", cfg.Endpoint, cfg.Model)
 
 	joined := style.JoinHorizontal(
 		style.Center,
@@ -58,23 +63,23 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	descStyle := style.NewStyle().
 		Foreground(theme.Text)
 
-	fmt.Fprintln(w, headerStyle.Render("Slash Commands Reference:"))
+	fmt.Fprintln(w, headerStyle.Render("slash commands reference:"))
 	fmt.Fprintln(w)
 
 	commands := [][]string{
-		{"/goal <task>", "Set a goal and trigger the Bidouille reasoning loop"},
-		{"/schedule \"<cron/duration>\" <task>", "Schedule a task execution simulation"},
-		{"/config", "Open interactive settings editor"},
-		{"/config show", "Display current settings summary"},
-		{"/config set <key> <value>", "Modify settings dynamically"},
-		{"/session <list/new/load>", "Manage persistent chat sessions interactively"},
-		{"/multiline, /paste", "Open interactive multiline editor"},
-		{"/skills", "List all available reference skills"},
-		{"/skills load <name>", "Explicitly load a reference skill into the context"},
-		{"/mcp", "List all configured MCP servers and active tool schemas"},
-		{"/rewind", "Clear conversation history"},
-		{"/help, /commands, ?", "Display this help menu"},
-		{"/exit, /quit", "Exit the Bidouille CLI application"},
+		{"/goal <task>", "set a goal and trigger the bidouille reasoning loop"},
+		{"/schedule \"<cron/duration>\" <task>", "schedule a task execution simulation"},
+		{"/config", "open interactive settings editor"},
+		{"/config show", "display current settings summary"},
+		{"/config set <key> <value>", "modify settings dynamically"},
+		{"/session <list/new/load>", "manage persistent chat sessions interactively"},
+		{"/multiline, /paste", "open interactive multiline editor"},
+		{"/skills", "list all available reference skills"},
+		{"/skills load <name>", "explicitly load a reference skill into the context"},
+		{"/mcp", "list all configured mcp servers and active tool schemas"},
+		{"/rewind", "clear conversation history"},
+		{"/help, /commands, ?", "display this help menu"},
+		{"/exit, /quit", "exit the bidouille CLI application"},
 	}
 
 	for _, cmd := range commands {
@@ -82,16 +87,16 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	}
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, headerStyle.Render("Keyboard Shortcuts:"))
+	fmt.Fprintln(w, headerStyle.Render("keyboard shortcuts:"))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+O"), descStyle.Render("Toggle tool results collapsing (COLLAPSED vs. FULL)"))
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+O"), descStyle.Render("toggle tool results collapsing (collapsed vs. full)"))
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, headerStyle.Render("Local Command Execution:"))
+	fmt.Fprintln(w, headerStyle.Render("local command execution:"))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("!<command>"), descStyle.Render("Execute any local shell command (e.g. !git diff)"))
-	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("<direct_command>"), descStyle.Render("Execute common utilities directly (if enabled)"))
-	fmt.Fprintln(w, "  Supported direct utilities: ls, pwd, git, cat, cd")
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("!<command>"), descStyle.Render("execute any local shell command (e.g. !git diff)"))
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("<direct_command>"), descStyle.Render("execute common utilities directly (if enabled)"))
+	fmt.Fprintln(w, "  supported direct utilities: ls, pwd, git, cat, cd")
 	fmt.Fprintln(w)
 }
 
@@ -112,14 +117,14 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 	valStyle := style.NewStyle().
 		Foreground(theme.Text)
 
-	approveVal := "Disabled (Interactive Mode)"
+	approveVal := "disabled (interactive mode)"
 	if cfg.IsAutoApprove() {
-		approveVal = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("Enabled (Auto-Approve)")
+		approveVal = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("enabled (auto-approve)")
 	}
 
-	directVal := "Disabled"
+	directVal := "disabled"
 	if cfg.DirectCommands {
-		directVal = style.NewStyle().Foreground(theme.Success).Bold(true).Render("Enabled")
+		directVal = style.NewStyle().Foreground(theme.Success).Bold(true).Render("enabled")
 	}
 
 	configStr := fmt.Sprintf(
@@ -137,21 +142,21 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %v\n\n"+
-			"Tip: Change any setting via: /config <key> <value> (e.g. /config yes true)",
-		titleStyle.Render("BIDOUILLE RUNTIME SETTINGS"),
-		keyStyle.Render("Endpoint:"), valStyle.Render(cfg.Endpoint),
-		keyStyle.Render("Model:"), valStyle.Render(cfg.Model),
-		keyStyle.Render("Temperature:"), cfg.Temperature,
-		keyStyle.Render("Auto-Approve:"), approveVal,
-		keyStyle.Render("Show Thinking:"), cfg.ShowThinking,
-		keyStyle.Render("Collapse Results:"), cfg.CollapseResults,
-		keyStyle.Render("Show Tokens:"), cfg.ShowTokens,
-		keyStyle.Render("Context Limit:"), cfg.ContextWindowLimit,
-		keyStyle.Render("Max Reasoning Steps:"), cfg.MaxReasoningSteps,
-		keyStyle.Render("Direct Commands:"), directVal,
-		keyStyle.Render("Client Cert:"), valStyle.Render(cfg.CertFile),
-		keyStyle.Render("Client Key:"), valStyle.Render(cfg.KeyFile),
-		keyStyle.Render("Skip SSL Verify:"), valStyle.Render(fmt.Sprintf("%v", cfg.SkipVerify)),
+			"tip: change any setting via: /config <key> <value> (e.g. /config yes true)",
+		titleStyle.Render("bidouille runtime settings"),
+		keyStyle.Render("endpoint:"), valStyle.Render(cfg.Endpoint),
+		keyStyle.Render("model:"), valStyle.Render(cfg.Model),
+		keyStyle.Render("temperature:"), cfg.Temperature,
+		keyStyle.Render("auto-approve:"), approveVal,
+		keyStyle.Render("show thinking:"), cfg.ShowThinking,
+		keyStyle.Render("collapse results:"), cfg.CollapseResults,
+		keyStyle.Render("show tokens:"), cfg.ShowTokens,
+		keyStyle.Render("context limit:"), cfg.ContextWindowLimit,
+		keyStyle.Render("max reasoning steps:"), cfg.MaxReasoningSteps,
+		keyStyle.Render("direct commands:"), directVal,
+		keyStyle.Render("client cert:"), valStyle.Render(cfg.CertFile),
+		keyStyle.Render("client key:"), valStyle.Render(cfg.KeyFile),
+		keyStyle.Render("skip ssl verify:"), valStyle.Render(fmt.Sprintf("%v", cfg.SkipVerify)),
 	)
 
 	fmt.Fprintln(w, borderStyle.Render(configStr))
@@ -289,8 +294,8 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 
 func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, newlineCount int) {
 	if newlineCount >= 0 {
-		_, height, err := term.GetSize(int(os.Stdout.Fd()))
-		if err == nil && newlineCount < height-1 {
+		_, height := getTerminalSize()
+		if newlineCount < height-1 {
 			var finalDot string
 			if toolName == "write" {
 				if !isError {
@@ -306,28 +311,23 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 				}
 			}
 
-			// Extract path from argsJSON if possible
+			// Extract path or command/pattern from argsJSON if possible
 			pathVal := ""
-			var args struct {
-				Path string `json:"path"`
-			}
-			if argsJSON != "" {
-				_ = json.Unmarshal([]byte(argsJSON), &args)
-				pathVal = args.Path
+			var argsMap map[string]interface{}
+			if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
+				if p, ok := argsMap["path"].(string); ok && p != "" {
+					pathVal = p
+				} else if c, ok := argsMap["command"].(string); ok && c != "" {
+					pathVal = c
+				} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
+					pathVal = pat
+				}
 			}
 
 			finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
 
-			// Save cursor position
-			fmt.Fprint(w, "\x1b[s")
-			// Move up newlineCount lines
-			fmt.Fprintf(w, "\x1b[%dA", newlineCount)
-			// Move to column 1 absolutely
-			fmt.Fprint(w, "\x1b[1G")
-			// Overwrite the entire line and clear to the end of the line
-			fmt.Fprintf(w, "\x1b[0m%s\x1b[K", finalTitle)
-			// Restore cursor position
-			fmt.Fprint(w, "\x1b[u")
+			// Update the tool title in-place in a single Write call to avoid breaking the cursor restoring writer
+			fmt.Fprintf(w, "\x1b7\x1b[%dA\x1b[1G\x1b[0m%s\x1b[K\x1b8", newlineCount, finalTitle)
 		}
 	}
 
@@ -414,6 +414,36 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 	}
 }
 
+func wrapText(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+
+	var lines []string
+	var currentLine strings.Builder
+
+	for _, word := range words {
+		if currentLine.Len() == 0 {
+			currentLine.WriteString(word)
+		} else if currentLine.Len()+1+len(word) <= limit {
+			currentLine.WriteByte(' ')
+			currentLine.WriteString(word)
+		} else {
+			lines = append(lines, currentLine.String())
+			currentLine.Reset()
+			currentLine.WriteString(word)
+		}
+	}
+	if currentLine.Len() > 0 {
+		lines = append(lines, currentLine.String())
+	}
+	return lines
+}
+
 func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UITheme) {
 	if len(startErrors) == 0 {
 		return
@@ -432,10 +462,36 @@ func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UIT
 		Padding(0, 1).
 		Margin(1, 0)
 
+	// Determine available width
+	termW, _ := getTerminalSize()
+
+	// 4 columns reserved for border & padding
+	availWidth := termW - 4
+	if availWidth < 20 {
+		availWidth = 20
+	}
+
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Failed to start MCP server(s):") + "\n")
+	sb.WriteString(titleStyle.Render("failed to start mcp server(s):") + "\n")
 	for name, err := range startErrors {
-		sb.WriteString(fmt.Sprintf("  - %s: %s\n", style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(name), msgStyle.Render(err.Error())))
+		prefix := fmt.Sprintf("  - %s: ", name)
+		prefixLen := len(prefix)
+		prefixStyled := fmt.Sprintf("  - %s: ", style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(name))
+
+		errAvailWidth := availWidth - prefixLen
+		if errAvailWidth < 15 {
+			errAvailWidth = 15
+		}
+
+		errLines := wrapText(err.Error(), errAvailWidth)
+		for idx, line := range errLines {
+			if idx == 0 {
+				sb.WriteString(prefixStyled + msgStyle.Render(line) + "\n")
+			} else {
+				padding := strings.Repeat(" ", prefixLen)
+				sb.WriteString(padding + msgStyle.Render(line) + "\n")
+			}
+		}
 	}
 
 	fmt.Fprint(w, borderStyle.Render(strings.TrimSuffix(sb.String(), "\n")))
@@ -458,3 +514,204 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	}
 	return fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
 }
+
+func PrintPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+
+	thinkingText := "off"
+	if showThinking {
+		thinkingText = reasoningEffort
+	}
+	statusPart := fmt.Sprintf("[reasoning:%s]", thinkingText)
+
+	stateMu.Lock()
+	isGenerating := state.IsGenerating
+	stateMu.Unlock()
+
+	if isGenerating {
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		ms := time.Now().UnixNano() / int64(time.Millisecond)
+		idx := (ms / 80) % int64(len(frames))
+		spinnerFrame := frames[idx]
+		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
+		statusPart = fmt.Sprintf("%s [reasoning:%s]", spinnerStyled, thinkingText)
+	}
+
+	prefix := "─── prompt "
+	width, _ := getTerminalSize()
+	statusLen := len(stripAnsi(statusPart))
+	prefixLen := len(prefix)
+
+	dashesCount := width - prefixLen - statusLen - 2
+	if dashesCount < 3 {
+		dashesCount = 3
+	}
+	dashes := strings.Repeat("─", dashesCount)
+	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
+}
+
+func getWriterHeight(w io.Writer) int {
+	type heightGetter interface {
+		Height() int
+	}
+	type wrapper interface {
+		Unwrap() io.Writer
+	}
+
+	curr := w
+	for curr != nil {
+		if hg, ok := curr.(heightGetter); ok {
+			return hg.Height()
+		}
+		if wr, ok := curr.(wrapper); ok {
+			curr = wr.Unwrap()
+		} else {
+			break
+		}
+	}
+	return 0
+}
+
+func DrawStaticPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
+	height := getWriterHeight(w)
+	if height <= 0 {
+		_, h := getTerminalSize()
+		height = h
+	}
+
+	var buf bytes.Buffer
+	// Save cursor, move cursor to height-3 absolutely, clear line, print separator, restore cursor
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3)
+	PrintPromptSeparator(&buf, showThinking, reasoningEffort, theme)
+	fmt.Fprint(&buf, "\x1b8")
+
+	_, _ = w.Write(buf.Bytes())
+}
+
+func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg *config.Config) {
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+
+	var lastRole string
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			continue
+		}
+
+		if msg.Role == "user" {
+			if strings.HasPrefix(msg.Content, "[User manually executed local shell command: `") {
+				firstTick := strings.Index(msg.Content, "`")
+				if firstTick != -1 {
+					rest := msg.Content[firstTick+1:]
+					secondTick := strings.Index(rest, "`")
+					if secondTick != -1 {
+						cmdStr := rest[:secondTick]
+						output := ""
+						newLineIdx := strings.Index(rest, "\n")
+						if newLineIdx != -1 {
+							output = rest[newLineIdx+1:]
+						}
+						if lastRole != "" {
+							fmt.Fprintln(w)
+						}
+						fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> !"), cmdStr)
+						if output != "" {
+							fmt.Fprint(w, output)
+						}
+						lastRole = "user"
+						continue
+					}
+				}
+			}
+
+			if lastRole != "" {
+				fmt.Fprintln(w)
+			}
+			fmt.Fprintln(w, borderStyle.Render("─── prompt ───────────────────────────────────────────────"))
+			fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), msg.Content)
+		} else if msg.Role == "assistant" {
+			if lastRole == "tool" {
+				fmt.Fprintln(w)
+			}
+			hasPrintedAnything := false
+			if msg.ReasoningContent != "" && cfg.ShowThinking {
+				dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+				fmt.Fprintln(w, dimStyle.Render(msg.ReasoningContent))
+				fmt.Fprintln(w)
+
+				iconStyle := style.NewStyle().Foreground(theme.Success)
+				labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+				fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+				hasPrintedAnything = true
+			}
+
+			if msg.Content != "" {
+				if hasPrintedAnything {
+					fmt.Fprintln(w)
+				}
+				fmt.Fprintln(w, msg.Content)
+				hasPrintedAnything = true
+			}
+
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					if hasPrintedAnything {
+						fmt.Fprintln(w)
+					}
+					var path string
+					var argsMap map[string]interface{}
+					if json.Unmarshal([]byte(tc.Function.Arguments), &argsMap) == nil {
+						if p, ok := argsMap["path"].(string); ok {
+							path = p
+						} else if c, ok := argsMap["command"].(string); ok {
+							path = c
+						}
+					}
+					isPathTool := tc.Function.Name == "read" || tc.Function.Name == "write" || tc.Function.Name == "edit" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find"
+					var symbol string
+					if tc.Function.Name == "write" {
+						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
+					} else {
+						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
+					}
+					var title string
+					if isPathTool && path != "" {
+						title = FormatToolTitle(symbol, tc.Function.Name, path, theme)
+					} else {
+						title = FormatToolTitle(symbol, tc.Function.Name, "", theme)
+					}
+					fmt.Fprintln(w, title)
+					hasPrintedAnything = true
+				}
+			}
+		} else if msg.Role == "tool" {
+			var toolName string
+			var argsJSON string
+			for i := len(messages) - 1; i >= 0; i-- {
+				m := messages[i]
+				if m.Role == "assistant" {
+					for _, tc := range m.ToolCalls {
+						if tc.ID == msg.ToolCallID {
+							toolName = tc.Function.Name
+							argsJSON = tc.Function.Arguments
+							break
+						}
+					}
+				}
+				if toolName != "" {
+					break
+				}
+			}
+			if toolName == "" {
+				toolName = msg.Name
+			}
+			RenderToolOutput(w, msg.Content, false, cfg.CollapseResults, theme, toolName, argsJSON, -1)
+		}
+		lastRole = msg.Role
+	}
+}
+

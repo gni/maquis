@@ -136,7 +136,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	items = []*settingItem{
 		{
 			id:          "endpoint",
-			name:        "Endpoint URL",
+			name:        "endpoint url",
 			value:       func() string { return cloned.Endpoint },
 			description: "API endpoint URL for the LLM service",
 			onEdit: func(newVal string) error {
@@ -149,7 +149,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "model",
-			name:        "Model Name",
+			name:        "model name",
 			value:       func() string { return cloned.Model },
 			description: "Name of the LLM model to use",
 			onEdit: func(newVal string) error {
@@ -162,7 +162,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "temperature",
-			name:        "Temperature",
+			name:        "temperature",
 			value:       func() string { return fmt.Sprintf("%.2f", cloned.Temperature) },
 			description: "Sampling temperature for response generation (0.0 to 2.0)",
 			onEdit: func(newVal string) error {
@@ -179,7 +179,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "theme",
-			name:        "Visual Theme",
+			name:        "visual theme",
 			value:       func() string { return cloned.Theme },
 			description: "Visual aesthetic style of the terminal theme",
 			options:     []string{"dark", "neon", "light", "gruvbox", "mono"},
@@ -199,7 +199,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "auto_approve",
-			name:        "Auto-Approve",
+			name:        "auto-approve",
 			value:       func() string { return formatBool(cloned.AutoApprove) },
 			description: "Automatically approve all tool execution prompts",
 			isBool:      true,
@@ -210,7 +210,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "show_thinking",
-			name:        "Show Thinking",
+			name:        "show thinking",
 			value:       func() string { return formatBool(cloned.ShowThinking) },
 			description: "Stream the LLM thinking/reasoning process",
 			isBool:      true,
@@ -220,7 +220,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "collapse_results",
-			name:        "Collapse Results",
+			name:        "collapse results",
 			value:       func() string { return formatBool(cloned.CollapseResults) },
 			description: "Collapse tool results output to keep history clean",
 			isBool:      true,
@@ -230,7 +230,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "show_tokens",
-			name:        "Show Tokens",
+			name:        "show tokens",
 			value:       func() string { return formatBool(cloned.ShowTokens) },
 			description: "Display token usage metrics under each response",
 			isBool:      true,
@@ -240,7 +240,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "context_window_limit",
-			name:        "Context Limit",
+			name:        "context limit",
 			value:       func() string { return fmt.Sprintf("%d", cloned.ContextWindowLimit) },
 			description: "Maximum token context window limit before compression",
 			onEdit: func(newVal string) error {
@@ -257,7 +257,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "max_reasoning_steps",
-			name:        "Max Reasoning Steps",
+			name:        "max reasoning steps",
 			value:       func() string { return fmt.Sprintf("%d", cloned.MaxReasoningSteps) },
 			description: "Maximum number of sequential reasoning steps before termination",
 			onEdit: func(newVal string) error {
@@ -274,7 +274,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "direct_commands",
-			name:        "Direct Commands",
+			name:        "direct commands",
 			value:       func() string { return formatBool(cloned.DirectCommands) },
 			description: "Enable direct execution of local shell commands",
 			isBool:      true,
@@ -284,7 +284,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "cert_file",
-			name:        "Client Cert",
+			name:        "client cert",
 			value:       func() string { return cloned.CertFile },
 			description: "Path to the SSL client certificate file",
 			onEdit: func(newVal string) error {
@@ -294,7 +294,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "key_file",
-			name:        "Client Key",
+			name:        "client key",
 			value:       func() string { return cloned.KeyFile },
 			description: "Path to the SSL client private key file",
 			onEdit: func(newVal string) error {
@@ -304,7 +304,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		},
 		{
 			id:          "skip_verify",
-			name:        "Skip SSL Verify",
+			name:        "skip ssl verify",
 			value:       func() string { return formatBool(cloned.SkipVerify) },
 			description: "Skip SSL/TLS certificate verification",
 			isBool:      true,
@@ -345,12 +345,12 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 
 		// Draw Screen Title
 		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		buf.WriteString(titleStyle.Render("Settings"))
+		buf.WriteString(titleStyle.Render("settings"))
 		buf.WriteString("\n\n")
 
 		// Draw Search Box
 		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
-		buf.WriteString(searchLabelStyle.Render("  Search:  "))
+		buf.WriteString(searchLabelStyle.Render("  search:  "))
 		
 		searchValStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 		buf.WriteString(searchValStyle.Render(searchQuery))
@@ -363,7 +363,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		// Draw Settings List
 		if len(filtered) == 0 {
 			dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-			buf.WriteString(dimStyle.Render("  (No matching settings found)"))
+			buf.WriteString(dimStyle.Render("  (no matching settings found)"))
 			buf.WriteString("\n")
 		} else {
 			for idx, item := range filtered {
@@ -402,7 +402,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 
 		// Draw Instructions
 		navStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ Navigate · enter Edit · Esc Clear Search/Exit")))
+		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter edit · esc clear search/exit")))
 		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("esc to cancel")))
 
 		buf.WriteString("\x1b[J") // clear from here to end of screen
@@ -440,8 +440,8 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 						term.Restore(fd, oldState)
 						fmt.Fprint(rlOutput, "\x1b[?25h") // Show cursor
 
-						fmt.Fprintf(rlOutput, "\r\n\r\n  Edit %s (current: %s):\r\n", item.name, item.value())
-						fmt.Fprint(rlOutput, "  Enter new value: ")
+						fmt.Fprintf(rlOutput, "\r\n\r\n  edit %s (current: %s):\r\n", item.name, item.value())
+						fmt.Fprint(rlOutput, "  enter new value: ")
 
 						reader := bufio.NewReader(rlInput)
 						newVal, err := reader.ReadString('\n')
@@ -449,7 +449,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 							newVal = strings.TrimSpace(newVal)
 							err = item.onEdit(newVal)
 							if err != nil {
-								fmt.Fprintf(rlOutput, "\r\n  Error: %v. Press Enter to continue...", err)
+								fmt.Fprintf(rlOutput, "\r\n  error: %v. press enter to continue...", err)
 								_, _ = reader.ReadString('\n')
 							}
 						}
@@ -512,7 +512,7 @@ func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rl
 		return "", fmt.Errorf("no sessions found")
 	}
 
-	fmt.Fprintln(rlOutput, "\nAvailable Past Sessions:")
+	fmt.Fprintln(rlOutput, "\navailable past sessions:")
 	for i, s := range sessions {
 		previewText := s.Preview
 		if len(previewText) > 40 {
@@ -524,7 +524,7 @@ func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rl
 
 	reader := bufio.NewReader(rlInput)
 	for {
-		fmt.Fprintf(rlOutput, "Enter session number to load (1 to %d) or press Enter to cancel: ", len(sessions))
+		fmt.Fprintf(rlOutput, "enter session number to load (1 to %d) or press enter to cancel: ", len(sessions))
 		choiceStr, err := reader.ReadString('\n')
 		if err != nil {
 			return "", err
@@ -536,7 +536,7 @@ func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rl
 
 		num, err := strconv.Atoi(choiceStr)
 		if err != nil || num < 1 || num > len(sessions) {
-			fmt.Fprintln(rlOutput, "Error: invalid session number.")
+			fmt.Fprintln(rlOutput, "error: invalid session number.")
 			continue
 		}
 		return sessions[num-1].SessionID, nil
@@ -544,9 +544,9 @@ func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rl
 }
 
 func RunMultilineEditor(rlInput io.Reader, rlOutput io.Writer) (string, error) {
-	fmt.Fprintln(rlOutput, "=== Multiline Prompt Editor ===")
-	fmt.Fprintln(rlOutput, "Type or paste your prompt here. When finished, type '.' on a line by itself and press Enter.")
-	fmt.Fprintln(rlOutput, "Type 'cancel' to abort.")
+	fmt.Fprintln(rlOutput, "=== multiline prompt editor ===")
+	fmt.Fprintln(rlOutput, "type or paste your prompt here. when finished, type '.' on a line by itself and press enter.")
+	fmt.Fprintln(rlOutput, "type 'cancel' to abort.")
 
 	var lines []string
 	scanner := bufio.NewScanner(rlInput)
@@ -571,10 +571,10 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 		}
 
 		fmt.Fprintln(rlOutput, "\n==================================================")
-		fmt.Fprintln(rlOutput, "               BIDOUILLE SESSIONS                 ")
+		fmt.Fprintln(rlOutput, "               bidouille sessions                 ")
 		fmt.Fprintln(rlOutput, "==================================================")
 		if len(sessions) == 0 {
-			fmt.Fprintln(rlOutput, "No past sessions found.")
+			fmt.Fprintln(rlOutput, "no past sessions found.")
 		} else {
 			for i, s := range sessions {
 				preview := s.Preview
@@ -585,12 +585,12 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 			}
 		}
 		fmt.Fprintln(rlOutput, "--------------------------------------------------")
-		fmt.Fprintln(rlOutput, "Options:")
-		fmt.Fprintln(rlOutput, "  <number>     : Load session")
-		fmt.Fprintln(rlOutput, "  d <number>   : Delete session")
-		fmt.Fprintln(rlOutput, "  n            : Start a new session")
-		fmt.Fprintln(rlOutput, "  q            : Cancel and return")
-		fmt.Fprint(rlOutput, "\nChoose option: ")
+		fmt.Fprintln(rlOutput, "options:")
+		fmt.Fprintln(rlOutput, "  <number>     : load session")
+		fmt.Fprintln(rlOutput, "  d <number>   : delete session")
+		fmt.Fprintln(rlOutput, "  n            : start a new session")
+		fmt.Fprintln(rlOutput, "  q            : cancel and return")
+		fmt.Fprint(rlOutput, "\nchoose option: ")
 
 		reader := bufio.NewReader(rlInput)
 		inputStr, err := reader.ReadString('\n')
@@ -613,15 +613,15 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 			numStr := strings.TrimSpace(strings.TrimPrefix(inputStr, "d "))
 			num, err := strconv.Atoi(numStr)
 			if err != nil || num < 1 || num > len(sessions) {
-				fmt.Fprintln(rlOutput, "Invalid session number to delete.")
+				fmt.Fprintln(rlOutput, "invalid session number to delete.")
 				continue
 			}
 			sessionID := sessions[num-1].SessionID
 			err = db.ClearSession(sessionID)
 			if err != nil {
-				fmt.Fprintf(rlOutput, "Failed to delete session: %v\n", err)
+				fmt.Fprintf(rlOutput, "failed to delete session: %v\n", err)
 			} else {
-				fmt.Fprintf(rlOutput, "Deleted session %s successfully.\n", sessionID)
+				fmt.Fprintf(rlOutput, "deleted session %s successfully.\n", sessionID)
 			}
 			continue
 		}
@@ -631,6 +631,6 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 			return sessions[num-1].SessionID, false, nil
 		}
 
-		fmt.Fprintln(rlOutput, "Invalid choice. Please try again.")
+		fmt.Fprintln(rlOutput, "invalid choice. please try again.")
 	}
 }

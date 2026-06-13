@@ -35,6 +35,7 @@ type StreamRenderer struct {
 	lastEndedWithNewline bool
 	hasWrittenText       bool
 	hasWrittenThoughts   bool
+	parser               *jsonStreamParser
 }
 
 func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool) *StreamRenderer {
@@ -54,6 +55,8 @@ func (sr *StreamRenderer) HasOutput() bool {
 }
 
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
@@ -77,6 +80,8 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 }
 
 func (sr *StreamRenderer) EndThinking() {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.endThinking()
@@ -93,13 +98,15 @@ func (sr *StreamRenderer) endThinking() {
 
 		fmt.Fprintf(sr.w, "%s %s\n\n", 
 			iconStyle.Render("✔"),
-			labelStyle.Render(fmt.Sprintf("Thought (%.1fs)", elapsed)),
+			labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
 		)
 		sr.lastEndedWithNewline = true
 	}
 }
 
 func (sr *StreamRenderer) Write(chunk string) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.endThinking()
@@ -199,9 +206,25 @@ func (sr *StreamRenderer) Write(chunk string) {
 }
 
 func (sr *StreamRenderer) Flush() {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
+	sr.flushLocked()
+}
+
+func (sr *StreamRenderer) flushLocked() {
 	sr.endThinking()
+
+	if sr.parser != nil && sr.parser.activeToolName != "" {
+		if !sr.parser.titlePrinted {
+			sr.parser.printStreamTitle(sr.w, sr.theme)
+		}
+		if sr.parser.outputBuf.Len() > 0 {
+			fmt.Fprint(sr.w, sr.parser.outputBuf.String())
+			sr.parser.outputBuf.Reset()
+		}
+	}
 
 	if sr.inCodeBlock {
 		rem := sr.lineBuffer.String()
@@ -271,4 +294,48 @@ func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle stri
 	}
 	_, err = w.Write(data)
 	return err
+}
+
+func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser == nil {
+		sr.parser = &jsonStreamParser{activeToolIndex: -1}
+	}
+	if sr.parser.activeToolIndex != toolCallIndex || sr.parser.activeToolName == "" {
+		sr.flushLocked()
+		sr.parser.needsLeadingNewline = sr.hasWrittenText || sr.hasWrittenThoughts
+		sr.parser.activeToolName = toolName
+		sr.parser.activeToolIndex = toolCallIndex
+		sr.parser.titlePrinted = false
+		sr.parser.path = ""
+		sr.parser.pathPrinted = false
+	} else {
+		sr.parser.activeToolName = toolName
+	}
+}
+
+func (sr *StreamRenderer) WriteToolCall(content string) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser == nil {
+		sr.parser = &jsonStreamParser{activeToolIndex: -1}
+	}
+	sr.parser.feed(content, sr.w, sr.theme)
+}
+
+func (sr *StreamRenderer) GetToolTitleLineNumber(index int) int {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser == nil || index < 0 || index >= len(sr.parser.toolTitleLineNumbers) {
+		return -1
+	}
+	return sr.parser.toolTitleLineNumbers[index]
 }

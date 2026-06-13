@@ -1,30 +1,30 @@
-package agent
+package ui
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"bidouille/pkg/agent"
 	"bidouille/pkg/agent/tool"
 	"bidouille/pkg/config"
 	"bidouille/pkg/db"
-	"bidouille/pkg/ui"
 	"bidouille/pkg/ui/style"
 	"golang.org/x/term"
 )
 
-func autoCompleteCallback(line string, pos int, key rune) (string, int, bool) {
+func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (string, int, bool) {
 	if key != '\t' {
 		return line, pos, false
 	}
 
-	// Identify the word being completed
 	prefixToPos := line[:pos]
 	lastSpaceIdx := strings.LastIndex(prefixToPos, " ")
 	wordStartIdx := lastSpaceIdx + 1
@@ -58,7 +58,6 @@ func autoCompleteCallback(line string, pos int, key rune) (string, int, bool) {
 
 	var matches []string
 
-	// Check if the word matches any slash commands first (only if it starts with /)
 	if strings.HasPrefix(wordToComplete, "/") {
 		for _, c := range candidates {
 			if strings.HasPrefix(c, line[:pos]) {
@@ -67,7 +66,72 @@ func autoCompleteCallback(line string, pos int, key rune) (string, int, bool) {
 		}
 	}
 
-	// If no command matches, check filesystem paths
+	// Sub-argument autocomplete logic
+	if len(matches) == 0 {
+		if strings.HasPrefix(prefixToPos, "/config ") {
+			isSet := strings.HasPrefix(prefixToPos, "/config set ")
+			var configCandidates []string
+			configKeys := []string{
+				"endpoint", "model", "temperature", "auto_approve", "show_thinking",
+				"collapse_results", "show_tokens", "theme", "context_limit", "steps",
+				"direct_commands", "cert_file", "key_file", "skip_verify", "reasoning_effort",
+				"before_tool_hook", "after_tool_hook",
+			}
+			if !isSet {
+				configCandidates = append(configCandidates, "show", "set")
+			}
+			configCandidates = append(configCandidates, configKeys...)
+
+			var filterPrefix string
+			if isSet {
+				filterPrefix = strings.TrimPrefix(prefixToPos, "/config set ")
+			} else {
+				filterPrefix = strings.TrimPrefix(prefixToPos, "/config ")
+			}
+
+			for _, c := range configCandidates {
+				if strings.HasPrefix(c, filterPrefix) {
+					match := c
+					if c != "show" && c != "set" {
+						match += " "
+					}
+					matches = append(matches, match)
+				}
+			}
+		} else if strings.HasPrefix(prefixToPos, "/session ") {
+			sessionSubcommands := []string{"list", "new", "load", "branch"}
+			filterPrefix := strings.TrimPrefix(prefixToPos, "/session ")
+			for _, c := range sessionSubcommands {
+				if strings.HasPrefix(c, filterPrefix) {
+					match := c
+					if c == "branch" || c == "load" {
+						match += " "
+					}
+					matches = append(matches, match)
+				}
+			}
+		} else if strings.HasPrefix(prefixToPos, "/skills ") {
+			skillsSubcommands := []string{"load"}
+			filterPrefix := strings.TrimPrefix(prefixToPos, "/skills ")
+			for _, c := range skillsSubcommands {
+				if strings.HasPrefix(c, filterPrefix) {
+					match := c
+					if c == "load" {
+						match += " "
+					}
+					matches = append(matches, match)
+				}
+			}
+		} else if strings.HasPrefix(prefixToPos, "/skills load ") && a != nil {
+			filterPrefix := strings.TrimPrefix(prefixToPos, "/skills load ")
+			for _, s := range a.ActiveSkills {
+				if strings.HasPrefix(s.Name, filterPrefix) {
+					matches = append(matches, s.Name)
+				}
+			}
+		}
+	}
+
 	if len(matches) == 0 {
 		dirPart, filePart := filepath.Split(wordToComplete)
 		searchDir := dirPart
@@ -155,7 +219,6 @@ func (h *customHistory) At(idx int) string {
 	if idx < 0 || idx >= len(h.entries) {
 		return ""
 	}
-	// Return from the end (newest first: idx 0 is the last entry in h.entries)
 	return h.entries[len(h.entries)-1-idx]
 }
 
@@ -180,15 +243,20 @@ func (cw crnlWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func (cw crnlWriter) Unwrap() io.Writer {
+	return cw.w
+}
+
 type keyInterceptorReader struct {
 	r                io.Reader
-	agent            *Agent
-	theme            ui.UITheme
+	agent            *agent.Agent
+	theme            style.UITheme
 	w                io.Writer
 	rl               *term.Terminal
 	currentInputLine string
 	messages         *[]db.Message
 	pasteRemaining   []byte
+	ctrlCInterrupted bool
 }
 
 func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
@@ -210,7 +278,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		return n, err
 	}
 
-	// Detect multiline paste (multiple characters read at once containing newline)
 	hasNewlines := false
 	for i := 0; i < n; i++ {
 		if p[i] == '\n' || p[i] == '\r' {
@@ -224,7 +291,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		var pasteBytes []byte
 		pasteBytes = append(pasteBytes, p[:n]...)
 
-		// Read all remaining buffered bytes from stdin non-blockingly
 		if f, ok := ki.r.(*os.File); ok {
 			fd := int(f.Fd())
 			_ = syscall.SetNonblock(fd, true)
@@ -240,7 +306,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			}
 		}
 
-		// Replace newlines/carriage returns with ↵ symbol for visual representation and to prevent instant submission
 		var cleanedBytes []byte
 		for _, b := range pasteBytes {
 			if b == '\n' || b == '\r' {
@@ -250,7 +315,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			}
 		}
 
-		// Copy to p and buffer the rest
 		nCopied := copy(p, cleanedBytes)
 		if nCopied < len(cleanedBytes) {
 			ki.pasteRemaining = cleanedBytes[nCopied:]
@@ -262,7 +326,11 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	writeIdx := 0
 	for i := 0; i < n; i++ {
 		b := p[i]
-		if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
+		if b == 3 { // Ctrl+C
+			ki.ctrlCInterrupted = true
+			p[writeIdx] = '\n'
+			writeIdx++
+		} else if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
 			if b == 20 { // Ctrl+T
 				ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
@@ -285,32 +353,12 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			} else if b == 15 { // Ctrl+O
 				ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-				ui.SetCollapseStatus(ki.agent.Config.CollapseResults)
+				SetCollapseStatus(ki.agent.Config.CollapseResults)
 			}
 
 			if ki.rl != nil {
-				activeTheme := ui.GetTheme(ki.agent.Config.Theme)
-				promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
-				promptStr := promptStyle.Render("> ")
-				ki.rl.SetPrompt(promptStr)
-
-				cw := crnlWriter{w: ki.w}
-				// Clear screen and scrollback
-				fmt.Fprint(cw, "\x1b[H\x1b[2J")
-				// Print banner
-				ui.PrintBanner(cw, ki.agent.Config)
-				// Print history with updated settings
-				if ki.messages != nil {
-					printSessionHistory(cw, *ki.messages, activeTheme, ki.agent.Config)
-				}
-				// Print prompt separator
-				ki.agent.PrintPromptSeparator(cw, activeTheme)
-				// Draw status bar
-				ui.DrawStatusBar(cw, activeTheme)
-				// Restore prompt and typed input
-				fmt.Fprintf(cw, "\r\x1b[K%s%s", promptStr, ki.currentInputLine)
+				redrawScreen(ki.w, ki.agent, ki, ki.rl)
 			}
-			// Skip returning this byte to term.Terminal
 		} else {
 			p[writeIdx] = b
 			writeIdx++
@@ -320,7 +368,7 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	return writeIdx, nil
 }
 
-func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionID string) {
+func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initialSessionID string) {
 	currentSessionID := initialSessionID
 	if currentSessionID == "" {
 		currentSessionID = db.NewUUID()
@@ -330,33 +378,48 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 	var messages []db.Message
 	if dbHistory, err := db.LoadMessages(currentSessionID); err == nil && len(dbHistory) > 0 {
 		messages = dbHistory
-		exitMessage = fmt.Sprintf("Loaded past session %s (%d messages)", currentSessionID, len(messages))
+		exitMessage = fmt.Sprintf("loaded past session %s (%d messages)", currentSessionID, len(messages))
 	} else {
 		messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
 		}
 		if initialSessionID != "" {
-			exitMessage = fmt.Sprintf("Initialized brand new session %s", currentSessionID)
+			exitMessage = fmt.Sprintf("initialized brand new session %s", currentSessionID)
 		} else {
-			exitMessage = fmt.Sprintf("Started new session %s", currentSessionID)
+			exitMessage = fmt.Sprintf("started new session %s", currentSessionID)
 		}
 	}
 
-	ui.PrintBanner(os.Stderr, a.Config)
-	a.PrintPromptSeparator(os.Stderr, theme)
-
-	// Initialize status bar with estimated session tokens
 	initialPromptTokens, initialCompletionTokens := a.GetGlobalTokens(messages, allowedTools)
 
-	ui.InitStatusBar(os.Stderr)
-	defer ui.ShutdownStatusBar(os.Stderr)
-	ui.SetCollapseStatus(a.Config.CollapseResults)
-	ui.UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0)
-	ui.DrawStatusBar(os.Stderr, theme)
+	activeTasks := 0
+	for _, t := range a.ListTasks() {
+		if t.Status == "running" {
+			activeTasks++
+		}
+	}
+
+	SetScrollRegionOffset(2)
+	InitStatusBar(os.Stderr)
+	defer ShutdownStatusBar(os.Stderr)
+
+	_, height := getTerminalSize()
+	ppWriter := agent.NewPromptPreservingWriter(os.Stderr, height)
+
+	// Print MCP startup errors if any
+	if len(a.McpStartErrors) > 0 {
+		RenderMCPStartupErrors(ppWriter, a.McpStartErrors, theme)
+	}
+
+	PrintBanner(ppWriter, a.Config)
+
+	SetCollapseStatus(a.Config.CollapseResults)
+	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
+	DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+	DrawStatusBar(os.Stderr, theme)
 
 	fd := int(os.Stdin.Fd())
 
-	// Load command history
 	historyLines, _ := db.GetUserHistory()
 	hist := &customHistory{}
 	for _, hLine := range historyLines {
@@ -373,15 +436,46 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 	rl := term.NewTerminal(kiReader, "")
 	kiReader.rl = rl
 	rl.History = hist
+
+	// Set initial terminal size
+	if w, h, err := term.GetSize(fd); err == nil {
+		rl.SetSize(w, h)
+	}
+
+	// Setup SIGWINCH listener for dynamic terminal resizing with 100ms debouncing
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGWINCH)
+	go func() {
+		var debounceTimer *time.Timer
+		for range sigChan {
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			debounceTimer = time.AfterFunc(100*time.Millisecond, func() {
+				if w, h, err := term.GetSize(fd); err == nil {
+					rl.SetSize(w, h)
+					redrawScreen(os.Stderr, a, kiReader, rl)
+				}
+			})
+		}
+	}()
+	defer func() {
+		signal.Stop(sigChan)
+	}()
+
 	rl.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
 		kiReader.currentInputLine = line
-		return autoCompleteCallback(line, pos, key)
+		return autoCompleteCallback(line, pos, key, a)
 	}
 
 	for {
 		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		promptStr := promptStyle.Render("> ")
 		rl.SetPrompt(promptStr)
+		_, height := getTerminalSize()
+		if height > 0 {
+			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2)
+		}
 
 		oldState, err := term.MakeRaw(fd)
 		if err != nil {
@@ -392,21 +486,44 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 		line, err := rl.ReadLine()
 		term.Restore(fd, oldState)
 
+		if kiReader.ctrlCInterrupted {
+			kiReader.ctrlCInterrupted = false
+			fmt.Fprint(os.Stderr, "^C\n")
+			activeTasks := 0
+			for _, t := range a.ListTasks() {
+				if t.Status == "running" {
+					activeTasks++
+				}
+			}
+			pTok, cTok := a.GetGlobalTokens(messages, allowedTools)
+			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
+			DrawStatusBar(os.Stderr, theme)
+			continue
+		}
+
 		if err != nil {
 			break
 		}
 
 		kiReader.currentInputLine = ""
-
-		// Restore original newlines for pasted multiline content
 		line = strings.ReplaceAll(line, "↵", "\n")
 
 		if strings.TrimSpace(line) == "" {
-			ui.DrawStatusBar(os.Stderr, theme)
+			activeTasks := 0
+			for _, t := range a.ListTasks() {
+				if t.Status == "running" {
+					activeTasks++
+				}
+			}
+			pTok, cTok := a.GetGlobalTokens(messages, allowedTools)
+			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
+			DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
-		hist.Add(line)
+		if !strings.HasPrefix(line, "/") {
+			hist.Add(line)
+		}
 
 		fmt.Fprintln(os.Stderr, style.NewStyle().Foreground(theme.Border).Render("──────────────────────────────────────────────────────────"))
 
@@ -425,20 +542,18 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 					fmt.Fprintf(os.Stderr, "cd: %v\n", err)
 				} else {
 					pwd, _ := os.Getwd()
-					fmt.Fprintf(os.Stderr, "Changed directory to: %s\n", pwd)
+					fmt.Fprintf(os.Stderr, "changed directory to: %s\n", pwd)
 				}
-				contextMsg := fmt.Sprintf("[User manually changed working directory to: `%s`]", target)
+				contextMsg := fmt.Sprintf("[user manually changed working directory to: `%s`]", target)
 				messages = append(messages, db.Message{Role: "user", Content: contextMsg})
 				_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
-				a.PrintPromptSeparator(os.Stderr, theme)
-				ui.DrawStatusBar(os.Stderr, theme)
+				DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+				DrawStatusBar(os.Stderr, theme)
 				continue
 			}
 
-			fmt.Fprintf(os.Stderr, "Executing: %s\n", cmdStr)
-
-			// Temporarily disable status bar during manual shell commands
-			ui.ShutdownStatusBar(os.Stderr)
+			fmt.Fprintf(os.Stderr, "executing: %s\n", cmdStr)
+			ShutdownStatusBar(os.Stderr)
 
 			cmd := exec.Command("bash", "-c", cmdStr)
 			cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C.UTF-8")
@@ -448,9 +563,8 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			cmd.Stdin = os.Stdin
 			err := cmd.Run()
 
-			// Re-enable status bar after manual command execution
-			ui.InitStatusBar(os.Stderr)
-			ui.DrawStatusBar(os.Stderr, theme)
+			InitStatusBar(os.Stderr)
+			DrawStatusBar(os.Stderr, theme)
 
 			output := tool.SanitizeUTF8(stdout.Bytes())
 			errOutput := tool.SanitizeUTF8(stderr.Bytes())
@@ -480,23 +594,23 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 			successStyle := style.NewStyle().Foreground(theme.Success).Italic(true)
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, successStyle.Render("Command output appended to conversation context."))
-			a.PrintPromptSeparator(os.Stderr, theme)
-			ui.DrawStatusBar(os.Stderr, theme)
+			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+			DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
-		if handled, quit := a.HandleSlashCommand(line, &messages, allowedTools, &theme, os.Stderr, &currentSessionID, rl.History); handled {
+		if handled, quit := HandleSlashCommand(a, line, &messages, allowedTools, &theme, os.Stderr, &currentSessionID, rl.History); handled {
 			if quit {
 				break
 			}
-			a.PrintPromptSeparator(os.Stderr, theme)
-			ui.DrawStatusBar(os.Stderr, theme)
+			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+			DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
 		a.RunAgentLoop(os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
-		a.PrintPromptSeparator(os.Stderr, theme)
-		ui.DrawStatusBar(os.Stderr, theme)
+		DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+		DrawStatusBar(os.Stderr, theme)
 	}
 
 	var finalStatus string
@@ -504,12 +618,12 @@ func (a *Agent) RunREPL(allowedTools []string, theme ui.UITheme, initialSessionI
 		finalStatus = exitMessage
 	} else {
 		if len(messages) > 1 {
-			finalStatus = fmt.Sprintf("Session %s", currentSessionID)
+			finalStatus = fmt.Sprintf("session %s", currentSessionID)
 		} else {
-			finalStatus = fmt.Sprintf("Initialized brand new session %s", currentSessionID)
+			finalStatus = fmt.Sprintf("initialized brand new session %s", currentSessionID)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "Goodbye! %s.\n", finalStatus)
+	fmt.Fprintf(os.Stderr, "goodbye! %s.\n", finalStatus)
 }
 
 func parseManualCommand(line string, enabled bool) (bool, string) {
@@ -529,11 +643,20 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 
 	firstWord := parts[0]
 	directCommands := map[string]bool{
-		"ls":  true,
-		"pwd": true,
-		"git": true,
-		"cat": true,
-		"cd":  true,
+		"ls":    true,
+		"pwd":   true,
+		"git":   true,
+		"cat":   true,
+		"cd":    true,
+		"mkdir": true,
+		"touch": true,
+		"rm":    true,
+		"mv":    true,
+		"cp":    true,
+		"grep":  true,
+		"find":  true,
+		"chmod": true,
+		"make":  true,
 	}
 
 	if directCommands[firstWord] {
@@ -543,98 +666,80 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 	return false, ""
 }
 
-func (a *Agent) PrintPromptSeparator(w io.Writer, theme ui.UITheme) {
-	borderStyle := style.NewStyle().Foreground(theme.Border)
-	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	activeTheme := style.GetTheme(a.Config.Theme)
+	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
+	promptStr := promptStyle.Render("> ")
 
-	thinkingText := "off"
-	if a.Config.ShowThinking {
-		thinkingText = a.Config.ReasoningEffort
-	}
-	statusPart := fmt.Sprintf("[reasoning:%s]", thinkingText)
-
-	width, _, err := term.GetSize(int(os.Stderr.Fd()))
-	if err != nil || width <= 0 {
-		width = 80
+	if rl != nil {
+		rl.SetPrompt(promptStr)
 	}
 
-	prefix := "─── Prompt "
-	dashesCount := width - 11 - len(statusPart) - 1
-	if dashesCount < 5 {
-		dashesCount = 5
-	}
-	dashes := strings.Repeat("─", dashesCount)
-	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
-}
+	cw := crnlWriter{w: w}
 
-func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (int, int) {
-	// Find the last assistant message
-	lastAssistantIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
-			lastAssistantIdx = i
-			break
+	// Reset lastH to 0 so DrawStatusBar doesn't perform clamped clear on old height
+	lastH = 0
+
+	// 1. Clear screen
+	fmt.Fprint(cw, "\x1b[H\x1b[2J")
+
+	// Buffer everything that goes into the scroll region (rows 1..height-4)
+	var buf bytes.Buffer
+	cwBuf := crnlWriter{w: &buf}
+
+	// 2. Render startup errors if any
+	if len(a.McpStartErrors) > 0 {
+		RenderMCPStartupErrors(cwBuf, a.McpStartErrors, activeTheme)
+	}
+
+	// 3. Render banner and history
+	PrintBanner(cwBuf, a.Config)
+	if kiReader.messages != nil {
+		PrintSessionHistory(cwBuf, *kiReader.messages, activeTheme, a.Config)
+	}
+
+	// Calculate terminal size
+	_, height := getTerminalSize()
+	scrollBottom := height - 4
+	if scrollBottom < 1 {
+		scrollBottom = 1
+	}
+
+	content := buf.String()
+	linesCount := strings.Count(content, "\n")
+
+	// If content is shorter than the scroll region, print padding newlines first
+	// to push history down snugly right above the prompt separator
+	if linesCount < scrollBottom {
+		padding := scrollBottom - linesCount
+		fmt.Fprint(cw, strings.Repeat("\n", padding))
+	}
+
+	// Print the buffered content
+	fmt.Fprint(cw, content)
+
+	// 4. Draw prompt separator
+	DrawStaticPromptSeparator(cw, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
+
+	// 5. Update status bar metrics and redraw status bar
+	activeTasks := 0
+	for _, t := range a.ListTasks() {
+		if t.Status == "running" {
+			activeTasks++
 		}
 	}
 
-	globalPrompt := 0
-	globalCompletion := 0
-
-	// Sum all completion tokens
-	for _, m := range messages {
-		if m.Role == "assistant" {
-			if m.CompletionTokens > 0 {
-				globalCompletion += m.CompletionTokens
-			} else {
-				globalCompletion += (len(m.Content) + len(m.ReasoningContent)) / 4
-			}
-		}
+	pTok, cTok := 0, 0
+	if kiReader.messages != nil {
+		pTok, cTok = a.GetGlobalTokens(*kiReader.messages, nil)
 	}
 
-	tools := a.Registry.GetAvailableTools(allowedTools)
-	var toolsChars int
-	if len(tools) > 0 {
-		if toolsData, err := json.Marshal(tools); err == nil {
-			toolsChars = len(toolsData)
-		}
-	}
-	toolsEst := toolsChars / 4
+	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
+	DrawStatusBar(cw, activeTheme)
 
-	if lastAssistantIdx != -1 {
-		// We have an assistant message.
-		// Start with the prompt tokens of that turn.
-		if messages[lastAssistantIdx].PromptTokens > 0 {
-			globalPrompt = messages[lastAssistantIdx].PromptTokens
-		} else {
-			// Fallback if not stored
-			for i := 0; i <= lastAssistantIdx; i++ {
-				m := messages[i]
-				if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-					globalPrompt += len(m.Content) / 4
-				}
-			}
-			globalPrompt += toolsEst
-		}
-
-		// Add estimation for any messages after the last assistant message
-		for i := lastAssistantIdx + 1; i < len(messages); i++ {
-			m := messages[i]
-			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-				globalPrompt += len(m.Content) / 4
-			}
-		}
-	} else {
-		// No assistant messages yet. Estimate everything.
-		for _, m := range messages {
-			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-				globalPrompt += len(m.Content) / 4
-			}
-		}
-		if globalPrompt == 0 {
-			globalPrompt = len(a.GetSystemPrompt()) / 4
-		}
-		globalPrompt += toolsEst
-	}
-
-	return globalPrompt, globalCompletion
+	// 6. Draw input line and place cursor
+	fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2)
+	fmt.Fprint(cw, promptStr)
+	fmt.Fprint(cw, kiReader.currentInputLine)
+	fmt.Fprintf(cw, "\x1b[%d;%dH", height-2, 3+len(kiReader.currentInputLine))
 }

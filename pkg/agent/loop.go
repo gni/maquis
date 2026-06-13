@@ -17,19 +17,40 @@ import (
 
 	"bidouille/pkg/config"
 	"bidouille/pkg/db"
-	"bidouille/pkg/ui"
 )
 
-// RunAgentLoop executes the main agent reasoning, inference, and tool execution cycle.
-func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme ui.UITheme, isNonInteractive bool, sessionID string) {
+func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme style.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return
 	}
 
 	writerToUse := w
-	if !isNonInteractive {
-		ui.DrawStatusBar(w, theme)
+	if !isNonInteractive && a.UI != nil {
+		fd := int(os.Stderr.Fd())
+		var height int
+		if term.IsTerminal(fd) {
+			if _, h, err := term.GetSize(fd); err == nil && h > 0 {
+				height = h
+				writerToUse = newPromptPreservingWriter(w, height)
+			}
+		}
+
+		// 1. Clear the static prompt line at height-2 so it is empty while the agent runs
+		if height > 0 {
+			fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K", height-2)
+		}
+
+		// 2. Redraw status bar
+		a.UI.DrawStatusBar(w, theme)
+
+		// 3. Print the prompt separator and user prompt inside the scroll region so they scroll up
+		printPromptSeparator(writerToUse, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		fmt.Fprintf(writerToUse, "%s%s\n", promptStyle.Render("> "), prompt)
+
+		divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
+		fmt.Fprintln(writerToUse, divider)
 	}
 
 	var totalCompletionTokens int
@@ -43,8 +64,8 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			elapsed := time.Since(startTime)
 			timeStr := fmt.Sprintf("%s (%.1fs)", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
 			timeStyled := style.NewStyle().Foreground(theme.Border).Render(timeStr)
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, timeStyled)
+			fmt.Fprintln(writerToUse)
+			fmt.Fprintln(writerToUse, timeStyled)
 		}
 	}()
 
@@ -68,7 +89,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 	go func() {
 		select {
 		case <-sigChan:
-			fmt.Fprintln(w, "\n\n[Operation Cancelled by User]")
+			fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
 			cancel()
 		case <-ctx.Done():
 		}
@@ -84,13 +105,9 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		}
 
 		if iter > 1 {
-			width, _, err := term.GetSize(int(os.Stderr.Fd()))
-			if err != nil || width <= 0 {
-				width = 80
-			}
-			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", width))
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, divider)
+			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
+			fmt.Fprintln(writerToUse)
+			fmt.Fprintln(writerToUse, divider)
 		}
 
 		chunkChan := make(chan StreamChunk, 200)
@@ -107,7 +124,12 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		}()
 
 		ncw := &newlineCounterWriter{Writer: writerToUse}
-		sr := ui.NewStreamRenderer(ncw, theme, a.Config.ShowThinking)
+		var sr StreamRenderer
+		if a.UI != nil {
+			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking)
+		} else {
+			sr = &fallbackStreamRenderer{w: ncw}
+		}
 
 		stopKeyListen := make(chan struct{})
 		keyListenDone := make(chan struct{})
@@ -149,7 +171,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						if buf[0] == 15 { // Ctrl+O
 							runningTaskId := a.GetLastRunningTaskId()
 							if runningTaskId != "" {
-								a.ToggleStreaming(runningTaskId, w)
+								a.ToggleStreaming(runningTaskId, writerToUse)
 							} else {
 								a.Config.CollapseResults = !a.Config.CollapseResults
 								_ = config.SaveConfig(a.ConfigPath, a.Config)
@@ -158,9 +180,11 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 									status = "COLLAPSED"
 								}
 								infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-								fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+O: Tool results will be %s]", status)))
-								ui.SetCollapseStatus(a.Config.CollapseResults)
-								ui.DrawStatusBar(w, theme)
+								fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+O: Tool results will be %s]", status)))
+								if a.UI != nil {
+									a.UI.SetCollapseStatus(a.Config.CollapseResults)
+									a.UI.DrawStatusBar(w, theme)
+								}
 							}
 						} else if buf[0] == 20 { // Ctrl+T
 							a.Config.ShowThinking = !a.Config.ShowThinking
@@ -170,7 +194,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 								status = "DISABLED"
 							}
 							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-							fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+T: Thinking is now %s]", status)))
+							fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+T: Thinking is now %s]", status)))
 						} else if buf[0] == 18 { // Ctrl+R
 							nextEffort := "low"
 							switch strings.ToLower(a.Config.ReasoningEffort) {
@@ -188,9 +212,9 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 							a.Config.ReasoningEffort = nextEffort
 							_ = config.SaveConfig(a.ConfigPath, a.Config)
 							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-							fmt.Fprintf(w, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+R: Reasoning effort set to %s]", nextEffort)))
+							fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+R: Reasoning effort set to %s]", nextEffort)))
 						} else if buf[0] == 3 || buf[0] == 27 { // Ctrl+C or Escape
-							fmt.Fprintln(w, "\n\n[Operation Cancelled by User]")
+							fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
 							cancel()
 							return
 						}
@@ -200,9 +224,52 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			}
 		}()
 
-		parser := &jsonStreamParser{activeToolIndex: -1}
-
 		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
+
+		tickerDone := make(chan struct{})
+		var tickerOnce sync.Once
+		stopTicker := func() {
+			tickerOnce.Do(func() {
+				close(tickerDone)
+				if a.UI != nil && !isNonInteractive {
+					activeTasks := 0
+					for _, t := range a.ListTasks() {
+						if t.Status == "running" {
+							activeTasks++
+						}
+					}
+					a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
+					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+					a.UI.DrawStatusBar(w, theme)
+				}
+			})
+		}
+		defer stopTicker()
+
+		if a.UI != nil && !isNonInteractive {
+			activeTasks := 0
+			for _, t := range a.ListTasks() {
+				if t.Status == "running" {
+					activeTasks++
+				}
+			}
+			a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, true, 0, activeTasks)
+			a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+			a.UI.DrawStatusBar(w, theme)
+
+			go func() {
+				ticker := time.NewTicker(80 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-tickerDone:
+						return
+					case <-ticker.C:
+						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+					}
+				}
+			}()
+		}
 
 		var reasoningChars int
 		var textChars int
@@ -224,19 +291,9 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				sr.Write(chunk.Content)
 				textChars += len(chunk.Content)
 			} else if chunk.Type == "tool_name" {
-				if parser.activeToolIndex != chunk.ToolCallIndex || parser.activeToolName == "" {
-					sr.Flush()
-					parser.needsLeadingNewline = sr.HasOutput()
-					parser.activeToolName = chunk.Content
-					parser.activeToolIndex = chunk.ToolCallIndex
-					parser.titlePrinted = false
-					parser.path = ""
-					parser.pathPrinted = false
-				} else {
-					parser.activeToolName = chunk.Content
-				}
+				sr.StartToolCall(chunk.Content, chunk.ToolCallIndex)
 			} else if chunk.Type == "tool_call" {
-				parser.feed(chunk.Content, ncw, theme)
+				sr.WriteToolCall(chunk.Content)
 				toolCallChars += len(chunk.Content)
 			}
 
@@ -252,8 +309,17 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 							tps = float64(currentCompletionTokensEst) / elapsed
 						}
 					}
-					ui.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps)
-					ui.DrawStatusBar(w, theme)
+					if a.UI != nil {
+						activeTasks := 0
+						for _, t := range a.ListTasks() {
+							if t.Status == "running" {
+								activeTasks++
+							}
+						}
+						a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps, activeTasks)
+						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+						a.UI.DrawStatusBar(w, theme)
+					}
 					lastDraw = now
 				}
 			}
@@ -261,16 +327,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		close(stopKeyListen)
 		<-keyListenDone
 		sr.Flush()
-
-		if parser.activeToolName != "" {
-			if !parser.titlePrinted {
-				parser.printStreamTitle(ncw, theme)
-			}
-			if parser.outputBuf.Len() > 0 {
-				fmt.Fprint(ncw, parser.outputBuf.String())
-				parser.outputBuf.Reset()
-			}
-		}
+		stopTicker()
 
 		if err := <-streamErrChan; err != nil {
 			if ctx.Err() == nil {
@@ -296,7 +353,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
 		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold * float64(a.Config.ContextWindowLimit)) {
-			a.compressHistory(ctx, messages, sessionID, theme, w)
+			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
 		}
 
 		var finalTps float64
@@ -318,40 +375,40 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			cStyled := style.NewStyle().Foreground(theme.Highlight).Render(currentCStr)
 			dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
 
-			fmt.Fprintln(w)
+			fmt.Fprintln(writerToUse)
 			if !isNonInteractive {
-				ui.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps)
-				ui.DrawStatusBar(w, theme)
-
-				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
-					fmt.Fprintf(w, "%s%s%s\n", cStyled, dotStyled, timeStyled)
-				} else {
-					fmt.Fprintln(w, timeStyled)
+				if a.UI != nil {
+					activeTasks := 0
+					for _, t := range a.ListTasks() {
+						if t.Status == "running" {
+							activeTasks++
+						}
+					}
+					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks)
+					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+					a.UI.DrawStatusBar(w, theme)
 				}
+			}
+			if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
+				fmt.Fprintf(writerToUse, "%s%s%s\n", cStyled, dotStyled, timeStyled)
 			} else {
-				totalTokens := assistantMsg.PromptTokens + assistantMsg.CompletionTokens
-				pct := (float64(totalTokens) / float64(a.Config.ContextWindowLimit)) * 100.0
-				totStr := fmt.Sprintf("%d", totalTokens)
-				if totalTokens >= 1000 {
-					totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
-				}
-				limitStr := fmt.Sprintf("%d", a.Config.ContextWindowLimit)
-				if a.Config.ContextWindowLimit >= 1000 {
-					limitStr = fmt.Sprintf("%dk", a.Config.ContextWindowLimit/1000)
-				}
-				ctxStyled := style.NewStyle().Foreground(theme.Primary).Render(fmt.Sprintf("Context: %s/%s (%.1f%%)", totStr, limitStr, pct))
-				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
-					fmt.Fprintf(ncw, "%s%s%s%s%s\n", cStyled, dotStyled, ctxStyled, dotStyled, timeStyled)
-				} else {
-					fmt.Fprintln(ncw, timeStyled)
-				}
+				fmt.Fprintln(writerToUse, timeStyled)
 			}
 			return
 		}
 
 		if !isNonInteractive {
-			ui.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps)
-			ui.DrawStatusBar(w, theme)
+			if a.UI != nil {
+				activeTasks := 0
+				for _, t := range a.ListTasks() {
+					if t.Status == "running" {
+						activeTasks++
+					}
+				}
+				a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks)
+				a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+				a.UI.DrawStatusBar(w, theme)
+			}
 		}
 
 		type toolExecutionResult struct {
@@ -372,14 +429,21 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				return
 			}
 
-			approved := a.Config.IsAutoApprove()
-			if !approved {
-				var always bool
-				approved, always = ui.AskForApproval(ncw, theme)
+			approved := false
+			always := false
+			if !a.Config.AutoApprove && !a.Config.YoloMode && !isReadOnly(tc.Function.Name) {
+				sr.Flush()
+				if a.UI != nil {
+					approved, always = a.UI.AskForApproval(ncw, theme)
+				} else {
+					approved = true
+				}
 				if always {
 					a.Config.AutoApprove = true
-					a.Config.YoloMode = true
+					_ = config.SaveConfig(a.ConfigPath, a.Config)
 				}
+			} else {
+				approved = true
 			}
 
 			if approved {
@@ -391,9 +455,14 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 
 		if len(rejectedBatch) > 0 {
 			for _, tc := range rejectedBatch {
-				toolOutput := "Tool execution rejected by user."
-				fmt.Fprintln(ncw, "Tool execution rejected.")
-				ui.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, -1)
+				toolOutput := "Error: Tool execution rejected by user."
+				a.lastToolOutput = toolOutput
+				a.lastToolIsError = true
+				if a.UI != nil {
+					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, -1)
+				} else {
+					fmt.Fprintln(ncw, toolOutput)
+				}
 
 				*messages = append(*messages, db.Message{
 					Role:       "tool",
@@ -421,7 +490,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 				toolsStr := strings.Join(toolNames, ", ")
 
-				fmt.Fprintf(ncw, "\r\x1b[K%s Executing %d tools (%s)...",
+				fmt.Fprintf(ncw, "\r\x1b[K%s executing %d tools (%s)...",
 					style.NewStyle().Foreground(theme.Secondary).Render(frames[0]),
 					len(approvedBatch),
 					toolsStr,
@@ -441,7 +510,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						}
 						frame := frames[i%len(frames)]
 						i++
-						fmt.Fprintf(ncw, "\r\x1b[K%s Executing %d tools (%s)...",
+						fmt.Fprintf(ncw, "\r\x1b[K%s executing %d tools (%s)...",
 							style.NewStyle().Foreground(theme.Secondary).Render(frame),
 							len(approvedBatch),
 							toolsStr,
@@ -489,7 +558,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				sortedResults[r.index] = r
 			}
 
-			toolTitleLineNumbers := parser.toolTitleLineNumbers
 			for _, r := range sortedResults {
 				toolOutput := r.output
 				toolErr := r.err
@@ -502,11 +570,16 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 
 				newlineDist := -1
-				if r.index < len(toolTitleLineNumbers) {
-					newlineDist = ncw.count - toolTitleLineNumbers[r.index]
+				titleLineNum := sr.GetToolTitleLineNumber(r.index)
+				if titleLineNum != -1 {
+					newlineDist = ncw.count - titleLineNum
 				}
 
-				ui.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, r.tc.Function.Name, r.tc.Function.Arguments, newlineDist)
+				if a.UI != nil {
+					a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, r.tc.Function.Name, r.tc.Function.Arguments, newlineDist)
+				} else {
+					fmt.Fprintln(ncw, toolOutput)
+				}
 
 				isReadOnlyTool := r.tc.Function.Name == "read" || r.tc.Function.Name == "ls" || r.tc.Function.Name == "grep" || r.tc.Function.Name == "find"
 				isPrevEdit := a.lastToolWasEdit
@@ -514,7 +587,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
 					a.lastToolOutput = toolOutput
 					a.lastToolIsError = toolErr != nil
-					a.lastToolTheme = theme
 					a.lastToolWasEdit = (r.tc.Function.Name == "edit")
 				}
 
@@ -534,5 +606,82 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 	}
 
 	errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-	fmt.Fprintf(w, "\n%s Reached maximum reasoning steps limit (%d).\n", errStyle.Render("WARNING:"), maxSteps)
+	fmt.Fprintf(writerToUse, "\n%s reached maximum reasoning steps limit (%d).\n", errStyle.Render("warning:"), maxSteps)
 }
+
+type newlineCounterWriter struct {
+	io.Writer
+	count int
+}
+
+func (n *newlineCounterWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\n' {
+			n.count++
+		}
+	}
+	return n.Writer.Write(p)
+}
+
+func (n *newlineCounterWriter) GetCount() int {
+	return n.count
+}
+
+func (n *newlineCounterWriter) Unwrap() io.Writer {
+	return n.Writer
+}
+
+type fallbackStreamRenderer struct {
+	w io.Writer
+}
+
+func (f *fallbackStreamRenderer) Write(content string) {
+	fmt.Fprint(f.w, content)
+}
+func (f *fallbackStreamRenderer) WriteReasoning(content string)                     {}
+func (f *fallbackStreamRenderer) Flush()                                          {}
+func (f *fallbackStreamRenderer) HasOutput() bool                                 { return false }
+func (f *fallbackStreamRenderer) StartToolCall(toolName string, toolCallIndex int) {}
+func (f *fallbackStreamRenderer) WriteToolCall(content string)                     {}
+func (f *fallbackStreamRenderer) GetToolTitleLineNumber(index int) int             { return -1 }
+
+func isReadOnly(toolName string) bool {
+	return toolName == "read" || toolName == "ls" || toolName == "grep" || toolName == "find" || toolName == "task_status"
+}
+
+func getTerminalSize() (int, int) {
+	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
+		return w, h
+	}
+	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
+		return w, h
+	}
+	if w, h, err := term.GetSize(int(os.Stderr.Fd())); err == nil && h > 0 {
+		return w, h
+	}
+	return 80, 24
+}
+
+func printPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme) {
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+
+	thinkingText := "off"
+	if showThinking {
+		thinkingText = reasoningEffort
+	}
+	statusPart := fmt.Sprintf("[reasoning:%s]", thinkingText)
+
+	prefix := "─── Prompt "
+	width, _ := getTerminalSize()
+	statusLen := len(stripAnsiSeqs(statusPart))
+	prefixLen := len(prefix)
+
+	dashesCount := width - prefixLen - statusLen - 2
+	if dashesCount < 3 {
+		dashesCount = 3
+	}
+	dashes := strings.Repeat("─", dashesCount)
+	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
+}
+

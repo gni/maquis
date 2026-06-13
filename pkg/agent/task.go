@@ -12,16 +12,17 @@ import (
 )
 
 type Task struct {
-	ID        string
-	Command   string
-	Status    string
-	Stdout    *bytes.Buffer
-	Stderr    *bytes.Buffer
-	Cmd       *exec.Cmd
-	StartTime time.Time
-	EndTime   time.Time
-	Err       error
-	mu        sync.Mutex
+	ID             string
+	Command        string
+	Status         string
+	Stdout         *bytes.Buffer
+	Stderr         *bytes.Buffer
+	Cmd            *exec.Cmd
+	StartTime      time.Time
+	EndTime        time.Time
+	Err            error
+	mu             sync.Mutex
+	LastOutputTime time.Time
 }
 
 type TaskInfo struct {
@@ -46,6 +47,7 @@ func (tw *taskWriter) Write(p []byte) (n int, err error) {
 	} else {
 		tw.task.Stdout.Write(p)
 	}
+	tw.task.LastOutputTime = time.Now()
 	tw.task.mu.Unlock()
 
 	tw.agent.TasksMu.Lock()
@@ -65,12 +67,13 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 	a.NextTaskId++
 
 	task := &Task{
-		ID:        id,
-		Command:   command,
-		Status:    "running",
-		Stdout:    new(bytes.Buffer),
-		Stderr:    new(bytes.Buffer),
-		StartTime: time.Now(),
+		ID:             id,
+		Command:        command,
+		Status:         "running",
+		Stdout:         new(bytes.Buffer),
+		Stderr:         new(bytes.Buffer),
+		StartTime:      time.Now(),
+		LastOutputTime: time.Now(),
 	}
 	a.Tasks[id] = task
 	a.TasksMu.Unlock()
@@ -117,6 +120,44 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 			fmt.Fprintf(w, "\n[Task %s finished with status: %s]\n", task.ID, finalStatus)
 		}
 		a.TasksMu.Unlock()
+	}()
+
+	go func() {
+		// Watchdog to kill the task if no output (no reply) is received for 30 seconds
+		timeout := 30 * time.Second
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				task.mu.Lock()
+				status := task.Status
+				lastOut := task.LastOutputTime
+				task.mu.Unlock()
+
+				if status != "running" {
+					return
+				}
+
+				if time.Since(lastOut) > timeout {
+					_ = a.KillTask(task.ID)
+
+					task.mu.Lock()
+					task.Status = "timed_out"
+					task.EndTime = time.Now()
+					task.mu.Unlock()
+
+					a.TasksMu.Lock()
+					if a.StreamingTask == task.ID {
+						a.StreamingTask = ""
+					}
+					fmt.Fprintf(w, "\n[Task %s killed: no output (no reply) for %v]\n", task.ID, timeout)
+					a.TasksMu.Unlock()
+					return
+				}
+			}
+		}
 	}()
 
 	return id, nil

@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"bidouille/pkg/db"
 )
 
 
@@ -65,3 +68,76 @@ func (a *Agent) LoadMemoryContext() string {
 
 	return sb.String()
 }
+
+func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (int, int) {
+	// Find the last assistant message
+	lastAssistantIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
+	globalPrompt := 0
+	globalCompletion := 0
+
+	// Sum all completion tokens
+	for _, m := range messages {
+		if m.Role == "assistant" {
+			if m.CompletionTokens > 0 {
+				globalCompletion += m.CompletionTokens
+			} else {
+				globalCompletion += (len(m.Content) + len(m.ReasoningContent)) / 4
+			}
+		}
+	}
+
+	tools := a.Registry.GetAvailableTools(allowedTools)
+	var toolsChars int
+	if len(tools) > 0 {
+		if toolsData, err := json.Marshal(tools); err == nil {
+			toolsChars = len(toolsData)
+		}
+	}
+	toolsEst := toolsChars / 4
+
+	if lastAssistantIdx != -1 {
+		// We have an assistant message.
+		// Start with the prompt tokens of that turn.
+		if messages[lastAssistantIdx].PromptTokens > 0 {
+			globalPrompt = messages[lastAssistantIdx].PromptTokens
+		} else {
+			// Fallback if not stored
+			for i := 0; i <= lastAssistantIdx; i++ {
+				m := messages[i]
+				if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+					globalPrompt += len(m.Content) / 4
+				}
+			}
+			globalPrompt += toolsEst
+		}
+
+		// Add estimation for any messages after the last assistant message
+		for i := lastAssistantIdx + 1; i < len(messages); i++ {
+			m := messages[i]
+			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+				globalPrompt += len(m.Content) / 4
+			}
+		}
+	} else {
+		// No assistant messages yet. Estimate everything.
+		for _, m := range messages {
+			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
+				globalPrompt += len(m.Content) / 4
+			}
+		}
+		if globalPrompt == 0 {
+			globalPrompt = len(a.GetSystemPrompt()) / 4
+		}
+		globalPrompt += toolsEst
+	}
+
+	return globalPrompt, globalCompletion
+}
+

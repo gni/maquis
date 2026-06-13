@@ -17,11 +17,31 @@ import (
 	"bidouille/pkg/agent/tool"
 	"bidouille/pkg/config"
 	"bidouille/pkg/db"
-	"bidouille/pkg/ui"
 	"bidouille/pkg/ui/style"
 )
 
+type StreamRenderer interface {
+	Write(content string)
+	WriteReasoning(content string)
+	Flush()
+	HasOutput() bool
+	StartToolCall(toolName string, toolCallIndex int)
+	WriteToolCall(content string)
+	GetToolTitleLineNumber(index int) int
+}
+
+type AgentUI interface {
+	DrawStatusBar(w io.Writer, theme style.UITheme)
+	DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme)
+	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool) StreamRenderer
+	SetCollapseStatus(collapsed bool)
+	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int)
+	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)
+	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int)
+}
+
 type Agent struct {
+	UI             AgentUI
 	Config         *config.Config
 	ConfigPath     string
 	HttpClient     *http.Client
@@ -42,7 +62,6 @@ type Agent struct {
 
 	lastToolOutput         string
 	lastToolIsError        bool
-	lastToolTheme          ui.UITheme
 	lastToolWasEdit        bool
 	lastGenerationDuration time.Duration
 }
@@ -136,7 +155,7 @@ func (a *Agent) compressHistory(
 	ctx context.Context,
 	messages *[]db.Message,
 	sessionID string,
-	theme ui.UITheme,
+	theme style.UITheme,
 	w io.Writer,
 ) {
 	keepMsgCount := 10

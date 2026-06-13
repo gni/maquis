@@ -90,9 +90,24 @@ func DefaultConfig() *Config {
 	}
 }
 
+var defaultTemplate []byte
+
+func SetDefaultTemplate(template []byte) {
+	defaultTemplate = template
+}
+
 func LoadConfig(path string) (*Config, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		conf := DefaultConfig()
+		var conf *Config
+		if len(defaultTemplate) > 0 {
+			conf = DefaultConfig()
+			if err := json.Unmarshal(defaultTemplate, conf); err != nil {
+				conf = DefaultConfig()
+			}
+		} else {
+			conf = DefaultConfig()
+		}
+
 		_ = SaveConfig(path, conf)
 		return conf, nil
 	}

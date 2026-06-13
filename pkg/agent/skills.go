@@ -10,7 +10,6 @@ import (
 	"bidouille/pkg/ui/style"
 
 	"bidouille/pkg/agent/tool"
-	"bidouille/pkg/ui"
 )
 
 type Skill = tool.Skill
@@ -91,7 +90,7 @@ func LoadSkills(skillsDir string) ([]Skill, error) {
 	return skills, err
 }
 
-func RenderSkills(w io.Writer, skills []Skill, theme ui.UITheme) {
+func RenderSkills(w io.Writer, skills []Skill, theme style.UITheme) {
 	if len(skills) == 0 {
 		fmt.Fprintln(w, "No reference skills found.")
 		return
@@ -116,6 +115,7 @@ func RenderSkills(w io.Writer, skills []Skill, theme ui.UITheme) {
 func (a *Agent) GetSystemPrompt() string {
 	thinkingGuidelines := "\n\nThinking/Reasoning Guidelines:\n" +
 		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n" +
+		"- Before editing or modifying a file, you MUST read the file (or the relevant part of it) first to ensure your edits match the current content exactly and avoid \"oldText block not found\" errors.\n" +
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max) and strictly restricted to immediate technical execution planning. Avoid conversational monologues, introspective reflections, or debating choices in thoughts.\n" +
 		"- You MUST NOT output any conversational preambles, introductory text, explanations, or warnings before calling a tool. The tool call must be the absolute first content you generate.\n" +
 		"- For greetings, basic chit-chat, or simple acknowledgments, respond immediately with zero reasoning and minimal text. Do NOT call any tools for social replies.\n" +

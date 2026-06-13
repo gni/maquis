@@ -111,6 +111,7 @@ var rootCmd = &cobra.Command{
 
 		// Instantiate Agent context
 		a := agent.NewAgent(cfg, configPath, httpClient)
+		a.UI = &ui.AgentUIImpl{}
 
 		// Load reference skills
 		a.ActiveSkills, err = agent.LoadSkills(cfg.SkillsDir)
@@ -118,22 +119,22 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
 		}
 
+		pipedData := ""
+		if isPiped() {
+			pipedData, _ = readStdin()
+		}
+		hasPromptArgs := len(args) > 0
+		isNonInteractive := pipedData != "" || hasPromptArgs
+
 		// Start MCP servers
 		if len(cfg.MCPServers) > 0 {
 			_ = a.StartMCPServers(cfg.MCPServers)
 			defer a.StopMCPServers()
 
-			if len(a.McpStartErrors) > 0 {
+			if len(a.McpStartErrors) > 0 && isNonInteractive {
 				ui.RenderMCPStartupErrors(os.Stderr, a.McpStartErrors, theme)
 			}
 		}
-
-		pipedData := ""
-		if isPiped() {
-			pipedData, _ = readStdin()
-		}
-
-		hasPromptArgs := len(args) > 0
 
 		sessionID := sessionIDFlag
 		if sessionID == "" {
@@ -178,7 +179,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Interactive REPL Mode
-		a.RunREPL(allowedTools, theme, sessionID)
+		ui.RunREPL(a, allowedTools, theme, sessionID)
 	},
 }
 

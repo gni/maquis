@@ -3,7 +3,10 @@ package agent
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // promptPreservingWriter wraps an io.Writer (typically os.Stderr) and ensures
@@ -40,11 +43,6 @@ func newPromptPreservingWriter(w io.Writer, height int) *promptPreservingWriter 
 func (p *promptPreservingWriter) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
-	}
-
-	scrollBottom := p.height - 4
-	if scrollBottom < 1 {
-		scrollBottom = 1
 	}
 
 	// Move cursor to the current print position inside the scroll region.
@@ -91,6 +89,17 @@ func (p *promptPreservingWriter) trackPosition(data []byte) {
 				p.printCol++
 			}
 		}
+	}
+
+	// Clamp printCol based on terminal width to handle auto-wrap correctly
+	width := 80
+	if fd := int(os.Stderr.Fd()); term.IsTerminal(fd) {
+		if w, _, err := term.GetSize(fd); err == nil && w > 0 {
+			width = w
+		}
+	}
+	if p.printCol > width {
+		p.printCol = ((p.printCol - 1) % width) + 1
 	}
 }
 
@@ -140,4 +149,12 @@ func stripAnsiSeqs(s string) string {
 	}
 
 	return sb.String()
+}
+
+func (p *promptPreservingWriter) Height() int {
+	return p.height
+}
+
+func NewPromptPreservingWriter(w io.Writer, height int) io.Writer {
+	return newPromptPreservingWriter(w, height)
 }

@@ -1,4 +1,4 @@
-package agent
+package ui
 
 import (
 	"fmt"
@@ -7,9 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"bidouille/pkg/ui"
 	"bidouille/pkg/ui/style"
-	"golang.org/x/term"
 )
 
 type jsonStreamParser struct {
@@ -61,7 +59,11 @@ func (pw parserWriter) Write(data []byte) (int, error) {
 	return pw.w.Write(data)
 }
 
-func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme ui.UITheme) {
+func (pw parserWriter) Unwrap() io.Writer {
+	return pw.w
+}
+
+func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 	pw := parserWriter{p: p, w: w}
 
 	for i := 0; i < len(chunk); i++ {
@@ -202,7 +204,6 @@ func guessLanguage(line string) string {
 		return "cpp"
 	}
 	if strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "public ") || strings.HasPrefix(trimmed, "private ") {
-		// Could be Java, C#, C++, etc.
 		return "java"
 	}
 	if strings.HasPrefix(trimmed, "const ") || strings.HasPrefix(trimmed, "let ") || strings.HasPrefix(trimmed, "function ") {
@@ -225,7 +226,7 @@ func (p *jsonStreamParser) printTitle(w io.Writer, title string) {
 	fmt.Fprint(w, title+"\n")
 }
 
-func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme ui.UITheme) {
+func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
 	if p.titlePrinted {
 		return
 	}
@@ -241,21 +242,20 @@ func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme ui.UITheme) {
 	if p.activeToolName == "write" {
 		dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
 	} else {
-		// Yellow arrow next to streaming title
 		dotStyle := style.NewStyle().Foreground(style.Color("#fbbf24")).Bold(true)
 		dotStr = dotStyle.Render("▸")
 	}
 
 	var title string
 	if p.needsPath() && p.path != "" {
-		title = ui.FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
+		title = FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
 	} else {
-		title = ui.FormatToolTitle(dotStr, p.activeToolName, "", theme)
+		title = FormatToolTitle(dotStr, p.activeToolName, "", theme)
 	}
 	p.printTitle(w, title)
 }
 
-func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme ui.UITheme) {
+func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme) {
 	if len(p.toolTitleLineNumbers) == 0 {
 		return
 	}
@@ -263,8 +263,8 @@ func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme ui.UIThe
 	currentCount := getNewlineCount(w)
 	diff := currentCount - titleLine
 
-	_, height, err := term.GetSize(int(os.Stdout.Fd()))
-	if err == nil && diff >= 0 && diff < height-1 {
+	_, height := getTerminalSize()
+	if diff >= 0 && diff < height-1 {
 		var dotStr string
 		if p.activeToolName == "write" {
 			dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
@@ -273,8 +273,7 @@ func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme ui.UIThe
 			dotStr = dotStyle.Render("▸")
 		}
 
-		title := ui.FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
-		// Terminal code to move cursor up diff lines, carriage return, write updated title, and move back down
+		title := FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
 		fmt.Fprintf(w, "\x1b[%dA\r\x1b[K%s\x1b[%dB\r", diff, title, diff)
 	}
 }
