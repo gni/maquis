@@ -39,6 +39,7 @@ type Config struct {
 	BeforeToolHook       string                     `json:"before_tool_hook,omitempty"`
 	AfterToolHook        string                     `json:"after_tool_hook,omitempty"`
 	StreamWrites         bool                       `json:"stream_writes"`
+	SyntaxTheme          string                     `json:"syntax_theme,omitempty"`
 }
 
 func DefaultConfig() *Config {
@@ -82,6 +83,7 @@ func DefaultConfig() *Config {
 		ContextWindowLimit:   128000,
 		ReasoningEffort:      "low",
 		StreamWrites:         false,
+		SyntaxTheme:          "auto",
 	}
 }
 
@@ -144,6 +146,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.ReasoningEffort == "" {
 		config.ReasoningEffort = "low"
+	}
+	if config.SyntaxTheme == "" {
+		config.SyntaxTheme = "auto"
 	}
 
 	return config, nil

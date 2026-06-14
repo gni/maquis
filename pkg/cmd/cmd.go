@@ -79,7 +79,7 @@ var rootCmd = &cobra.Command{
 			cfg.DirectCommands = directCommandsFlag
 		}
 
-		theme := ui.GetTheme(cfg.Theme)
+		theme := ui.GetConfiguredTheme(cfg)
 
 		var allowedTools []string
 		if allowedToolsStr != "" {
@@ -197,7 +197,7 @@ var configShowCmd = &cobra.Command{
 			fmt.Printf("Error: %v\n", err)
 			return
 		}
-		theme := ui.GetTheme(cfg.Theme)
+		theme := ui.GetConfiguredTheme(cfg)
 		ui.RenderConfig(os.Stdout, cfg, theme)
 	},
 }
@@ -211,7 +211,7 @@ var configEditCmd = &cobra.Command{
 			fmt.Printf("Error: %v\n", err)
 			return
 		}
-		theme := ui.GetTheme(cfg.Theme)
+		theme := ui.GetConfiguredTheme(cfg)
 
 		newConfig, err := ui.RunInteractiveConfig(cfg, theme, os.Stdin, os.Stdout)
 		if err == nil && newConfig != nil {

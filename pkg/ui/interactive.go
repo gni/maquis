@@ -2,12 +2,14 @@ package ui
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/alecthomas/chroma/v2/quick"
 	"golang.org/x/term"
 
 	"bidouille/pkg/config"
@@ -182,9 +184,9 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			name:        "visual theme",
 			value:       func() string { return cloned.Theme },
 			description: "Visual aesthetic style of the terminal theme",
-			options:     []string{"dark", "neon", "light", "gruvbox", "mono"},
+			options:     []string{"dark", "neon", "light", "gruvbox", "mono", "minimal", "plain"},
 			onToggle: func() {
-				themes := []string{"dark", "neon", "light", "gruvbox", "mono"}
+				themes := []string{"dark", "neon", "light", "gruvbox", "mono", "minimal", "plain"}
 				idx := -1
 				for i, t := range themes {
 					if strings.ToLower(cloned.Theme) == t {
@@ -194,7 +196,27 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 				}
 				nextIdx := (idx + 1) % len(themes)
 				cloned.Theme = themes[nextIdx]
-				theme = GetTheme(cloned.Theme) // dynamically apply theme visually in real-time
+				theme = GetConfiguredTheme(&cloned) // dynamically apply theme visually in real-time
+			},
+		},
+		{
+			id:          "syntax_theme",
+			name:        "syntax highlight style",
+			value:       func() string { return cloned.SyntaxTheme },
+			description: "Chroma syntax theme (e.g. auto, nord, dracula, gruvbox, bw, monokai)",
+			options:     []string{"auto", "nord", "dracula", "gruvbox", "bw", "monokai", "solarized-dark", "solarized-light"},
+			onToggle: func() {
+				styles := []string{"auto", "nord", "dracula", "gruvbox", "bw", "monokai", "solarized-dark", "solarized-light"}
+				idx := -1
+				for i, s := range styles {
+					if strings.ToLower(cloned.SyntaxTheme) == s {
+						idx = i
+						break
+					}
+				}
+				nextIdx := (idx + 1) % len(styles)
+				cloned.SyntaxTheme = styles[nextIdx]
+				theme = GetConfiguredTheme(&cloned) // dynamically apply theme visually in real-time
 			},
 		},
 		{
@@ -376,23 +398,30 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			buf.WriteString("\n")
 		} else {
 			for idx, item := range filtered {
-				marker := " "
-				if idx == selectedIdx {
-					marker = ">"
-				}
-
 				nameStr := item.name
 				valStr := item.value()
+
+				keyColWidth := 28
+				nameLen := len(nameStr)
+				leader := ""
+				if nameLen < keyColWidth {
+					leader = strings.Repeat("·", keyColWidth-nameLen)
+				}
 
 				if idx == selectedIdx {
 					markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 					nameStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+					leaderStyle := style.NewStyle().Foreground(theme.Border)
 					valStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-					buf.WriteString(fmt.Sprintf("%s %-24s %s\n", markerStyle.Render(marker), nameStyle.Render(nameStr), valStyle.Render(valStr)))
+					bracketStyle := style.NewStyle().Foreground(theme.Secondary)
+
+					valStrFormatted := fmt.Sprintf("%s %s %s", bracketStyle.Render("["), valStyle.Render(valStr), bracketStyle.Render("]"))
+					buf.WriteString(fmt.Sprintf("%s  %s %s %s\n", markerStyle.Render("▸"), nameStyle.Render(nameStr), leaderStyle.Render(leader), valStrFormatted))
 				} else {
 					nameStyle := style.NewStyle().Foreground(theme.Text)
+					leaderStyle := style.NewStyle().Foreground(theme.Border)
 					valStyle := style.NewStyle().Foreground(theme.Secondary)
-					buf.WriteString(fmt.Sprintf("%s %-24s %s\n", marker, nameStyle.Render(nameStr), valStyle.Render(valStr)))
+					buf.WriteString(fmt.Sprintf("   %s %s %s\n", nameStyle.Render(nameStr), leaderStyle.Render(leader), valStyle.Render(valStr)))
 				}
 			}
 		}
@@ -408,6 +437,52 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		}
 
 		buf.WriteString("\n")
+
+		// Draw Color and Syntax Preview
+		borderStyle := style.NewStyle().Foreground(theme.Border)
+		buf.WriteString("  " + borderStyle.Render("──────────────────────────────────────────────────"))
+		buf.WriteString("\n  theme color preview:\n")
+
+		primaryStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		secondaryStyle := style.NewStyle().Foreground(theme.Secondary)
+		textStyle := style.NewStyle().Foreground(theme.Text)
+		highlightStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+		successStyle := style.NewStyle().Foreground(theme.Success)
+		errorStyle := style.NewStyle().Foreground(theme.Error)
+
+		buf.WriteString("    ")
+		buf.WriteString(primaryStyle.Render("Primary"))
+		buf.WriteString("  ")
+		buf.WriteString(secondaryStyle.Render("Secondary"))
+		buf.WriteString("  ")
+		buf.WriteString(textStyle.Render("Text"))
+		buf.WriteString("  ")
+		buf.WriteString(highlightStyle.Render("Highlight"))
+		buf.WriteString("  ")
+		buf.WriteString(successStyle.Render("Success"))
+		buf.WriteString("  ")
+		buf.WriteString(errorStyle.Render("Error"))
+		buf.WriteString("\n")
+
+		var codePreviewBuf bytes.Buffer
+		lang := "go"
+		body := "package main\n\nfunc main() {\n\tprintln(\"Hello, World!\")\n}"
+		chromaStyle := theme.ChromaStyle
+		if chromaStyle == "" {
+			chromaStyle = "friendly"
+		}
+		errHighlight := quick.Highlight(&codePreviewBuf, body, lang, "terminal16", chromaStyle)
+		if errHighlight == nil {
+			buf.WriteString("  syntax highlight preview:\n")
+			previewLines := strings.Split(codePreviewBuf.String(), "\n")
+			for _, line := range previewLines {
+				if strings.TrimSpace(line) != "" {
+					buf.WriteString("    " + line + "\n")
+				}
+			}
+		}
+		buf.WriteString("  " + borderStyle.Render("──────────────────────────────────────────────────"))
+		buf.WriteString("\n\n")
 
 		// Draw Instructions
 		navStyle := style.NewStyle().Foreground(theme.Border)

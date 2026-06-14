@@ -51,15 +51,37 @@ func GetTheme(themeName string) UITheme {
 			Highlight:   Color("#FABD2F"), // Warm Yellow
 			ChromaStyle: "gruvbox",
 		}
-	case "mono", "minimal", "plain":
+	case "plain":
 		return UITheme{
-			Primary:     Color("#ffffff"), // White
-			Secondary:   Color("#ffffff"), // White
-			Text:        Color("#ffffff"), // White
+			Primary:     Color("#ffffff"), // Pure White
+			Secondary:   Color("#ffffff"), // Pure White
+			Text:        Color("#ffffff"), // Pure White
 			Border:      Color("#555555"), // Muted Gray
 			Success:     Color("#10b981"), // Green for success/done symbols
 			Error:       Color("#ef4444"), // Red for error symbols
-			Highlight:   Color("#ffffff"), // White
+			Highlight:   Color("#ffffff"), // Pure White
+			ChromaStyle: "bw",
+		}
+	case "mono":
+		return UITheme{
+			Primary:     Color("#b2b2b2"), // Soft light gray
+			Secondary:   Color("#777777"), // Softer medium-dark gray
+			Text:        Color("#cccccc"), // Soft off-white (comfortable to read)
+			Border:      Color("#3a3a3a"), // Deep charcoal border (low contrast, clean)
+			Success:     Color("#87af87"), // Soothing sage green
+			Error:       Color("#d75f5f"), // Soothing muted red
+			Highlight:   Color("#e5e5e5"), // Crisp light gray for key details
+			ChromaStyle: "bw",
+		}
+	case "minimal":
+		return UITheme{
+			Primary:     Color("#d2c4b4"), // Soft warm tan/sand
+			Secondary:   Color("#8b7e74"), // Muted warm gray
+			Text:        Color("#e8dfd8"), // Soothing warm cream/beige (anti-blue-light)
+			Border:      Color("#38322e"), // Deep warm charcoal border
+			Success:     Color("#87af87"), // Soothing sage green
+			Error:       Color("#d75f5f"), // Soothing muted red
+			Highlight:   Color("#f4efeb"), // Softer warm white for key details
 			ChromaStyle: "bw",
 		}
 	case "dark":

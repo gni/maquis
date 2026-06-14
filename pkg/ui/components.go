@@ -20,7 +20,7 @@ import (
 var TerminalMu sync.Mutex
 
 func PrintBanner(w io.Writer, cfg *config.Config) {
-	theme := GetTheme(cfg.Theme)
+	theme := GetConfiguredTheme(cfg)
 
 	iconStyle := style.NewStyle().
 		Foreground(theme.Secondary).
@@ -115,7 +115,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		Foreground(theme.Text)
 
 	approveVal := "disabled (interactive mode)"
-	if cfg.IsAutoApprove() {
+	if cfg.AutoApprove {
 		approveVal = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("enabled (auto-approve)")
 	}
 
@@ -139,7 +139,9 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %v\n"+
-			"  %-20s %v\n\n"+
+			"  %-20s %v\n"+
+			"  %-20s %s\n"+
+			"  %-20s %s\n\n"+
 			"tip: change any setting via: /config <key> <value> (e.g. /config yes true)",
 		titleStyle.Render("bidouille runtime settings"),
 		keyStyle.Render("endpoint:"), valStyle.Render(cfg.Endpoint),
@@ -156,6 +158,8 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		keyStyle.Render("client key:"), valStyle.Render(cfg.KeyFile),
 		keyStyle.Render("skip ssl verify:"), valStyle.Render(fmt.Sprintf("%v", cfg.SkipVerify)),
 		keyStyle.Render("stream writes:"), cfg.StreamWrites,
+		keyStyle.Render("visual theme:"), valStyle.Render(cfg.Theme),
+		keyStyle.Render("syntax theme:"), valStyle.Render(cfg.SyntaxTheme),
 	)
 
 	fmt.Fprintln(w, borderStyle.Render(configStr))

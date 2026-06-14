@@ -174,7 +174,10 @@ func HandleSlashCommand(
 				a.Config.ShowTokens = val == "true" || val == "yes" || val == "1"
 			case "theme":
 				a.Config.Theme = val
-				*theme = GetTheme(val)
+				*theme = GetConfiguredTheme(a.Config)
+			case "syntax_theme", "syntax":
+				a.Config.SyntaxTheme = val
+				*theme = GetConfiguredTheme(a.Config)
 			case "context_window_limit", "context_limit", "context":
 				l, err := strconv.Atoi(val)
 				if err != nil || l <= 0 {
@@ -222,16 +225,28 @@ func HandleSlashCommand(
 			}
 
 			ShutdownStatusBar(os.Stderr)
-			newConfig, err := RunInteractiveConfig(a.Config, *theme, input, output)
+			newConfig, errInteractive := RunInteractiveConfig(a.Config, *theme, input, output)
 			InitStatusBar(os.Stderr)
-			if err == nil && newConfig != nil {
+			if errInteractive == nil && newConfig != nil {
 				a.Config = newConfig
-				*theme = GetTheme(a.Config.Theme)
+				*theme = GetConfiguredTheme(a.Config)
 				_ = config.SaveConfig(a.ConfigPath, a.Config)
-				fmt.Fprintf(w, "configuration updated and saved to %s\n", a.ConfigPath)
-			} else {
-				fmt.Fprintln(w, "interactive config cancelled.")
 			}
+			
+			// Clear screen and redraw everything up to history
+			fmt.Fprint(w, "\x1b[H\x1b[2J")
+			if len(a.McpStartErrors) > 0 {
+				RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
+			}
+			PrintBanner(w, a.Config)
+			
+			if errInteractive != nil {
+				fmt.Fprintln(w, "interactive config cancelled.")
+			} else if newConfig != nil {
+				fmt.Fprintf(w, "configuration updated and saved to %s\n", a.ConfigPath)
+			}
+			
+			PrintSessionHistory(w, *messages, *theme, a.Config)
 			pTok, cTok := calcHistoryTokens()
 			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a))
 			DrawStatusBar(os.Stderr, *theme)
@@ -362,6 +377,14 @@ func HandleSlashCommand(
 				ShutdownStatusBar(os.Stderr)
 				selected, startNew, err := RunSessionExplorer(*theme, input, output)
 				InitStatusBar(os.Stderr)
+				
+				// Clear screen and redraw everything up to history
+				fmt.Fprint(w, "\x1b[H\x1b[2J")
+				if len(a.McpStartErrors) > 0 {
+					RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
+				}
+				PrintBanner(w, a.Config)
+				
 				if err == nil {
 					if startNew {
 						*currentSessionID = db.NewUUID()
@@ -369,25 +392,21 @@ func HandleSlashCommand(
 							{Role: "system", Content: a.GetSystemPrompt()},
 						}
 						fmt.Fprintln(w, "started a new conversation session.")
-						pTok, cTok := calcHistoryTokens()
-						UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a))
-						DrawStatusBar(os.Stderr, *theme)
 					} else if selected != "" {
 						dbHistory, err := db.LoadMessages(selected)
 						if err == nil && len(dbHistory) > 0 {
 							*currentSessionID = selected
 							*messages = dbHistory
 							fmt.Fprintf(w, "loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
-							PrintSessionHistory(w, *messages, *theme, a.Config)
-
-							pTok, cTok := calcHistoryTokens()
-							UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a))
-							DrawStatusBar(os.Stderr, *theme)
 						}
 					}
 				} else {
 					fmt.Fprintln(w, "session explorer cancelled.")
 				}
+				
+				PrintSessionHistory(w, *messages, *theme, a.Config)
+				pTok, cTok := calcHistoryTokens()
+				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a))
 				DrawStatusBar(os.Stderr, *theme)
 			case "clear":
 				err := db.ClearHistory()

@@ -72,7 +72,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 			var configCandidates []string
 			configKeys := []string{
 				"endpoint", "model", "temperature", "auto_approve", "show_thinking",
-				"collapse_results", "show_tokens", "theme", "context_limit", "steps",
+				"collapse_results", "show_tokens", "theme", "syntax_theme", "context_limit", "steps",
 				"direct_commands", "cert_file", "key_file", "skip_verify", "reasoning_effort",
 				"before_tool_hook", "after_tool_hook",
 			}
@@ -373,19 +373,12 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		currentSessionID = db.NewUUID()
 	}
 
-	var exitMessage string
 	var messages []db.Message
 	if dbHistory, err := db.LoadMessages(currentSessionID); err == nil && len(dbHistory) > 0 {
 		messages = dbHistory
-		exitMessage = fmt.Sprintf("loaded past session %s (%d messages)", currentSessionID, len(messages))
 	} else {
 		messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
-		}
-		if initialSessionID != "" {
-			exitMessage = fmt.Sprintf("initialized brand new session %s", currentSessionID)
-		} else {
-			exitMessage = fmt.Sprintf("started new session %s", currentSessionID)
 		}
 	}
 
@@ -622,17 +615,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		DrawStatusBar(os.Stderr, theme)
 	}
 
-	var finalStatus string
-	if currentSessionID == initialSessionID {
-		finalStatus = exitMessage
-	} else {
-		if len(messages) > 1 {
-			finalStatus = fmt.Sprintf("session %s", currentSessionID)
-		} else {
-			finalStatus = fmt.Sprintf("initialized brand new session %s", currentSessionID)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "goodbye! %s.\n", finalStatus)
+	fmt.Fprintf(os.Stderr, "goodbye! to resume this session, run: ./bidouille --session %s (or ./bidouille --resume)\n", currentSessionID)
 }
 
 func parseManualCommand(line string, enabled bool) (bool, string) {
@@ -676,7 +659,7 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 }
 
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
-	activeTheme := style.GetTheme(a.Config.Theme)
+	activeTheme := GetConfiguredTheme(a.Config)
 	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
 	promptStr := promptStyle.Render("> ")
 
