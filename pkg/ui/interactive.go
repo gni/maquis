@@ -205,7 +205,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			isBool:      true,
 			onToggle: func() {
 				cloned.AutoApprove = !cloned.AutoApprove
-				cloned.YoloMode = cloned.AutoApprove
 			},
 		},
 		{

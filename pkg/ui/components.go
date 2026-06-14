@@ -66,12 +66,10 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	fmt.Fprintln(w)
 
 	commands := [][]string{
-		{"/goal <task>", "set a goal and trigger the bidouille reasoning loop"},
-		{"/schedule \"<cron/duration>\" <task>", "schedule a task execution simulation"},
 		{"/config", "open interactive settings editor"},
 		{"/config show", "display current settings summary"},
 		{"/config set <key> <value>", "modify settings dynamically"},
-		{"/session <list/new/load>", "manage persistent chat sessions interactively"},
+		{"/session <list/new/load/clear>", "manage persistent chat sessions interactively"},
 		{"/multiline, /paste", "open interactive multiline editor"},
 		{"/skills", "list all available reference skills"},
 		{"/skills load <name>", "explicitly load a reference skill into the context"},

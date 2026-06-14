@@ -17,9 +17,9 @@ go build -o bidouille
 
 ### Configuration
 
-Bidouille stores configuration settings in ~/.bidouille/config.json. The file is created automatically on the first execution.
+bidouille stores configuration settings in ~/.bidouille/config.json. The file is created automatically on the first execution.
 
-To configure Bidouille for llama.cpp:
+To configure bidouille for llama.cpp:
 
 1. Start your llama.cpp server:
 ```bash
@@ -71,6 +71,9 @@ Manage saved sessions:
 
 # Start a new session and display its UUID
 ./bidouille session new
+
+# Clear all saved conversation sessions from disk
+./bidouille session clear
 
 # Resume the most recently modified session
 ./bidouille --resume

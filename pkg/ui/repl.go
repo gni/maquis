@@ -31,8 +31,6 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 	wordToComplete := prefixToPos[wordStartIdx:]
 
 	candidates := []string{
-		"/goal ",
-		"/schedule ",
 		"/config ",
 		"/config show",
 		"/config set ",
@@ -44,6 +42,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 		"/session new",
 		"/session load",
 		"/session branch ",
+		"/session clear",
 		"/help",
 		"/commands",
 		"/exit",
@@ -99,7 +98,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 				}
 			}
 		} else if strings.HasPrefix(prefixToPos, "/session ") {
-			sessionSubcommands := []string{"list", "new", "load", "branch"}
+			sessionSubcommands := []string{"list", "new", "load", "branch", "clear"}
 			filterPrefix := strings.TrimPrefix(prefixToPos, "/session ")
 			for _, c := range sessionSubcommands {
 				if strings.HasPrefix(c, filterPrefix) {

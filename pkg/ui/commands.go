@@ -160,7 +160,6 @@ func HandleSlashCommand(
 				a.Config.Temperature = t
 			case "auto_approve", "yes", "yolo":
 				a.Config.AutoApprove = val == "true" || val == "yes" || val == "1"
-				a.Config.YoloMode = a.Config.AutoApprove
 			case "show_thinking", "thinking":
 				a.Config.ShowThinking = val == "true" || val == "yes" || val == "1"
 			case "reasoning_effort", "reasoning":
@@ -390,11 +389,25 @@ func HandleSlashCommand(
 					fmt.Fprintln(w, "session explorer cancelled.")
 				}
 				DrawStatusBar(os.Stderr, *theme)
+			case "clear":
+				err := db.ClearHistory()
+				if err != nil {
+					fmt.Fprintf(w, "error clearing sessions: %v\n", err)
+					return true, false
+				}
+				*currentSessionID = db.NewUUID()
+				*messages = []db.Message{
+					{Role: "system", Content: a.GetSystemPrompt()},
+				}
+				fmt.Fprintln(w, "all conversation sessions deleted from disk.")
+				pTok, cTok := calcHistoryTokens()
+				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a))
+				DrawStatusBar(os.Stderr, *theme)
 			default:
-				fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id>]")
+				fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 			}
 		} else {
-			fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id>]")
+			fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 		}
 		return true, false
 	case "/multiline", "/paste":
@@ -419,39 +432,7 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, "multiline input cancelled.")
 		}
 		return true, false
-	case "/goal":
-		if len(parts) < 2 {
-			fmt.Fprintln(w, "usage: /goal <task description>")
-			return true, false
-		}
-		task := strings.TrimPrefix(line, "/goal ")
-		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), task)
-		a.RunAgentLoop(w, messages, task, allowedTools, *theme, false, *currentSessionID)
-		return true, false
-	case "/schedule":
-		if len(parts) < 3 {
-			fmt.Fprintln(w, "usage: /schedule \"<duration/cron>\" <task description>")
-			return true, false
-		}
-		rest := strings.TrimPrefix(line, "/schedule ")
-		var schedStr string
-		if strings.HasPrefix(rest, "\"") {
-			endIdx := strings.Index(rest[1:], "\"")
-			if endIdx != -1 {
-				schedStr = rest[1 : endIdx+1]
-				task := strings.TrimSpace(rest[endIdx+2:])
-				fmt.Fprintf(w, "scheduled task [ %s ] to run in [ %s ] (simulation)\n", task, schedStr)
-			} else {
-				fmt.Fprintln(w, "error: unmatched quote in schedule expression.")
-			}
-		} else {
-			partsSched := strings.SplitN(rest, " ", 2)
-			if len(partsSched) == 2 {
-				fmt.Fprintf(w, "scheduled task [ %s ] to run in [ %s ] (simulation)\n", partsSched[1], partsSched[0])
-			}
-		}
-		return true, false
+
 	case "/mcp":
 		mcpStatuses := a.GetMCPServersStatus()
 		if len(a.Config.MCPServers) == 0 {

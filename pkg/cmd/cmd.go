@@ -35,8 +35,8 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "bidouille [prompt]",
-	Short: "Bidouille is a minimalist, resilient AI coding agent CLI.",
-	Long:  `Bidouille is a Unix-style agent harness and interactive REPL that supports persistent session tracking, tool execution sandboxes, and advanced terminal visual themes.`,
+	Short: "bidouille is a minimalist, resilient AI coding agent CLI.",
+	Long:  `bidouille is a Unix-style agent harness and interactive REPL that supports persistent session tracking, tool execution sandboxes, and advanced terminal visual themes.`,
 	Args:  cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg, err := config.LoadConfig(configPath)
@@ -276,6 +276,25 @@ var sessionNewCmd = &cobra.Command{
 	},
 }
 
+var sessionClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Clear all saved conversation sessions from disk",
+	Run: func(cmd *cobra.Command, args []string) {
+		sessionsDir := filepath.Join(filepath.Dir(configPath), "sessions")
+		if err := db.InitDB(sessionsDir); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+
+		if err := db.ClearHistory(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+
+		fmt.Println("All saved conversation sessions cleared from disk.")
+	},
+}
+
 func Execute() error {
 	return rootCmd.Execute()
 }
@@ -318,6 +337,6 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&directCommandsFlag, "direct", false, "Enable direct execution of local shell commands (default: true in config)")
 
 	configCmd.AddCommand(configShowCmd, configEditCmd)
-	sessionCmd.AddCommand(sessionListCmd, sessionNewCmd)
+	sessionCmd.AddCommand(sessionListCmd, sessionNewCmd, sessionClearCmd)
 	rootCmd.AddCommand(configCmd, sessionCmd)
 }

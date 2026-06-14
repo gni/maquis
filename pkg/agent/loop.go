@@ -489,7 +489,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 
 			approved := false
 			always := false
-			if !a.Config.AutoApprove && !a.Config.YoloMode && !isReadOnly(tc.Function.Name) {
+			if !a.Config.AutoApprove && !isReadOnly(tc.Function.Name) {
 				sr.Flush()
 				if a.UI != nil {
 					if !isNonInteractive && pauseThinkingSpinner != nil {
