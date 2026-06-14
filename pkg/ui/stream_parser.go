@@ -41,10 +41,11 @@ type jsonStreamParser struct {
 	needsLeadingNewline  bool
 	toolTitleLineNumbers []int
 	activeToolIndex      int
+	streamWrites         bool
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find"
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find" || p.activeToolName == "bash"
 }
 
 type parserWriter struct {
@@ -157,8 +158,8 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				isContentKey := p.currentKey == "content" || p.currentKey == "write_content" || p.currentKey == "command"
-				if isContentKey && p.activeToolName != "write" {
+				isContentKey := p.currentKey == "content" || p.currentKey == "write_content" || (p.currentKey == "command" && p.activeToolName != "bash")
+				if isContentKey && (p.activeToolName != "write" || p.streamWrites) {
 					p.isContent = true
 					p.guessedLang = ""
 					if !p.titlePrinted {
@@ -168,7 +169,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.outputBuf.Reset()
 						}
 					}
-				} else if p.currentKey == "path" {
+				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "bash") {
 					p.isPath = true
 				} else if p.currentKey == "oldText" {
 					p.isOldText = true

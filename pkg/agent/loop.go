@@ -19,6 +19,11 @@ import (
 	"bidouille/pkg/db"
 )
 
+var (
+	currentSpinnerFrame string
+	spinnerFrameMu      sync.RWMutex
+)
+
 func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme style.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -26,7 +31,58 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 	}
 
 	writerToUse := w
+	var pauseThinkingSpinner chan bool
 	if !isNonInteractive && a.UI != nil {
+		stopThinkingSpinner := make(chan struct{})
+		thinkingSpinnerDone := make(chan struct{})
+		pauseThinkingSpinner = make(chan bool, 1)
+
+		go func() {
+			defer close(thinkingSpinnerDone)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+
+			frames := []string{"◜", "◝", "◞", "◟"} // Curved Arcs (Sleek rotating circle)
+
+			i := 0
+			paused := false
+			for {
+				select {
+				case <-stopThinkingSpinner:
+					return
+				case p := <-pauseThinkingSpinner:
+					paused = p
+					if paused {
+						spinnerFrameMu.Lock()
+						currentSpinnerFrame = ""
+						spinnerFrameMu.Unlock()
+						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, "")
+					}
+				case <-ticker.C:
+					if paused {
+						continue
+					}
+					frame := frames[i%len(frames)]
+					i++
+					spinnerFrameMu.Lock()
+					currentSpinnerFrame = frame
+					spinnerFrameMu.Unlock()
+					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
+				}
+			}
+		}()
+
+		defer func() {
+			close(stopThinkingSpinner)
+			<-thinkingSpinnerDone
+			spinnerFrameMu.Lock()
+			currentSpinnerFrame = ""
+			spinnerFrameMu.Unlock()
+			if a.UI != nil {
+				a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, "")
+			}
+		}()
+
 		fd := int(os.Stderr.Fd())
 		var height int
 		if term.IsTerminal(fd) {
@@ -36,9 +92,9 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			}
 		}
 
-		// 1. Clear the static prompt line at height-2 so it is empty while the agent runs
 		if height > 0 {
-			fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K", height-2)
+			promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+			fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K%s\x1b[%d;3H", height-2, promptStyle.Render("> "), height-2)
 		}
 
 		// 2. Redraw status bar
@@ -126,7 +182,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		ncw := &newlineCounterWriter{Writer: writerToUse}
 		var sr StreamRenderer
 		if a.UI != nil {
-			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking)
+			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking, a.Config.StreamWrites)
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
@@ -239,7 +295,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						}
 					}
 					a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks)
-					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+					spinnerFrameMu.RLock()
+					frame := currentSpinnerFrame
+					spinnerFrameMu.RUnlock()
+					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 					a.UI.DrawStatusBar(w, theme)
 				}
 			})
@@ -254,21 +313,11 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 			}
 			a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, true, 0, activeTasks)
-			a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+			spinnerFrameMu.RLock()
+			frame := currentSpinnerFrame
+			spinnerFrameMu.RUnlock()
+			a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 			a.UI.DrawStatusBar(w, theme)
-
-			go func() {
-				ticker := time.NewTicker(80 * time.Millisecond)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-tickerDone:
-						return
-					case <-ticker.C:
-						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-					}
-				}
-			}()
 		}
 
 		var reasoningChars int
@@ -317,7 +366,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 							}
 						}
 						a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps, activeTasks)
-						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+						spinnerFrameMu.RLock()
+						frame := currentSpinnerFrame
+						spinnerFrameMu.RUnlock()
+						a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 						a.UI.DrawStatusBar(w, theme)
 					}
 					lastDraw = now
@@ -385,7 +437,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						}
 					}
 					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks)
-					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+					spinnerFrameMu.RLock()
+					frame := currentSpinnerFrame
+					spinnerFrameMu.RUnlock()
+					a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 					a.UI.DrawStatusBar(w, theme)
 				}
 			}
@@ -406,7 +461,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 					}
 				}
 				a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks)
-				a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
+				spinnerFrameMu.RLock()
+				frame := currentSpinnerFrame
+				spinnerFrameMu.RUnlock()
+				a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 				a.UI.DrawStatusBar(w, theme)
 			}
 		}
@@ -434,7 +492,13 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			if !a.Config.AutoApprove && !a.Config.YoloMode && !isReadOnly(tc.Function.Name) {
 				sr.Flush()
 				if a.UI != nil {
+					if !isNonInteractive && pauseThinkingSpinner != nil {
+						pauseThinkingSpinner <- true
+					}
 					approved, always = a.UI.AskForApproval(ncw, theme)
+					if !isNonInteractive && pauseThinkingSpinner != nil {
+						pauseThinkingSpinner <- false
+					}
 				} else {
 					approved = true
 				}
@@ -478,11 +542,15 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		}
 
 		if len(approvedBatch) > 0 {
+			if !isNonInteractive && pauseThinkingSpinner != nil {
+				pauseThinkingSpinner <- true
+			}
+
 			stopSpinner := make(chan struct{})
 			spinnerDone := make(chan struct{})
 			go func() {
 				defer close(spinnerDone)
-				frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+				frames := []string{"◜", "◝", "◞", "◟"}
 				i := 0
 				var toolNames []string
 				for _, tc := range approvedBatch {
@@ -519,6 +587,20 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 			}()
 
+			// Pre-calculate which read tool calls are allowed concurrently (maximum 2 read calls in parallel)
+			allowedReadIndices := make(map[int]bool)
+			readCount := 0
+			for i, tc := range approvedBatch {
+				if tc.Function.Name == "read" {
+					readCount++
+					if readCount <= 2 {
+						allowedReadIndices[i] = true
+					}
+				} else {
+					allowedReadIndices[i] = true
+				}
+			}
+
 			for idx, tc := range approvedBatch {
 				wg.Add(1)
 				go func(i int, call db.ToolCall) {
@@ -535,7 +617,14 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						return
 					}
 
-					out, err := a.Registry.Execute(a, call.Function.Name, call.Function.Arguments)
+					var out string
+					var err error
+					if !allowedReadIndices[i] {
+						out = "Error: Too many parallel read tool calls in a single turn. Please inspect files one by one or in small batches (maximum 2 at once) to avoid UI clutter and context window overflow."
+						err = fmt.Errorf("too many parallel read calls")
+					} else {
+						out, err = a.Registry.Execute(a, call.Function.Name, call.Function.Arguments)
+					}
 					out, err = a.runAfterToolHook(call, out, err)
 
 					resultsChan <- toolExecutionResult{
@@ -599,6 +688,10 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				if sessionID != "" {
 					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 				}
+			}
+
+			if !isNonInteractive && pauseThinkingSpinner != nil {
+				pauseThinkingSpinner <- false
 			}
 		}
 
@@ -670,9 +763,9 @@ func printPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string
 	if showThinking {
 		thinkingText = reasoningEffort
 	}
-	statusPart := fmt.Sprintf("[reasoning:%s]", thinkingText)
+	statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
 
-	prefix := "─── Prompt "
+	prefix := "─── prompt "
 	width, _ := getTerminalSize()
 	statusLen := len(stripAnsiSeqs(statusPart))
 	prefixLen := len(prefix)

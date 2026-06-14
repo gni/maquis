@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"bidouille/pkg/ui/style"
 
@@ -141,6 +140,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
+			"  %-20s %v\n"+
 			"  %-20s %v\n\n"+
 			"tip: change any setting via: /config <key> <value> (e.g. /config yes true)",
 		titleStyle.Render("bidouille runtime settings"),
@@ -157,6 +157,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		keyStyle.Render("client cert:"), valStyle.Render(cfg.CertFile),
 		keyStyle.Render("client key:"), valStyle.Render(cfg.KeyFile),
 		keyStyle.Render("skip ssl verify:"), valStyle.Render(fmt.Sprintf("%v", cfg.SkipVerify)),
+		keyStyle.Render("stream writes:"), cfg.StreamWrites,
 	)
 
 	fmt.Fprintln(w, borderStyle.Render(configStr))
@@ -504,10 +505,12 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 
 	if path != "" {
 		relPath := path
-		wd, err := os.Getwd()
-		if err == nil {
-			if rel, err := filepath.Rel(wd, path); err == nil {
-				relPath = rel
+		if toolName != "bash" {
+			wd, err := os.Getwd()
+			if err == nil {
+				if rel, err := filepath.Rel(wd, path); err == nil {
+					relPath = rel
+				}
 			}
 		}
 		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
@@ -516,6 +519,10 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 }
 
 func PrintPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
+	PrintPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, "")
+}
+
+func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 
@@ -523,19 +530,13 @@ func PrintPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string
 	if showThinking {
 		thinkingText = reasoningEffort
 	}
-	statusPart := fmt.Sprintf("[reasoning:%s]", thinkingText)
-
-	stateMu.Lock()
-	isGenerating := state.IsGenerating
-	stateMu.Unlock()
-
-	if isGenerating {
-		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		ms := time.Now().UnixNano() / int64(time.Millisecond)
-		idx := (ms / 80) % int64(len(frames))
-		spinnerFrame := frames[idx]
+	
+	var statusPart string
+	if spinnerFrame != "" {
 		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
 		statusPart = fmt.Sprintf("%s [reasoning:%s]", spinnerStyled, thinkingText)
+	} else {
+		statusPart = fmt.Sprintf("  [reasoning:%s]", thinkingText)
 	}
 
 	prefix := "─── prompt "
@@ -574,6 +575,10 @@ func getWriterHeight(w io.Writer) int {
 }
 
 func DrawStaticPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
+	DrawStaticPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, "")
+}
+
+func DrawStaticPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 
@@ -586,7 +591,7 @@ func DrawStaticPromptSeparator(w io.Writer, showThinking bool, reasoningEffort s
 	var buf bytes.Buffer
 	// Save cursor, move cursor to height-3 absolutely, clear line, print separator, restore cursor
 	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3)
-	PrintPromptSeparator(&buf, showThinking, reasoningEffort, theme)
+	PrintPromptSeparatorWithSpinner(&buf, showThinking, reasoningEffort, theme, spinnerFrame)
 	fmt.Fprint(&buf, "\x1b8")
 
 	_, _ = w.Write(buf.Bytes())
@@ -603,7 +608,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 		}
 
 		if msg.Role == "user" {
-			if strings.HasPrefix(msg.Content, "[User manually executed local shell command: `") {
+			if strings.HasPrefix(msg.Content, "[user manually executed local shell command: `") {
 				firstTick := strings.Index(msg.Content, "`")
 				if firstTick != -1 {
 					rest := msg.Content[firstTick+1:]
@@ -671,7 +676,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 							path = c
 						}
 					}
-					isPathTool := tc.Function.Name == "read" || tc.Function.Name == "write" || tc.Function.Name == "edit" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find"
+					isPathTool := tc.Function.Name == "read" || tc.Function.Name == "write" || tc.Function.Name == "edit" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find" || tc.Function.Name == "bash"
 					var symbol string
 					if tc.Function.Name == "write" {
 						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")

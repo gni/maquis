@@ -312,6 +312,16 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 				cloned.SkipVerify = !cloned.SkipVerify
 			},
 		},
+		{
+			id:          "stream_writes",
+			name:        "stream writes",
+			value:       func() string { return formatBool(cloned.StreamWrites) },
+			description: "Stream file contents in real-time as they are written",
+			isBool:      true,
+			onToggle: func() {
+				cloned.StreamWrites = !cloned.StreamWrites
+			},
+		},
 	}
 
 	searchQuery := ""

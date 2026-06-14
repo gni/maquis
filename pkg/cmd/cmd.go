@@ -302,6 +302,7 @@ func init() {
 	if err == nil {
 		defaultConfig = filepath.Join(home, ".bidouille", "config.json")
 	}
+	rootCmd.SetHelpCommand(&cobra.Command{Use: "no-help-command", Hidden: true})
 	rootCmd.PersistentFlags().StringVar(&configPath, "config", defaultConfig, "Path to config JSON file")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "Override llama.cpp or OpenAI server URL")
 	rootCmd.PersistentFlags().StringVar(&modelName, "model", "", "Override model name")

@@ -341,7 +341,13 @@ func (a *Agent) StreamChatCompletions(
 	}
 
 	if len(toolCallsMap) > 0 {
-		for i := 0; i < len(toolCallsMap); i++ {
+		maxIdx := -1
+		for idx := range toolCallsMap {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+		for i := 0; i <= maxIdx; i++ {
 			if tc, ok := toolCallsMap[i]; ok {
 				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, *tc)
 			}

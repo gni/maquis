@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -274,6 +275,100 @@ def other():
 	}
 	if !strings.Contains(err.Error(), "is not unique") {
 		t.Errorf("Case 5 expected uniqueness error, got: %v", err)
+	}
+}
+
+func TestFindToolGlob(t *testing.T) {
+	tempDirRoot := os.Getenv("GOTMPDIR")
+	if tempDirRoot == "" {
+		tempDirRoot = os.TempDir()
+	}
+	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-find-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create some files and directories
+	os.MkdirAll(filepath.Join(tempDir, "backend", "alembic"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "frontend", "src"), 0755)
+
+	os.WriteFile(filepath.Join(tempDir, "backend", "main.py"), []byte("print('hello')"), 0644)
+	os.WriteFile(filepath.Join(tempDir, "backend", "alembic", "env.py"), []byte("print('env')"), 0644)
+	os.WriteFile(filepath.Join(tempDir, "frontend", "index.html"), []byte("html"), 0644)
+	os.WriteFile(filepath.Join(tempDir, "frontend", "src", "App.vue"), []byte("vue"), 0644)
+
+	a := &Agent{
+		WorkspaceRoot: tempDir,
+	}
+
+	findExecutor := tool.NewFindTool()
+
+	// Test 1: find *.py in workspace root
+	res, err := findExecutor.Execute(a, `{"pattern": "*.py"}`)
+	if err != nil {
+		t.Fatalf("find failed: %v", err)
+	}
+	if !strings.Contains(res, "backend/main.py") || !strings.Contains(res, "backend/alembic/env.py") {
+		t.Errorf("expected backend/main.py and backend/alembic/env.py in results, got: %q", res)
+	}
+
+	// Test 2: find backend/**/*.py in workspace root
+	res2, err := findExecutor.Execute(a, `{"pattern": "backend/**/*.py"}`)
+	if err != nil {
+		t.Fatalf("find failed: %v", err)
+	}
+	if !strings.Contains(res2, "backend/main.py") || !strings.Contains(res2, "backend/alembic/env.py") {
+		t.Errorf("expected both backend/main.py and backend/alembic/env.py in backend/**/*.py results, got: %q", res2)
+	}
+
+	// Test 3: find with path specified
+	res3, err := findExecutor.Execute(a, `{"pattern": "*.py", "path": "backend"}`)
+	if err != nil {
+		t.Fatalf("find failed: %v", err)
+	}
+	if !strings.Contains(res3, "backend/main.py") || !strings.Contains(res3, "backend/alembic/env.py") {
+		t.Errorf("expected backend/main.py and backend/alembic/env.py in backend path results, got: %q", res3)
+	}
+}
+
+func TestRecursiveLs(t *testing.T) {
+	tempDirRoot := os.Getenv("GOTMPDIR")
+	if tempDirRoot == "" {
+		tempDirRoot = os.TempDir()
+	}
+	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-ls-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	os.MkdirAll(filepath.Join(tempDir, "subdir"), 0755)
+	os.WriteFile(filepath.Join(tempDir, "file1.txt"), []byte("file1"), 0644)
+	os.WriteFile(filepath.Join(tempDir, "subdir", "file2.txt"), []byte("file2"), 0644)
+
+	a := &Agent{
+		WorkspaceRoot: tempDir,
+	}
+
+	lsExecutor := tool.NewLsTool()
+
+	// Non-recursive ls
+	res, err := lsExecutor.Execute(a, `{"path": "."}`)
+	if err != nil {
+		t.Fatalf("ls failed: %v", err)
+	}
+	if !strings.Contains(res, "file1.txt") || !strings.Contains(res, "subdir") || strings.Contains(res, "file2.txt") {
+		t.Errorf("unexpected non-recursive ls output: %q", res)
+	}
+
+	// Recursive ls
+	resRec, err := lsExecutor.Execute(a, `{"path": ".", "recursive": true}`)
+	if err != nil {
+		t.Fatalf("ls recursive failed: %v", err)
+	}
+	if !strings.Contains(resRec, "file1.txt") || !strings.Contains(resRec, "subdir/file2.txt") {
+		t.Errorf("expected file1.txt and subdir/file2.txt in recursive ls output, got: %q", resRec)
 	}
 }
 

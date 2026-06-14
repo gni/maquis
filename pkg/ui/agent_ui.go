@@ -13,12 +13,12 @@ func (ui *AgentUIImpl) DrawStatusBar(w io.Writer, theme style.UITheme) {
 	DrawStatusBar(w, theme)
 }
 
-func (ui *AgentUIImpl) DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme) {
-	DrawStaticPromptSeparator(w, showThinking, reasoningEffort, theme)
+func (ui *AgentUIImpl) DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme, spinnerFrame string) {
+	DrawStaticPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, spinnerFrame)
 }
 
-func (ui *AgentUIImpl) NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool) agent.StreamRenderer {
-	return NewStreamRenderer(w, theme, showThinking)
+func (ui *AgentUIImpl) NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool) agent.StreamRenderer {
+	return NewStreamRenderer(w, theme, showThinking, streamWrites)
 }
 
 func (ui *AgentUIImpl) SetCollapseStatus(collapsed bool) {

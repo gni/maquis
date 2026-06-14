@@ -39,6 +39,7 @@ type Config struct {
 	ReasoningEffort      string                     `json:"reasoning_effort,omitempty"`
 	BeforeToolHook       string                     `json:"before_tool_hook,omitempty"`
 	AfterToolHook        string                     `json:"after_tool_hook,omitempty"`
+	StreamWrites         bool                       `json:"stream_writes"`
 }
 
 func (c *Config) IsAutoApprove() bool {
@@ -85,8 +86,8 @@ func DefaultConfig() *Config {
 		MCPServers:           make(map[string]MCPServerConfig),
 		MaxReasoningSteps:    30,
 		ContextWindowLimit:   128000,
-		CompressionThreshold: 0.80,
 		ReasoningEffort:      "low",
+		StreamWrites:         false,
 	}
 }
 

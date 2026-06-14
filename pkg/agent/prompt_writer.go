@@ -16,7 +16,7 @@ import (
 // at the "> " prompt — even while tokens are streaming above it.
 //
 // The bottom 4 lines of the terminal are reserved:
-//   - height-3: ─── Prompt ──────────────────────────────[reasoning:low]
+//   - height-3: ─── prompt ──────────────────────────────[reasoning:low]
 //   - height-2: > (input line, cursor blinks here)
 //   - height-1: ────────────────────────────────────────── (status separator)
 //   - height:   status bar content
@@ -45,9 +45,7 @@ func (p *promptPreservingWriter) Write(data []byte) (int, error) {
 		return 0, nil
 	}
 
-	// Move cursor to the current print position inside the scroll region.
-	// We always print at the bottom of the scroll region; the terminal
-	// scrolls content up when we emit newlines.
+	// Position cursor at printLine/printCol (in scroll region)
 	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 
 	// Write the actual content. The terminal's scrolling region (set to 1..height-4)
@@ -57,8 +55,8 @@ func (p *promptPreservingWriter) Write(data []byte) (int, error) {
 	// Track the column position so we can restore it accurately next time.
 	p.trackPosition(data[:n])
 
-	// Restore cursor to the prompt input line (height-2, col 3 — after "> ")
-	fmt.Fprintf(p.inner, "\x1b[%d;3H", p.height-2)
+	// Restore cursor to the prompt input line (height-2, col 3 — after "> ") and make sure it is visible
+	fmt.Fprintf(p.inner, "\x1b[%d;3H\x1b[?25h", p.height-2)
 
 	return n, err
 }

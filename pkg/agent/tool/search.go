@@ -100,6 +100,15 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 	}
 
+	var globRegex *regexp.Regexp
+	if args.Glob != "" {
+		var err error
+		globRegex, err = globToRegexp(args.Glob)
+		if err != nil {
+			return "", fmt.Errorf("invalid glob pattern: %w", err)
+		}
+	}
+
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -111,9 +120,13 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			return nil
 		}
 
-		if args.Glob != "" {
-			matched, err := filepath.Match(args.Glob, info.Name())
-			if err != nil || !matched {
+		if globRegex != nil {
+			relToSearch, err := filepath.Rel(safePath, path)
+			if err != nil {
+				relToSearch = path
+			}
+			matchPath := filepath.ToSlash(relToSearch)
+			if !globRegex.MatchString(matchPath) {
 				return nil
 			}
 		}
@@ -222,6 +235,15 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		limit = 1000
 	}
 
+	var regex *regexp.Regexp
+	if args.Pattern != "" {
+		var err error
+		regex, err = globToRegexp(args.Pattern)
+		if err != nil {
+			return "", fmt.Errorf("invalid pattern: %w", err)
+		}
+	}
+
 	var results []string
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -234,15 +256,21 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			return nil
 		}
 
-		matched, err := filepath.Match(args.Pattern, info.Name())
-		if err == nil && matched {
-			relPath, err := filepath.Rel(ctx.GetWorkspaceRoot(), path)
+		if regex != nil {
+			relToSearch, err := filepath.Rel(safePath, path)
 			if err != nil {
-				relPath = path
+				relToSearch = path
 			}
-			results = append(results, relPath)
-			if len(results) >= limit {
-				return fmt.Errorf("limit_reached")
+			matchPath := filepath.ToSlash(relToSearch)
+			if regex.MatchString(matchPath) {
+				relPath, err := filepath.Rel(ctx.GetWorkspaceRoot(), path)
+				if err != nil {
+					relPath = path
+				}
+				results = append(results, relPath)
+				if len(results) >= limit {
+					return fmt.Errorf("limit_reached")
+				}
 			}
 		}
 		return nil
@@ -257,4 +285,41 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	}
 
 	return strings.Join(results, "\n"), nil
+}
+
+func globToRegexp(pattern string) (*regexp.Regexp, error) {
+	var sb strings.Builder
+	sb.WriteString("^")
+	
+	if !strings.Contains(pattern, "/") {
+		sb.WriteString("(.*/)?")
+	}
+
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		switch c {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				if i+2 < len(pattern) && pattern[i+2] == '/' {
+					sb.WriteString("(.*/)?")
+					i += 2
+				} else {
+					sb.WriteString(".*")
+					i++
+				}
+			} else {
+				sb.WriteString("[^/]*")
+			}
+		case '?':
+			sb.WriteString("[^/]")
+		case '.':
+			sb.WriteString("\\.")
+		case '\\', '+', '^', '$', '(', ')', '|':
+			sb.WriteString("\\" + string(c))
+		default:
+			sb.WriteString(string(c))
+		}
+	}
+	sb.WriteString("$")
+	return regexp.Compile(sb.String())
 }

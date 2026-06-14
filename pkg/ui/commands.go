@@ -29,7 +29,9 @@ func HandleSlashCommand(
 	currentSessionID *string,
 	rlHistory term.History,
 ) (bool, bool) {
-	if !strings.HasPrefix(line, "/") && line != "?" {
+	trimmed := strings.TrimSpace(line)
+	isHelp := trimmed == "help" || trimmed == "h" || trimmed == "?" || trimmed == "/help" || trimmed == "/commands" || trimmed == "/h" || trimmed == "/?"
+	if !strings.HasPrefix(trimmed, "/") && !isHelp {
 		return false, false
 	}
 
@@ -117,7 +119,7 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, "unknown task subcommand. usage: /task [list | view <id> | stream <id> | kill <id>]")
 		}
 		return true, false
-	case "/help", "/commands", "?":
+	case "/help", "/h", "/commands", "?", "/?", "help", "h":
 		RenderHelp(w, *theme)
 		return true, false
 	case "/config":
@@ -198,6 +200,8 @@ func HandleSlashCommand(
 				a.Config.CAFile = val
 			case "skip_verify", "skip":
 				a.Config.SkipVerify = val == "true" || val == "yes" || val == "1"
+			case "stream_writes", "stream_write", "stream":
+				a.Config.StreamWrites = val == "true" || val == "yes" || val == "1"
 			default:
 				fmt.Fprintf(w, "unknown config key: %s\n", key)
 				return true, false

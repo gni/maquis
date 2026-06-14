@@ -410,6 +410,10 @@ func (t *lsTool) Definition() Tool {
 						Type:        "string",
 						Description: "Path of the directory to list.",
 					},
+					"recursive": {
+						Type:        "boolean",
+						Description: "List all files and directories recursively.",
+					},
 				},
 				Required: []string{},
 			},
@@ -419,9 +423,11 @@ func (t *lsTool) Definition() Tool {
 
 func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
-		Path string `json:"path"`
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		// ignore JSON syntax errors
 	}
 
 	searchPath := args.Path
@@ -434,24 +440,60 @@ func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", err
 	}
 
-	entries, err := os.ReadDir(safePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read directory: %w", err)
+	if !args.Recursive {
+		entries, err := os.ReadDir(safePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read directory: %w", err)
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Contents of %s:\n", searchPath))
+		for _, entry := range entries {
+			info, err := entry.Info()
+			typeStr := "file"
+			size := int64(0)
+			if entry.IsDir() {
+				typeStr = "dir "
+			} else if err == nil {
+				size = info.Size()
+			}
+
+			sb.WriteString(fmt.Sprintf("  [%s]  %-25s  %d bytes\n", typeStr, entry.Name(), size))
+		}
+		return sb.String(), nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Contents of %s:\n", searchPath))
-	for _, entry := range entries {
-		info, err := entry.Info()
-		typeStr := "file"
-		size := int64(0)
-		if entry.IsDir() {
-			typeStr = "dir "
-		} else if err == nil {
-			size = info.Size()
+	sb.WriteString(fmt.Sprintf("Contents of %s (recursive):\n", searchPath))
+	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		sb.WriteString(fmt.Sprintf("  [%s]  %-25s  %d bytes\n", typeStr, entry.Name(), size))
+		relPath, err := filepath.Rel(safePath, path)
+		if err != nil {
+			relPath = path
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		typeStr := "file"
+		if info.IsDir() {
+			typeStr = "dir "
+		}
+
+		sb.WriteString(fmt.Sprintf("  [%s]  %-35s  %d bytes\n", typeStr, relPath, info.Size()))
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to walk directory: %w", err)
 	}
 	return sb.String(), nil
 }

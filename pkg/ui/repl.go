@@ -547,8 +547,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				contextMsg := fmt.Sprintf("[user manually changed working directory to: `%s`]", target)
 				messages = append(messages, db.Message{Role: "user", Content: contextMsg})
 				_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
-				DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-				DrawStatusBar(os.Stderr, theme)
+				redrawScreen(os.Stderr, a, kiReader, rl)
 				continue
 			}
 
@@ -570,36 +569,47 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			errOutput := tool.SanitizeUTF8(stderr.Bytes())
 
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Command failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "command failed: %v\n", err)
 			}
 
 			combined := ""
 			if output != "" {
-				combined += fmt.Sprintf("STDOUT:\n%s\n", output)
+				combined += fmt.Sprintf("stdout:\n%s\n", output)
 			}
 			if errOutput != "" {
-				combined += fmt.Sprintf("STDERR:\n%s\n", errOutput)
+				combined += fmt.Sprintf("stderr:\n%s\n", errOutput)
 			}
 			if err != nil {
-				combined += fmt.Sprintf("ERROR:\n%v\n", err)
+				combined += fmt.Sprintf("error:\n%v\n", err)
 			}
 			if combined == "" {
 				combined = "(command completed with no output)"
 			}
 
-			contextMsg := fmt.Sprintf("[User manually executed local shell command: `%s`]\n%s", cmdStr, combined)
+			contextMsg := fmt.Sprintf("[user manually executed local shell command: `%s`]\n%s", cmdStr, combined)
 			messages = append(messages, db.Message{Role: "user", Content: contextMsg})
 			_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
 
 			successStyle := style.NewStyle().Foreground(theme.Success).Italic(true)
 			fmt.Fprintln(os.Stderr)
-			fmt.Fprintln(os.Stderr, successStyle.Render("Command output appended to conversation context."))
-			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			DrawStatusBar(os.Stderr, theme)
+			fmt.Fprintln(os.Stderr, successStyle.Render("command output appended to conversation context."))
+			redrawScreen(os.Stderr, a, kiReader, rl)
 			continue
 		}
 
-		if handled, quit := HandleSlashCommand(a, line, &messages, allowedTools, &theme, os.Stderr, &currentSessionID, rl.History); handled {
+		trimmedLine := strings.TrimSpace(line)
+		isHelpCmd := trimmedLine == "help" || trimmedLine == "h" || trimmedLine == "?" || trimmedLine == "/help" || trimmedLine == "/commands" || trimmedLine == "/h" || trimmedLine == "/?"
+		isSlashCmd := strings.HasPrefix(trimmedLine, "/") || isHelpCmd
+
+		var handled, quit bool
+		if isSlashCmd {
+			ShutdownStatusBar(os.Stderr)
+			cw := crnlWriter{w: os.Stderr}
+			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cw, &currentSessionID, rl.History)
+			InitStatusBar(os.Stderr)
+		}
+
+		if handled {
 			if quit {
 				break
 			}

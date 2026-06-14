@@ -32,8 +32,8 @@ type StreamRenderer interface {
 
 type AgentUI interface {
 	DrawStatusBar(w io.Writer, theme style.UITheme)
-	DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme)
-	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool) StreamRenderer
+	DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme, spinnerFrame string)
+	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool) StreamRenderer
 	SetCollapseStatus(collapsed bool)
 	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int)
 	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)

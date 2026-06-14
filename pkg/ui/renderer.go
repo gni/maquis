@@ -36,15 +36,17 @@ type StreamRenderer struct {
 	hasWrittenText       bool
 	hasWrittenThoughts   bool
 	parser               *jsonStreamParser
+	streamWrites         bool
 }
 
-func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool) *StreamRenderer {
+func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool) *StreamRenderer {
 	return &StreamRenderer{
 		w:                    w,
 		theme:                theme,
 		showThinking:         showThinking,
 		showFullThinking:     true, // Thinking is always full/expanded
 		lastEndedWithNewline: true,
+		streamWrites:         streamWrites,
 	}
 }
 
@@ -303,8 +305,9 @@ func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
 	defer sr.mu.Unlock()
 
 	if sr.parser == nil {
-		sr.parser = &jsonStreamParser{activeToolIndex: -1}
+		sr.parser = &jsonStreamParser{activeToolIndex: -1, streamWrites: sr.streamWrites}
 	}
+	sr.parser.streamWrites = sr.streamWrites
 	if sr.parser.activeToolIndex != toolCallIndex || sr.parser.activeToolName == "" {
 		sr.flushLocked()
 		sr.parser.needsLeadingNewline = sr.hasWrittenText || sr.hasWrittenThoughts
@@ -325,8 +328,9 @@ func (sr *StreamRenderer) WriteToolCall(content string) {
 	defer sr.mu.Unlock()
 
 	if sr.parser == nil {
-		sr.parser = &jsonStreamParser{activeToolIndex: -1}
+		sr.parser = &jsonStreamParser{activeToolIndex: -1, streamWrites: sr.streamWrites}
 	}
+	sr.parser.streamWrites = sr.streamWrites
 	sr.parser.feed(content, sr.w, sr.theme)
 }
 
