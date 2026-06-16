@@ -181,6 +181,7 @@ func (t *writeTool) Execute(ctx AgentContext, arguments string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
+	ctx.ReloadSkills()
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path), nil
 }
 
@@ -385,6 +386,7 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to write modified content back: %w", err)
 	}
+	ctx.ReloadSkills()
 
 	return diffBuilder.String(), nil
 }
@@ -465,21 +467,20 @@ func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Contents of %s (recursive):\n", searchPath))
+	patterns := loadGitignorePatterns(ctx.GetWorkspaceRoot())
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
-		if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-			if info.IsDir() {
+		isDir := info.IsDir()
+		relPath, _ := filepath.Rel(safePath, path)
+		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+			if isDir {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		relPath, err := filepath.Rel(safePath, path)
-		if err != nil {
-			relPath = path
-		}
 		if relPath == "." {
 			return nil
 		}
@@ -582,4 +583,74 @@ func lockPath(path string) func() {
 
 func normalizeSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func isIgnored(name string, isDir bool) bool {
+	if isDir {
+		low := strings.ToLower(name)
+		if low == "node_modules" || low == "venv" || low == ".venv" || low == ".git" || low == "__pycache__" || low == ".idea" || low == ".vscode" || low == "build" || low == "dist" || low == "target" || low == "tmp" || low == "temp" {
+			return true
+		}
+	} else {
+		ext := filepath.Ext(name)
+		if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || name == ".gitignore" || name == "package-lock.json" || name == "yarn.lock" || name == "pnpm-lock.yaml" {
+			return true
+		}
+	}
+	return false
+}
+
+func loadGitignorePatterns(workspaceRoot string) []string {
+	gitignorePath := filepath.Join(workspaceRoot, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		return nil
+	}
+
+	var patterns []string
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
+}
+
+func matchesGitignore(path string, isDir bool, patterns []string) bool {
+	path = filepath.ToSlash(path)
+	for _, p := range patterns {
+		p = filepath.ToSlash(p)
+		if p == "" {
+			continue
+		}
+
+		isDirPattern := strings.HasSuffix(p, "/")
+		cleanPattern := strings.TrimSuffix(p, "/")
+
+		parts := strings.Split(path, "/")
+		for _, part := range parts {
+			if part == cleanPattern {
+				if !isDirPattern || isDir {
+					return true
+				}
+			}
+			if strings.Contains(cleanPattern, "*") {
+				if matched, _ := filepath.Match(cleanPattern, part); matched {
+					if !isDirPattern || isDir {
+						return true
+					}
+				}
+			}
+		}
+
+		if strings.HasSuffix(path, cleanPattern) {
+			if !isDirPattern || isDir {
+				return true
+			}
+		}
+	}
+	return false
 }

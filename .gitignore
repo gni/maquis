@@ -1,5 +1,5 @@
 # Binaries
-/bidouille
+/maquis
 *.exe
 *.exe~
 *.dll
@@ -12,7 +12,7 @@ go.work.sum
 
 # Session history & local configs
 /config/sessions/
-/config/bidouille.db
+/config/maquis.db
 .env
 .env.*
 
@@ -25,3 +25,4 @@ go.work.sum
 
 scratch
 dev.txt
+tmp

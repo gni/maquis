@@ -45,5 +45,14 @@ func (t *loadSkillTool) Execute(ctx AgentContext, arguments string) (string, err
 			return fmt.Sprintf("SKILL INSTRUCTIONS FOR '%s':\n\n%s", s.Name, s.Content), nil
 		}
 	}
+
+	// Not found, reload from disk and check again
+	reloaded := ctx.ReloadSkills()
+	for _, s := range reloaded {
+		if s.Name == args.Name {
+			return fmt.Sprintf("SKILL INSTRUCTIONS FOR '%s':\n\n%s", s.Name, s.Content), nil
+		}
+	}
+
 	return "", fmt.Errorf("skill '%s' not found", args.Name)
 }

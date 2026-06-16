@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"bidouille/pkg/agent"
-	"bidouille/pkg/config"
-	"bidouille/pkg/db"
-	"bidouille/pkg/ui"
+	"maquis/pkg/agent"
+	"maquis/pkg/config"
+	"maquis/pkg/db"
+	"maquis/pkg/ui"
 )
 
 var (
@@ -34,9 +34,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "bidouille [prompt]",
-	Short: "bidouille is a minimalist, resilient AI coding agent CLI.",
-	Long:  `bidouille is a Unix-style agent harness and interactive REPL that supports persistent session tracking, tool execution sandboxes, and advanced terminal visual themes.`,
+	Use:   "maquis [prompt]",
+	Short: "maquis is a minimalist, resilient AI coding agent CLI.",
+	Long:  `maquis is a Unix-style agent harness and interactive REPL that supports persistent session tracking, tool execution sandboxes, and advanced terminal visual themes.`,
 	Args:  cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg, err := config.LoadConfig(configPath)
@@ -185,7 +185,7 @@ var rootCmd = &cobra.Command{
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Manage bidouille runtime settings",
+	Short: "Manage maquis runtime settings",
 }
 
 var configShowCmd = &cobra.Command{
@@ -295,6 +295,8 @@ var sessionClearCmd = &cobra.Command{
 	},
 }
 
+
+
 func Execute() error {
 	return rootCmd.Execute()
 }
@@ -319,7 +321,7 @@ func init() {
 	defaultConfig := "config/config.json"
 	home, err := os.UserHomeDir()
 	if err == nil {
-		defaultConfig = filepath.Join(home, ".bidouille", "config.json")
+		defaultConfig = filepath.Join(home, ".maquis", "config.json")
 	}
 	rootCmd.SetHelpCommand(&cobra.Command{Use: "no-help-command", Hidden: true})
 	rootCmd.PersistentFlags().StringVar(&configPath, "config", defaultConfig, "Path to config JSON file")

@@ -2,6 +2,7 @@ package db
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -84,7 +85,7 @@ func SaveMessage(sessionID string, msg Message) error {
 		return fmt.Errorf("sessions directory not initialized")
 	}
 
-	if msg.Role != "assistant" && msg.Content == "" {
+	if msg.Role == "user" && msg.Content == "" {
 		return nil
 	}
 
@@ -142,7 +143,7 @@ func LoadMessages(sessionID string) ([]Message, error) {
 			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 		}
 
-		if record.Message.Role != "assistant" && record.Message.Content == "" {
+		if record.Message.Role == "user" && record.Message.Content == "" {
 			continue
 		}
 
@@ -302,7 +303,7 @@ func GetSessions() ([]SessionInfo, error) {
 				continue
 			}
 
-			if record.Message.Role != "assistant" && record.Message.Content == "" {
+			if record.Message.Role == "user" && record.Message.Content == "" {
 				continue
 			}
 
@@ -399,9 +400,14 @@ func GetUserHistory() ([]string, error) {
 		if err == nil {
 			scanner := bufio.NewScanner(f)
 			if scanner.Scan() {
-				var record JSONLRecord
-				if json.Unmarshal(scanner.Bytes(), &record) == nil {
-					startTime = record.Timestamp
+				lineBytes := scanner.Bytes()
+				if len(lineBytes) >= 33 && bytes.HasPrefix(lineBytes, []byte(`{"timestamp":"`)) {
+					startTime = string(lineBytes[14:33])
+				} else {
+					var record JSONLRecord
+					if json.Unmarshal(lineBytes, &record) == nil {
+						startTime = record.Timestamp
+					}
 				}
 			}
 			f.Close()
@@ -437,13 +443,18 @@ func GetUserHistory() ([]string, error) {
 
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
+			lineBytes := scanner.Bytes()
+			if !bytes.Contains(lineBytes, []byte(`"role":"user"`)) {
+				continue
+			}
+
 			var record JSONLRecord
-			if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			if err := json.Unmarshal(lineBytes, &record); err != nil {
 				continue
 			}
 
 			msg := record.Message
-			if msg.Role == "user" && !strings.HasPrefix(msg.Content, "[User manually executed") {
+			if msg.Role == "user" && !strings.HasPrefix(strings.ToLower(msg.Content), "[user manually executed") {
 				content := strings.TrimSpace(msg.Content)
 				if content != "" && content != lastContent {
 					history = append(history, content)

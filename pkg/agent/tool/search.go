@@ -109,14 +109,20 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 	}
 
+	patterns := loadGitignorePatterns(ctx.GetWorkspaceRoot())
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() {
-			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+		isDir := info.IsDir()
+		relPath, _ := filepath.Rel(safePath, path)
+		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+			if isDir {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if isDir {
 			return nil
 		}
 
@@ -245,12 +251,15 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	}
 
 	var results []string
+	patterns := loadGitignorePatterns(ctx.GetWorkspaceRoot())
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
-		if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-			if info.IsDir() {
+		isDir := info.IsDir()
+		relPath, _ := filepath.Rel(safePath, path)
+		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+			if isDir {
 				return filepath.SkipDir
 			}
 			return nil

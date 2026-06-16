@@ -97,6 +97,7 @@ type AgentContext interface {
 	SafePath(inputPath string) (string, error)
 	GetWorkspaceRoot() string
 	GetActiveSkills() []Skill
+	ReloadSkills() []Skill
 	SpawnTask(command string, w io.Writer) (string, error)
 	GetTaskStatus(taskID string) (string, string, error)
 	KillTask(taskID string) error

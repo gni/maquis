@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"bidouille/pkg/config"
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/config"
+	"maquis/pkg/ui/style"
 )
 
 type UITheme = style.UITheme

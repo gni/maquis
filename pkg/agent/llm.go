@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"bidouille/pkg/agent/tool"
-	"bidouille/pkg/db"
+	"maquis/pkg/agent/tool"
+	"maquis/pkg/db"
 )
 
 type Tool = tool.Tool
@@ -78,6 +78,9 @@ func (a *Agent) CheckThinkingSupport() bool {
 	if err != nil {
 		return false
 	}
+	if a.Config.ApiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
+	}
 	resp, err := a.HttpClient.Do(req)
 	if err != nil {
 		return false
@@ -116,9 +119,24 @@ func (a *Agent) StreamChatCompletions(
 		}
 	}
 
+	var apiMessages []db.Message
+	for _, msg := range messages {
+		if msg.Role == "assistant" && msg.Content == "" && len(msg.ToolCalls) == 0 {
+			// Skip completely empty assistant messages to avoid API rejection
+			continue
+		}
+		if msg.Role != "assistant" && msg.Content == "" {
+			msgCopy := msg
+			msgCopy.Content = " "
+			apiMessages = append(apiMessages, msgCopy)
+		} else {
+			apiMessages = append(apiMessages, msg)
+		}
+	}
+
 	reqBody := ChatCompletionRequest{
 		Model:       a.Config.Model,
-		Messages:    messages,
+		Messages:    apiMessages,
 		Tools:       a.Registry.GetAvailableTools(allowlist),
 		Temperature: a.Config.Temperature,
 		Stream:      true,

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/ui/style"
 )
 
 type jsonStreamParser struct {
@@ -158,8 +158,8 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				isContentKey := p.currentKey == "content" || p.currentKey == "write_content" || (p.currentKey == "command" && p.activeToolName != "bash")
-				if isContentKey && (p.activeToolName != "write" || p.streamWrites) {
+				isContentKey := (p.currentKey == "command" && p.activeToolName != "bash")
+				if isContentKey {
 					p.isContent = true
 					p.guessedLang = ""
 					if !p.titlePrinted {
@@ -175,6 +175,8 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 					p.isOldText = true
 				} else if p.currentKey == "newText" {
 					p.isNewText = true
+				} else if p.currentKey == "write_content" || p.currentKey == "content" {
+					p.isOldText = true
 				}
 			} else if char == '}' || char == ']' {
 				p.inValue = false
@@ -292,7 +294,7 @@ func getRelativePath(path string) string {
 }
 
 func getNewlineCount(w io.Writer) int {
-	if n, ok := w.(*newlineCounterWriter); ok {
+	if n, ok := w.(interface{ GetCount() int }); ok {
 		return n.GetCount()
 	}
 	return 0
@@ -301,12 +303,49 @@ func getNewlineCount(w io.Writer) int {
 type newlineCounterWriter struct {
 	io.Writer
 	count int
+	col   int
+	inEsc bool
+	inCSI bool
 }
 
 func (n *newlineCounterWriter) Write(p []byte) (int, error) {
+	termW, _ := getTerminalSize()
+	if termW <= 0 {
+		termW = 80
+	}
+
 	for _, b := range p {
+		if n.inEsc {
+			if b == '[' {
+				n.inCSI = true
+				n.inEsc = false
+			} else {
+				n.inEsc = false
+			}
+			continue
+		}
+		if b == '\x1b' {
+			n.inEsc = true
+			continue
+		}
+		if n.inCSI {
+			if b >= 0x40 && b <= 0x7E {
+				n.inCSI = false
+			}
+			continue
+		}
+
 		if b == '\n' {
 			n.count++
+			n.col = 0
+		} else if b == '\r' {
+			n.col = 0
+		} else if (b >= 32 && b < 127) || b >= 0xC0 {
+			n.col++
+			if n.col >= termW {
+				n.count++
+				n.col = 0
+			}
 		}
 	}
 	return n.Writer.Write(p)

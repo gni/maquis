@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/ui/style"
 	"github.com/alecthomas/chroma/v2/quick"
 )
 
@@ -57,8 +57,6 @@ func (sr *StreamRenderer) HasOutput() bool {
 }
 
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
@@ -82,8 +80,6 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 }
 
 func (sr *StreamRenderer) EndThinking() {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.endThinking()
@@ -107,8 +103,6 @@ func (sr *StreamRenderer) endThinking() {
 }
 
 func (sr *StreamRenderer) Write(chunk string) {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.endThinking()
@@ -208,8 +202,6 @@ func (sr *StreamRenderer) Write(chunk string) {
 }
 
 func (sr *StreamRenderer) Flush() {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.flushLocked()
@@ -299,8 +291,6 @@ func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle stri
 }
 
 func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
@@ -310,7 +300,7 @@ func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
 	sr.parser.streamWrites = sr.streamWrites
 	if sr.parser.activeToolIndex != toolCallIndex || sr.parser.activeToolName == "" {
 		sr.flushLocked()
-		sr.parser.needsLeadingNewline = sr.hasWrittenText || sr.hasWrittenThoughts
+		sr.parser.needsLeadingNewline = sr.hasWrittenText
 		sr.parser.activeToolName = toolName
 		sr.parser.activeToolIndex = toolCallIndex
 		sr.parser.titlePrinted = false
@@ -322,8 +312,6 @@ func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
 }
 
 func (sr *StreamRenderer) WriteToolCall(content string) {
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 

@@ -7,8 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"bidouille/pkg/cmd"
-	"bidouille/pkg/config"
+	"maquis/pkg/cmd"
+	"maquis/pkg/config"
+	"maquis/pkg/ui"
 )
 
 //go:embed config/config.json
@@ -25,7 +26,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Fprint(os.Stderr, "\x1b[?25h\x1b[r")
+		ui.ShutdownStatusBar(os.Stderr)
 		os.Exit(0)
 	}()
 

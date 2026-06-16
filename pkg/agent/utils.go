@@ -7,18 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 
-	"bidouille/pkg/db"
+	"maquis/pkg/db"
 )
 
 
-// LoadMemoryContext loads global (~/.bidouille/BIDOUILLE.md) and project (MEMORY.md) memory context.
+// LoadMemoryContext loads global (~/.maquis/MAQUIS.md) and project (MEMORY.md) memory context.
 func (a *Agent) LoadMemoryContext() string {
 	var sb strings.Builder
 
-	// 1. Global Memory (~/.bidouille/BIDOUILLE.md)
+	// 1. Global Memory (~/.maquis/MAQUIS.md)
 	home, err := os.UserHomeDir()
 	if err == nil {
-		globalPath := filepath.Join(home, ".bidouille", "BIDOUILLE.md")
+		globalPath := filepath.Join(home, ".maquis", "MAQUIS.md")
 		if data, err := os.ReadFile(globalPath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if len(trimmed) > 0 {
@@ -42,7 +42,7 @@ func (a *Agent) LoadMemoryContext() string {
 				break
 			}
 
-			projectDotPath := filepath.Join(dir, ".bidouille", "MEMORY.md")
+			projectDotPath := filepath.Join(dir, ".maquis", "MEMORY.md")
 			if data, err := os.ReadFile(projectDotPath); err == nil {
 				trimmed := strings.TrimSpace(string(data))
 				if len(trimmed) > 0 {
@@ -93,14 +93,17 @@ func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (i
 		}
 	}
 
-	tools := a.Registry.GetAvailableTools(allowedTools)
-	var toolsChars int
-	if len(tools) > 0 {
-		if toolsData, err := json.Marshal(tools); err == nil {
-			toolsChars = len(toolsData)
+	var toolsEst int
+	if a.Registry != nil {
+		tools := a.Registry.GetAvailableTools(allowedTools)
+		var toolsChars int
+		if len(tools) > 0 {
+			if toolsData, err := json.Marshal(tools); err == nil {
+				toolsChars = len(toolsData)
+			}
 		}
+		toolsEst = toolsChars / 4
 	}
-	toolsEst := toolsChars / 4
 
 	if lastAssistantIdx != -1 {
 		// We have an assistant message.
@@ -139,5 +142,51 @@ func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (i
 	}
 
 	return globalPrompt, globalCompletion
+}
+
+func stripAnsiSeqs(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			i++
+			if i < len(s) {
+				if s[i] == '[' {
+					// CSI sequence: consume until a letter in @-~ range
+					i++
+					for i < len(s) && (s[i] < 0x40 || s[i] > 0x7E) {
+						i++
+					}
+					if i < len(s) {
+						i++ // consume the final byte
+					}
+				} else if s[i] == ']' {
+					// OSC sequence: consume until ST (ESC \ or BEL)
+					i++
+					for i < len(s) {
+						if s[i] == '\x07' {
+							i++
+							break
+						}
+						if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
+							i += 2
+							break
+						}
+						i++
+					}
+				} else {
+					// Other escape (e.g., ESC ( B): consume next byte
+					i++
+				}
+			}
+		} else {
+			sb.WriteByte(s[i])
+			i++
+		}
+	}
+
+	return sb.String()
 }
 

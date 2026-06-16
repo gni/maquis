@@ -2,10 +2,15 @@ package ui
 
 import (
 	"bytes"
+	"io"
+	"strings"
 	"testing"
 
-	"bidouille/pkg/agent"
-	"bidouille/pkg/config"
+	"golang.org/x/term"
+
+	"maquis/pkg/agent"
+	"maquis/pkg/config"
+	"maquis/pkg/ui/style"
 )
 
 func TestParseManualCommand(t *testing.T) {
@@ -139,8 +144,11 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+O: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("expected 0 bytes returned for Ctrl+O, got %d", n)
+	if n != 1 {
+		t.Errorf("expected 1 byte returned for Ctrl+O, got %d", n)
+	}
+	if p[0] != 12 {
+		t.Errorf("expected injected Ctrl+L (12) for Ctrl+O, got %d", p[0])
 	}
 	if !a.Config.CollapseResults {
 		t.Errorf("expected CollapseResults to be true, got false")
@@ -152,8 +160,11 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+T: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("expected 0 bytes returned for Ctrl+T, got %d", n)
+	if n != 1 {
+		t.Errorf("expected 1 byte returned for Ctrl+T, got %d", n)
+	}
+	if p[0] != 12 {
+		t.Errorf("expected injected Ctrl+L (12) for Ctrl+T, got %d", p[0])
 	}
 	if a.Config.ShowThinking {
 		t.Errorf("expected ShowThinking to be false, got true")
@@ -165,10 +176,166 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+R: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("expected 0 bytes returned for Ctrl+R, got %d", n)
+	if n != 1 {
+		t.Errorf("expected 1 byte returned for Ctrl+R, got %d", n)
+	}
+	if p[0] != 12 {
+		t.Errorf("expected injected Ctrl+L (12) for Ctrl+R, got %d", p[0])
 	}
 	if a.Config.ReasoningEffort != "medium" {
 		t.Errorf("expected ReasoningEffort to be 'medium', got %q", a.Config.ReasoningEffort)
 	}
 }
+
+func TestFieldStartIndex(t *testing.T) {
+	tests := []struct {
+		s        string
+		fieldIdx int
+		expected int
+	}{
+		{"/agent spawn bob hello", 0, 0},
+		{"/agent spawn bob hello", 1, 7},
+		{"/agent spawn bob hello", 2, 13},
+		{"/agent spawn bob hello", 3, 17},
+		{"  /agent   spawn bob hello  ", 0, 2},
+		{"  /agent   spawn bob hello  ", 1, 11},
+		{"  /agent   spawn bob hello  ", 2, 17},
+		{"  /agent   spawn bob hello  ", 3, 21},
+		{"/agent spawn bob hello", 4, -1},
+	}
+
+	for _, tt := range tests {
+		got := fieldStartIndex(tt.s, tt.fieldIdx)
+		if got != tt.expected {
+			t.Errorf("fieldStartIndex(%q, %d) = %d; want %d", tt.s, tt.fieldIdx, got, tt.expected)
+		}
+	}
+}
+
+func TestCtrlDExits(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	var buf bytes.Buffer
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader([]byte{4}), // Ctrl+D
+		agent: a,
+		w:     &buf,
+	}
+	rl := term.NewTerminal(ki, "")
+	ki.rl = rl
+
+	line, err := rl.ReadLine()
+	if err == nil || err.Error() != "EOF" {
+		t.Errorf("expected EOF on Ctrl+D, got line %q, err %v", line, err)
+	}
+}
+
+func TestPrintPromptSeparatorStatic(t *testing.T) {
+	theme := UITheme{
+		Primary: style.Color("#ffffff"),
+		Border:  style.Color("#555555"),
+	}
+
+	var buf bytes.Buffer
+	// Test without spinner
+	PrintPromptSeparatorWithSpinner(&buf, true, "low", theme, "")
+	outputNoSpinner := buf.String()
+	buf.Reset()
+
+	// Test with spinner (should be ignored, remaining static)
+	PrintPromptSeparatorWithSpinner(&buf, true, "low", theme, "◜")
+	outputWithSpinner := buf.String()
+
+	rawNoSpinner := stripAnsi(outputNoSpinner)
+	rawWithSpinner := stripAnsi(outputWithSpinner)
+
+	if rawNoSpinner != rawWithSpinner {
+		t.Errorf("Expected prompt separator to remain static, got differences:\nno-spinner: %q\nwith-spinner: %q", rawNoSpinner, rawWithSpinner)
+	}
+
+	if !strings.HasPrefix(rawNoSpinner, "─── prompt ") {
+		t.Errorf("Expected prefix '─── prompt ', got %q", rawNoSpinner)
+	}
+}
+
+func TestDrawStaticStatsLine(t *testing.T) {
+	theme := UITheme{
+		Primary: style.Color("#ffffff"),
+		Border:  style.Color("#555555"),
+	}
+
+	var buf bytes.Buffer
+	// Test stats text
+	DrawStaticStatsLine(&buf, theme, "", "14 out • 2026-06-15 01:02:06 (1.4s)")
+	rawStats := buf.String()
+	buf.Reset()
+
+	// Test spinner
+	DrawStaticStatsLine(&buf, theme, "◜", "")
+	rawSpinner := buf.String()
+
+	if !strings.Contains(rawStats, "14 out • 2026-06-15 01:02:06 (1.4s)") {
+		t.Errorf("Expected rawStats to contain stats text, got %q", rawStats)
+	}
+
+	if !strings.Contains(rawSpinner, "◜") {
+		t.Errorf("Expected rawSpinner to contain spinner, got %q", rawSpinner)
+	}
+}
+
+type mockNewlineCounter struct {
+	io.Writer
+	count int
+}
+
+func (m *mockNewlineCounter) GetCount() int {
+	return m.count
+}
+
+func TestGetNewlineCount(t *testing.T) {
+	var buf bytes.Buffer
+	m := &mockNewlineCounter{Writer: &buf, count: 42}
+	got := getNewlineCount(m)
+	if got != 42 {
+		t.Errorf("expected getNewlineCount to return 42, got %d", got)
+	}
+
+	gotNull := getNewlineCount(&buf)
+	if gotNull != 0 {
+		t.Errorf("expected getNewlineCount for non-counter writer to return 0, got %d", gotNull)
+	}
+}
+
+func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	var buf bytes.Buffer
+	pasteData := []byte("hello\nworld\n")
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader(pasteData),
+		agent: a,
+		w:     &buf,
+	}
+
+	p := make([]byte, len(pasteData))
+	// Directly call ki.Read(p). Since n > 1 and it contains newlines, it will trigger isMultilinePaste logic.
+	n, err := ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read paste: %v", err)
+	}
+
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned (no auto-submit), got %d", n)
+	}
+	expectedPasted := "hello\nworld\n"
+	if ki.pastedText != expectedPasted {
+		t.Errorf("expected pastedText to be %q, got %q", expectedPasted, ki.pastedText)
+	}
+	// Verify that it echoed to ki.w (which is buf)
+	if !strings.HasSuffix(buf.String(), "hello\r\nworld\r\n") {
+		t.Errorf("expected echoed text to have carriage returns, got %q", buf.String())
+	}
+}
+

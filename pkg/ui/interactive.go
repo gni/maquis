@@ -6,27 +6,39 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2/quick"
 	"golang.org/x/term"
 
-	"bidouille/pkg/config"
-	"bidouille/pkg/db"
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/agent"
+	"maquis/pkg/config"
+	"maquis/pkg/db"
+	"maquis/pkg/ui/style"
 )
 
 func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	var input io.Reader = os.Stdin
+	var input io.Reader = activeInputReader
 	var output io.Writer = os.Stdout
 	var fd int = int(os.Stdin.Fd())
-	if err == nil {
-		defer tty.Close()
-		input = tty
-		output = tty
-		fd = int(tty.Fd())
+
+	if input == nil {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		input = os.Stdin
+		if err == nil {
+			defer tty.Close()
+			input = tty
+			output = tty
+			fd = int(tty.Fd())
+		}
+	} else {
+		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+			defer tty.Close()
+			output = tty
+			fd = int(tty.Fd())
+		}
 	}
 
 
@@ -137,6 +149,38 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	var items []*settingItem
 	items = []*settingItem{
 		{
+			id:          "active_provider",
+			name:        "active provider",
+			value:       func() string {
+				if cloned.ActiveProvider == "" {
+					return "none (default)"
+				}
+				return cloned.ActiveProvider
+			},
+			description: "Currently active endpoint provider profile",
+			onToggle: func() {
+				var keys []string
+				keys = append(keys, "")
+				for k := range cloned.Providers {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys[1:])
+
+				idx := 0
+				for i, k := range keys {
+					if cloned.ActiveProvider == k {
+						idx = i
+						break
+					}
+				}
+				nextIdx := (idx + 1) % len(keys)
+				cloned.ActiveProvider = keys[nextIdx]
+				if cloned.ActiveProvider != "" {
+					cloned.SyncActiveProvider()
+				}
+			},
+		},
+		{
 			id:          "endpoint",
 			name:        "endpoint url",
 			value:       func() string { return cloned.Endpoint },
@@ -146,6 +190,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 					return nil
 				}
 				cloned.Endpoint = newVal
+				cloned.UpdateActiveProvider()
 				return nil
 			},
 		},
@@ -159,6 +204,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 					return nil
 				}
 				cloned.Model = newVal
+				cloned.UpdateActiveProvider()
 				return nil
 			},
 		},
@@ -505,8 +551,8 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		if n == 1 {
 			char := readBuf[0]
 
-			// Ctrl+C (Interrupt/Cancel)
-			if char == 3 {
+			// Ctrl+C (Interrupt/Cancel) or Ctrl+D (Exit)
+			if char == 3 || char == 4 {
 				return nil, fmt.Errorf("cancelled")
 			}
 
@@ -627,26 +673,6 @@ func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rl
 	}
 }
 
-func RunMultilineEditor(rlInput io.Reader, rlOutput io.Writer) (string, error) {
-	fmt.Fprintln(rlOutput, "=== multiline prompt editor ===")
-	fmt.Fprintln(rlOutput, "type or paste your prompt here. when finished, type '.' on a line by itself and press enter.")
-	fmt.Fprintln(rlOutput, "type 'cancel' to abort.")
-
-	var lines []string
-	scanner := bufio.NewScanner(rlInput)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "." {
-			break
-		}
-		if line == "cancel" && len(lines) == 0 {
-			return "", fmt.Errorf("multiline editor cancelled")
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n"), nil
-}
-
 func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (string, bool, error) {
 	for {
 		sessions, err := db.GetSessions()
@@ -655,7 +681,7 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 		}
 
 		fmt.Fprintln(rlOutput, "\n==================================================")
-		fmt.Fprintln(rlOutput, "               bidouille sessions                 ")
+		fmt.Fprintln(rlOutput, "               maquis sessions                 ")
 		fmt.Fprintln(rlOutput, "==================================================")
 		if len(sessions) == 0 {
 			fmt.Fprintln(rlOutput, "no past sessions found.")
@@ -716,5 +742,409 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 		}
 
 		fmt.Fprintln(rlOutput, "invalid choice. please try again.")
+	}
+}
+
+// RunInteractiveAgentManager opens an interactive terminal UI for managing multi-agents
+func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlInput io.Reader, rlOutput io.Writer) error {
+	var fd int
+	if f, ok := rlInput.(*os.File); ok {
+		fd = int(f.Fd())
+	} else {
+		fd = int(os.Stdin.Fd())
+	}
+
+	if !term.IsTerminal(fd) {
+		return fmt.Errorf("not a terminal")
+	}
+
+	initialState, err := term.MakeRaw(fd)
+	if err != nil {
+		return err
+	}
+	defer term.Restore(fd, initialState)
+
+	// Save screen state, switch to alternate screen, and hide cursor
+	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
+	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
+
+	selectedIdx := 0
+
+	for {
+		// Fetch current list of agents
+		agentsList := mam.ListAgents()
+		activeName := mam.ActiveAgentName()
+
+		// Build combined list of agents
+		list := append([]string{"base"}, agentsList...)
+
+		if selectedIdx >= len(list) {
+			selectedIdx = len(list) - 1
+		}
+		if selectedIdx < 0 {
+			selectedIdx = 0
+		}
+
+		// Build output buffer
+		var buf strings.Builder
+		buf.WriteString("\x1b[H") // move cursor to top-left
+
+		// Draw Screen Title
+		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		buf.WriteString(titleStyle.Render("agent swarm manager"))
+		buf.WriteString("\n\n")
+
+		headerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		keyStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+		valStyle := style.NewStyle().Foreground(theme.Text)
+		highlightStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+
+		// 1. Prepare Left Column (Active Agents List)
+		var leftLines []string
+		leftLines = append(leftLines, headerStyle.Render("  active swarm nodes:"))
+		leftLines = append(leftLines, style.NewStyle().Foreground(theme.Border).Render("  ───────────────────────────────────"))
+
+		for idx, name := range list {
+			marker := "  "
+			if name == activeName || (name == "base" && activeName == "") {
+				marker = style.NewStyle().Foreground(theme.Success).Render("➔ ")
+			}
+
+			var nameStr string
+			if idx == selectedIdx {
+				nameStr = style.NewStyle().Foreground(theme.Primary).Bold(true).Render(name)
+			} else {
+				nameStr = style.NewStyle().Foreground(theme.Text).Render(name)
+			}
+
+			leftLines = append(leftLines, fmt.Sprintf("   %s%s", marker, nameStr))
+		}
+
+		// 2. Prepare Right Column (Selected Node Info)
+		selectedName := list[selectedIdx]
+		var sysPrompt string
+		var parentStr string
+		var skillStr string
+		var typeStr string
+
+		isFocused := (selectedName == activeName)
+		if selectedName == "base" && activeName == "" {
+			isFocused = true
+		}
+		focusVal := valStyle.Render("No (press Enter to focus & chat)")
+		if isFocused {
+			focusVal = highlightStyle.Render("Yes (currently chatting)")
+		}
+
+		if selectedName == "base" {
+			typeStr = "Default Base Agent"
+			parentStr = "none"
+			skillStr = "Generic (all active skills)"
+			sysPrompt = mam.BaseAgent.GetSystemPrompt()
+		} else {
+			typeStr = "Swarm Subagent"
+			parentName := mam.GetParentName(selectedName)
+			if parentName == "" {
+				parentStr = "base"
+			} else {
+				parentStr = parentName
+			}
+
+			skills, _ := mam.ListAgentSkills(selectedName)
+			var skillNames []string
+			for _, s := range skills {
+				skillNames = append(skillNames, s.Name)
+			}
+			if len(skillNames) > 0 {
+				skillStr = strings.Join(skillNames, ", ")
+			} else {
+				skillStr = "Generic"
+			}
+			sysPrompt = mam.GetAgentSystemPrompt(selectedName)
+		}
+
+		var rightLines []string
+		rightLines = append(rightLines, headerStyle.Render("selected node info:"))
+		rightLines = append(rightLines, style.NewStyle().Foreground(theme.Border).Render("─────────────────────────────────────────"))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Name:"), valStyle.Render(selectedName)))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Type:"), valStyle.Render(typeStr)))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Parent:"), valStyle.Render(parentStr)))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Skill:"), valStyle.Render(skillStr)))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Focus:"), focusVal))
+		rightLines = append(rightLines, fmt.Sprintf("  %s", keyStyle.Render("Instructions / Goal:")))
+
+		// Wrap and truncate system prompt
+		wrappedLines := wrapText(sysPrompt, 45)
+		for i := 0; i < 8 && i < len(wrappedLines); i++ {
+			rightLines = append(rightLines, "  "+valStyle.Render(wrappedLines[i]))
+		}
+		if len(wrappedLines) > 8 {
+			rightLines = append(rightLines, "  "+style.NewStyle().Foreground(theme.Border).Italic(true).Render("... (truncated)"))
+		}
+
+		// 3. Render Columns Side-by-Side
+		maxLines := len(leftLines)
+		if len(rightLines) > maxLines {
+			maxLines = len(rightLines)
+		}
+
+		width, _ := getTerminalSize()
+		useSideBySide := width >= 80
+
+		if useSideBySide {
+			for i := 0; i < maxLines; i++ {
+				var leftPart string
+				if i < len(leftLines) {
+					leftPart = leftLines[i]
+				}
+				leftLen := len(stripAnsi(leftPart))
+				leftPad := ""
+				if leftLen < 38 {
+					leftPad = strings.Repeat(" ", 38-leftLen)
+				}
+
+				var rightPart string
+				if i < len(rightLines) {
+					rightPart = rightLines[i]
+				}
+
+				buf.WriteString(fmt.Sprintf("%s%s │ %s\n", leftPart, leftPad, rightPart))
+			}
+		} else {
+			// Stacked layout for narrow terminals
+			for _, line := range leftLines {
+				buf.WriteString(line + "\n")
+			}
+			buf.WriteString(style.NewStyle().Foreground(theme.Border).Render("  ───────────────────────────────────\n"))
+			for _, line := range rightLines {
+				buf.WriteString(line + "\n")
+			}
+		}
+
+		// Draw Controls Bar
+		navStyle := style.NewStyle().Foreground(theme.Border)
+		keyStyleBar := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		buf.WriteString("\n")
+		buf.WriteString(navStyle.Render("  controls: "))
+		buf.WriteString(fmt.Sprintf("%s Focus & Chat   ", keyStyleBar.Render("[Enter]")))
+		buf.WriteString(fmt.Sprintf("%s Create Agent   ", keyStyleBar.Render("[C]")))
+		buf.WriteString(fmt.Sprintf("%s Delete Agent   ", keyStyleBar.Render("[D]")))
+		buf.WriteString(fmt.Sprintf("%s Exit Swarm Manager\n", keyStyleBar.Render("[Esc]")))
+
+		buf.WriteString("\x1b[J") // clear to end
+
+		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
+		_, _ = rlOutput.Write([]byte(outputStr))
+
+		// Read key input
+		var readBuf [16]byte
+		n, errReader := rlInput.Read(readBuf[:])
+		if errReader != nil {
+			return errReader
+		}
+
+		if n == 1 {
+			char := readBuf[0]
+
+			// Escape / Ctrl+C / Ctrl+D
+			if char == 3 || char == 27 || char == 4 {
+				return nil
+			}
+
+			// Enter
+			if char == 13 || char == 10 {
+				mam.JoinAgent(selectedName)
+				term.Restore(fd, initialState)
+				fmt.Fprint(rlOutput, "\x1b[?25h") // Show cursor
+				fmt.Fprintf(rlOutput, "\r\nSwitched active chat focus to agent '%s'.\r\nPress enter to continue...", selectedName)
+				_, _ = bufio.NewReader(rlInput).ReadString('\n')
+				return nil
+			}
+
+			// Create New (C/c)
+			if char == 'c' || char == 'C' {
+				term.Restore(fd, initialState)
+				fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+
+				fmt.Fprint(rlOutput, "=== Create New Swarm Agent ===\r\n\r\n")
+				
+				reader := bufio.NewReader(rlInput)
+				
+				fmt.Fprint(rlOutput, "Enter unique agent name (e.g. devops, tester): ")
+				agentName, errInput := reader.ReadString('\n')
+				if errInput == nil {
+					agentName = strings.TrimSpace(agentName)
+					if agentName == "" {
+						fmt.Fprint(rlOutput, "\r\nError: Agent name cannot be empty. Press enter to continue...")
+						_, _ = reader.ReadString('\n')
+					} else {
+						fmt.Fprint(rlOutput, "Enter system instructions / goals: ")
+						sysPrompt, errInput2 := reader.ReadString('\n')
+						if errInput2 == nil {
+							sysPrompt = strings.TrimSpace(sysPrompt)
+							if sysPrompt == "" {
+								fmt.Fprint(rlOutput, "\r\nError: Instructions cannot be empty. Press enter to continue...")
+								_, _ = reader.ReadString('\n')
+							} else {
+								fmt.Fprint(rlOutput, "\x1b[?25l")
+								_, _ = term.MakeRaw(fd)
+
+								// Parent Agent Select
+								parentOptions := []string{"None (Base)"}
+								for _, name := range agentsList {
+									parentOptions = append(parentOptions, name)
+								}
+								parentIdx, errSelect := runInteractiveSelect(rlInput, rlOutput, "Select Parent Agent (default: None):", parentOptions, theme)
+								if errSelect == nil {
+									parentName := ""
+									if parentIdx > 0 {
+										parentName = parentOptions[parentIdx]
+									}
+
+									// Dedicated Skill Select
+									skillOptions := []string{"Generic (All Active Skills)"}
+									for _, s := range mam.BaseAgent.ActiveSkills {
+										skillOptions = append(skillOptions, s.Name)
+									}
+									skillIdx, errSelect2 := runInteractiveSelect(rlInput, rlOutput, "Select Dedicated Reference Skill:", skillOptions, theme)
+									if errSelect2 == nil {
+										skillName := ""
+										if skillIdx > 0 {
+											skillName = skillOptions[skillIdx]
+										}
+
+										errSpawn := mam.SpawnAgent(agentName, sysPrompt, parentName, skillName)
+
+										term.Restore(fd, initialState)
+										fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+										if errSpawn != nil {
+											fmt.Fprintf(rlOutput, "Error spawning agent: %v\r\n\r\nPress enter to continue...", errSpawn)
+										} else {
+											fmt.Fprintf(rlOutput, "Successfully spawned agent '%s'!\r\n\r\nPress enter to continue...", agentName)
+										}
+										_, _ = reader.ReadString('\n')
+									}
+								}
+							}
+						}
+					}
+				}
+
+				fmt.Fprint(rlOutput, "\x1b[?25l")
+				_, _ = term.MakeRaw(fd)
+				continue
+			}
+
+			// Delete (D/d)
+			if char == 'd' || char == 'D' {
+				if selectedName == "base" {
+					term.Restore(fd, initialState)
+					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+					fmt.Fprint(rlOutput, "Error: Cannot delete default base agent.\r\n\r\nPress enter to continue...")
+					_, _ = bufio.NewReader(rlInput).ReadString('\n')
+					fmt.Fprint(rlOutput, "\x1b[?25l")
+					_, _ = term.MakeRaw(fd)
+				} else {
+					term.Restore(fd, initialState)
+					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+					fmt.Fprintf(rlOutput, "Are you sure you want to delete agent '%s'? [y/N]: ", selectedName)
+					
+					reader := bufio.NewReader(rlInput)
+					confirm, errInput := reader.ReadString('\n')
+					if errInput == nil && (strings.HasPrefix(strings.ToLower(strings.TrimSpace(confirm)), "y")) {
+						errKill := mam.KillAgent(selectedName)
+						fmt.Fprint(rlOutput, "\x1b[H\x1b[2J")
+						if errKill != nil {
+							fmt.Fprintf(rlOutput, "Error terminating agent: %v\r\n\r\nPress enter to continue...", errKill)
+						} else {
+							fmt.Fprintf(rlOutput, "Agent '%s' terminated and deleted.\r\n\r\nPress enter to continue...", selectedName)
+						}
+						_, _ = reader.ReadString('\n')
+					}
+
+					fmt.Fprint(rlOutput, "\x1b[?25l")
+					_, _ = term.MakeRaw(fd)
+
+					// Adjust selection index
+					if selectedIdx >= len(list)-1 {
+						selectedIdx = len(list) - 2
+						if selectedIdx < 0 {
+							selectedIdx = 0
+						}
+					}
+				}
+				continue
+			}
+		}
+
+		// Arrow keys navigation
+		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
+			switch readBuf[2] {
+			case 'A': // Arrow Up
+				selectedIdx = (selectedIdx - 1 + len(list)) % len(list)
+			case 'B': // Arrow Down
+				selectedIdx = (selectedIdx + 1) % len(list)
+			}
+		}
+	}
+}
+
+
+// runInteractiveSelect shows a simple interactive list selection screen
+func runInteractiveSelect(rlInput io.Reader, rlOutput io.Writer, title string, items []string, theme UITheme) (int, error) {
+	selectedIdx := 0
+
+	for {
+		var buf strings.Builder
+		buf.WriteString("\x1b[H") // move cursor to top-left
+
+		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		buf.WriteString(titleStyle.Render(title))
+		buf.WriteString("\n\n")
+
+		for idx, item := range items {
+			if idx == selectedIdx {
+				markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+				itemStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+				buf.WriteString(fmt.Sprintf("    %s %s\n", markerStyle.Render("▸"), itemStyle.Render(item)))
+			} else {
+				itemStyle := style.NewStyle().Foreground(theme.Text)
+				buf.WriteString(fmt.Sprintf("      %s\n", itemStyle.Render(item)))
+			}
+		}
+
+		buf.WriteString("\n")
+		navStyle := style.NewStyle().Foreground(theme.Border)
+		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter select · esc cancel")))
+
+		buf.WriteString("\x1b[J") // clear to end
+
+		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
+		_, _ = rlOutput.Write([]byte(outputStr))
+
+		var readBuf [16]byte
+		n, err := rlInput.Read(readBuf[:])
+		if err != nil {
+			return -1, err
+		}
+
+		if n == 1 {
+			char := readBuf[0]
+			if char == 3 || char == 27 || char == 4 {
+				return -1, fmt.Errorf("selection cancelled")
+			}
+			if char == 13 || char == 10 {
+				return selectedIdx, nil
+			}
+		}
+
+		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
+			switch readBuf[2] {
+			case 'A': // Arrow Up
+				selectedIdx = (selectedIdx - 1 + len(items)) % len(items)
+			case 'B': // Arrow Down
+				selectedIdx = (selectedIdx + 1) % len(items)
+			}
+		}
 	}
 }

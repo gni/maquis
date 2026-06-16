@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/ui/style"
 	"golang.org/x/term"
 )
 
@@ -24,6 +24,7 @@ type StatusBarState struct {
 	LastTps                float64
 	HasLastTps             bool
 	ActiveTasksCount       int
+	ShowTokens             bool
 }
 
 var (
@@ -33,6 +34,7 @@ var (
 	enabled            bool
 	scrollRegionOffset int // extra lines reserved above the status bar (e.g. prompt separator + input)
 	collapseResults    bool
+	lastStatsText      string
 )
 
 // SetCollapseStatus updates the results collapsing state in the status bar.
@@ -91,14 +93,22 @@ func ShutdownStatusBar(w io.Writer) {
 	enabled = false
 	stateMu.Unlock()
 
-	fmt.Fprint(w, "\x1b[r") // Reset scrolling region
 	_, height := getTerminalSize()
+	var buf bytes.Buffer
 	if height > 0 {
-		fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K", height-1, height)
+		// Clear stats line (height-4), prompt separator (height-3), status bar border (height-1) and status bar (height)
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-4)
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-3)
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-1)
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height)
+		// Reset cursor position to height-2 (prompt line)
+		fmt.Fprintf(&buf, "\x1b[%d;1H", height-2)
 	}
+	fmt.Fprint(&buf, "\x1b[r\x1b[?25h") // Reset scrolling region and show cursor
+	_, _ = w.Write(buf.Bytes())
 }
 
-func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int) {
+func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {
 	stateMu.Lock()
 	state.Model = model
 	state.PromptTokens = promptTokens
@@ -107,6 +117,7 @@ func UpdateStatus(model string, promptTokens, completionTokens, currentCompletio
 	state.ContextLimit = contextLimit
 	state.IsGenerating = isGenerating
 	state.ActiveTasksCount = activeTasks
+	state.ShowTokens = showTokens
 	if tps > 0 {
 		state.LastTps = tps
 		state.HasLastTps = true
@@ -183,6 +194,9 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 }
 
 func formatLeft(theme UITheme, width int) string {
+	if !state.ShowTokens {
+		return ""
+	}
 	pStrCompact := fmt.Sprintf("%d↓", state.PromptTokens)
 	if state.PromptTokens >= 1000 {
 		pStrCompact = fmt.Sprintf("%.1fk↓", float64(state.PromptTokens)/1000.0)

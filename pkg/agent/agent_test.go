@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"bidouille/pkg/agent/tool"
+	"maquis/pkg/agent/tool"
 )
 
 
 func TestSafePath(t *testing.T) {
 	a := &Agent{
-		WorkspaceRoot: "/workspace/bidouille",
+		WorkspaceRoot: "/workspace/maquis",
 	}
 
 	home, _ := os.UserHomeDir()
@@ -24,14 +24,14 @@ func TestSafePath(t *testing.T) {
 		expectErr bool
 		expected  string
 	}{
-		{"pkg/agent/loop.go", false, "/workspace/bidouille/pkg/agent/loop.go"},
-		{"/workspace/bidouille/pkg/agent/loop.go", false, "/workspace/bidouille/pkg/agent/loop.go"},
+		{"pkg/agent/loop.go", false, "/workspace/maquis/pkg/agent/loop.go"},
+		{"/workspace/maquis/pkg/agent/loop.go", false, "/workspace/maquis/pkg/agent/loop.go"},
 		{"../loop.go", true, ""},
 		{"/etc/passwd", true, ""},
 		{"../../../etc/passwd", true, ""},
-		{"", false, "/workspace/bidouille"},
-		{".", false, "/workspace/bidouille"},
-		{home + "/.bidouille/BIDOUILLE.md", false, home + "/.bidouille/BIDOUILLE.md"},
+		{"", false, "/workspace/maquis"},
+		{".", false, "/workspace/maquis"},
+		{home + "/.maquis/MAQUIS.md", false, home + "/.maquis/MAQUIS.md"},
 		{home + "/some_other_file.txt", true, ""},
 	}
 
@@ -75,7 +75,7 @@ func TestBackgroundTask(t *testing.T) {
 	if tempDirRoot == "" {
 		tempDirRoot = os.TempDir()
 	}
-	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-test-*")
+	tempDir, err := os.MkdirTemp(tempDirRoot, "maquis-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestBackgroundTask(t *testing.T) {
 		t.Errorf("expected status 'killed', got %q", status)
 	}
 
-	id2, err := a.SpawnTask("echo 'hello bidouille'", &buf)
+	id2, err := a.SpawnTask("echo 'hello maquis'", &buf)
 	if err != nil {
 		t.Fatalf("failed to spawn second task: %v", err)
 	}
@@ -149,8 +149,8 @@ func TestBackgroundTask(t *testing.T) {
 	if status2 != "completed" {
 		t.Errorf("expected second task status 'completed', got %q", status2)
 	}
-	if !strings.Contains(output2, "hello bidouille") {
-		t.Errorf("expected output to contain 'hello bidouille', got %q", output2)
+	if !strings.Contains(output2, "hello maquis") {
+		t.Errorf("expected output to contain 'hello maquis', got %q", output2)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestResilientEdit(t *testing.T) {
 	if tempDirRoot == "" {
 		tempDirRoot = os.TempDir()
 	}
-	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-test-*")
+	tempDir, err := os.MkdirTemp(tempDirRoot, "maquis-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestFindToolGlob(t *testing.T) {
 	if tempDirRoot == "" {
 		tempDirRoot = os.TempDir()
 	}
-	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-find-test-*")
+	tempDir, err := os.MkdirTemp(tempDirRoot, "maquis-find-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestRecursiveLs(t *testing.T) {
 	if tempDirRoot == "" {
 		tempDirRoot = os.TempDir()
 	}
-	tempDir, err := os.MkdirTemp(tempDirRoot, "bidouille-ls-test-*")
+	tempDir, err := os.MkdirTemp(tempDirRoot, "maquis-ls-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}

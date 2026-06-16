@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"bidouille/pkg/agent/tool"
-	"bidouille/pkg/config"
+	"maquis/pkg/agent/tool"
+	"maquis/pkg/config"
 )
 
 type mcpClient struct {
@@ -318,7 +318,7 @@ func (c *mcpClient) handshake() error {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]string{
-			"name":    "bidouille-client",
+			"name":    "maquis-client",
 			"version": "1.0.0",
 		},
 	}

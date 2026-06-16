@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"bidouille/pkg/agent/tool"
-	"bidouille/pkg/config"
-	"bidouille/pkg/db"
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/agent/tool"
+	"maquis/pkg/config"
+	"maquis/pkg/db"
+	"maquis/pkg/ui/style"
 )
 
 type StreamRenderer interface {
@@ -35,7 +35,8 @@ type AgentUI interface {
 	DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme, spinnerFrame string)
 	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool) StreamRenderer
 	SetCollapseStatus(collapsed bool)
-	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int)
+	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool)
+	DrawStatsLine(w io.Writer, theme style.UITheme, spinnerFrame string, statsText string)
 	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)
 	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int)
 }
@@ -59,6 +60,8 @@ type Agent struct {
 
 	ThinkingSupported      bool
 	ThinkingSupportChecked bool
+
+	CurrentWriter          io.Writer
 
 	lastToolOutput         string
 	lastToolIsError        bool
@@ -96,6 +99,18 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewLoadSkillTool())
 	a.Registry.Register(tool.NewTaskStatusTool())
 	a.Registry.Register(tool.NewTaskKillTool())
+	a.Registry.Register(tool.NewGitDiffTool())
+
+	// 1. Register global plugins from ~/.maquis/plugins/
+	home, err := os.UserHomeDir()
+	if err == nil {
+		globalPluginsDir := filepath.Join(home, ".maquis", "plugins")
+		_ = tool.RegisterPlugins(a.Registry, globalPluginsDir)
+	}
+
+	// 2. Register local executable plugins from the "plugins" directory in the workspace
+	pluginsDir := filepath.Join(absWorkspace, "plugins")
+	_ = tool.RegisterPlugins(a.Registry, pluginsDir)
 
 	return a
 }
@@ -106,6 +121,33 @@ func (a *Agent) GetWorkspaceRoot() string {
 
 func (a *Agent) GetActiveSkills() []tool.Skill {
 	return a.ActiveSkills
+}
+
+func (a *Agent) ReloadSkills() []tool.Skill {
+	if a == nil || a.Config == nil || a.Config.SkillsDir == "" {
+		if a != nil {
+			return a.ActiveSkills
+		}
+		return nil
+	}
+	skills, err := LoadSkills(a.Config.SkillsDir)
+	if err == nil {
+		a.ActiveSkills = skills
+	}
+	return a.ActiveSkills
+}
+
+func (a *Agent) ReloadPlugins() error {
+	a.Registry.UnregisterPrefix("plugin__")
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		globalPluginsDir := filepath.Join(home, ".maquis", "plugins")
+		_ = tool.RegisterPlugins(a.Registry, globalPluginsDir)
+	}
+
+	pluginsDir := filepath.Join(a.WorkspaceRoot, "plugins")
+	return tool.RegisterPlugins(a.Registry, pluginsDir)
 }
 
 func (a *Agent) SafePath(inputPath string) (string, error) {
@@ -130,11 +172,26 @@ func (a *Agent) SafePath(inputPath string) (string, error) {
 		return cleanTarget, nil
 	}
 
+	// Surgical security checks: block modifying active configuration file or session databases
+	if a.ConfigPath != "" {
+		absConfig, errConfig := filepath.Abs(a.ConfigPath)
+		if errConfig == nil {
+			cleanConfig := filepath.Clean(absConfig)
+			if cleanTarget == cleanConfig {
+				return "", fmt.Errorf("security violation: modifying the active configuration file is not allowed")
+			}
+			cleanSessionsDir := filepath.Clean(filepath.Join(filepath.Dir(absConfig), "sessions"))
+			if cleanTarget == cleanSessionsDir || strings.HasPrefix(cleanTarget, cleanSessionsDir+string(filepath.Separator)) {
+				return "", fmt.Errorf("security violation: modifying session database files is not allowed")
+			}
+		}
+	}
+
 	// Surgical allowlist: allow writing to global memory files
 	home, err := os.UserHomeDir()
 	if err == nil {
-		globalBidouille := filepath.Clean(filepath.Join(home, ".bidouille", "BIDOUILLE.md"))
-		if cleanTarget == globalBidouille {
+		globalMaquis := filepath.Clean(filepath.Join(home, ".maquis", "MAQUIS.md"))
+		if cleanTarget == globalMaquis {
 			return cleanTarget, nil
 		}
 	}

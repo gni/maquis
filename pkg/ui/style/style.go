@@ -217,7 +217,12 @@ func (s Style) Render(args ...string) string {
 	for _, line := range lines {
 		runeCount := utf8.RuneCountInString(stripAnsi(line))
 		padL := strings.Repeat(" ", s.paddingLeft)
-		padR := strings.Repeat(" ", s.paddingRight + (maxWidth - runeCount))
+		var padR string
+		if s.bg != nil || s.borderType != noBorder {
+			padR = strings.Repeat(" ", s.paddingRight + (maxWidth - runeCount))
+		} else {
+			padR = strings.Repeat(" ", s.paddingRight)
+		}
 		formattedLines = append(formattedLines, padL + line + padR)
 	}
 

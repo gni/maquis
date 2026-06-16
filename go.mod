@@ -1,4 +1,4 @@
-module bidouille
+module maquis
 
 go 1.26.1
 

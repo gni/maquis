@@ -7,19 +7,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
+	"unicode/utf8"
 
-	"bidouille/pkg/ui/style"
+	"maquis/pkg/ui/style"
 
-	"bidouille/pkg/config"
-	"bidouille/pkg/db"
+	"maquis/pkg/agent"
+	"maquis/pkg/config"
+	"maquis/pkg/db"
 	"github.com/alecthomas/chroma/v2/quick"
 )
 
-var TerminalMu sync.Mutex
+var TerminalMu = &agent.TerminalMu
 
-func PrintBanner(w io.Writer, cfg *config.Config) {
+func PrintBanner(w io.Writer, a *agent.Agent) {
+	if a == nil || a.Config == nil {
+		return
+	}
+	cfg := a.Config
 	theme := GetConfiguredTheme(cfg)
 
 	iconStyle := style.NewStyle().
@@ -37,7 +43,61 @@ func PrintBanner(w io.Writer, cfg *config.Config) {
  (  =^=  )
   \_____/`
 
-	info := fmt.Sprintf("\n\nbidouille v1.0.0\nendpoint: %s\nmodel:    %s", cfg.Endpoint, cfg.Model)
+	pluginsCount := 0
+	if a.Registry != nil {
+		for name := range a.Registry.GetAllExecutors() {
+			if strings.HasPrefix(name, "plugin__") {
+				pluginsCount++
+			}
+		}
+	}
+
+	extensionsCount := 0
+	var dirs []string
+	home, err := os.UserHomeDir()
+	if err == nil {
+		dirs = append(dirs, filepath.Join(home, ".maquis", "extensions"))
+	}
+	dirs = append(dirs, filepath.Join(a.GetWorkspaceRoot(), "extensions"))
+
+	seen := make(map[string]bool)
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			info, err := os.Stat(path)
+			if err == nil && info.Mode()&0111 != 0 {
+				base := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+				cmdName := "/" + strings.ToLower(base)
+				if !seen[cmdName] {
+					seen[cmdName] = true
+					extensionsCount++
+				}
+			}
+		}
+	}
+
+	pluginWord := "plugin"
+	if pluginsCount != 1 {
+		pluginWord = "plugins"
+	}
+	extWord := "extension"
+	if extensionsCount != 1 {
+		extWord = "extensions"
+	}
+	tagStyle := style.NewStyle().Foreground(theme.Secondary).Italic(true)
+	tagStr := tagStyle.Render(fmt.Sprintf("[%d %s, %d %s]", pluginsCount, pluginWord, extensionsCount, extWord))
+
+	info := fmt.Sprintf("\n\nmaquis v1.0.0  %s\nendpoint: %s\nmodel:    %s", tagStr, cfg.Endpoint, cfg.Model)
 
 	joined := style.JoinHorizontal(
 		style.Center,
@@ -70,13 +130,16 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/config show", "display current settings summary"},
 		{"/config set <key> <value>", "modify settings dynamically"},
 		{"/session <list/new/load/clear>", "manage persistent chat sessions interactively"},
-		{"/multiline, /paste", "open interactive multiline editor"},
 		{"/skills", "list all available reference skills"},
 		{"/skills load <name>", "explicitly load a reference skill into the context"},
 		{"/mcp", "list all configured mcp servers and active tool schemas"},
+		{"/plugins", "list all registered custom plugin tools"},
+		{"/extensions", "list all custom slash command extensions"},
+		{"/reload", "re-scan and hot-reload custom plugins and tools"},
+		{"/agent <list/join/spawn/skill/kill>", "manage multi-agent swarm threads interactively"},
 		{"/rewind", "clear conversation history"},
 		{"/help, /commands, ?", "display this help menu"},
-		{"/exit, /quit", "exit the bidouille CLI application"},
+		{"/exit, /quit", "exit the maquis CLI application"},
 	}
 
 	for _, cmd := range commands {
@@ -143,7 +206,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %s\n"+
 			"  %-20s %s\n\n"+
 			"tip: change any setting via: /config <key> <value> (e.g. /config yes true)",
-		titleStyle.Render("bidouille runtime settings"),
+		titleStyle.Render("maquis runtime settings"),
 		keyStyle.Render("endpoint:"), valStyle.Render(cfg.Endpoint),
 		keyStyle.Render("model:"), valStyle.Render(cfg.Model),
 		keyStyle.Render("temperature:"), cfg.Temperature,
@@ -334,6 +397,42 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
+	if newlineCount == -2 {
+		var finalDot string
+		if toolName == "write" {
+			if !isError {
+				finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
+			} else {
+				finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
+			}
+		} else {
+			if !isError {
+				finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
+			} else {
+				finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("▸")
+			}
+		}
+
+		pathVal := ""
+		var argsMap map[string]interface{}
+		if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
+			if p, ok := argsMap["path"].(string); ok && p != "" {
+				pathVal = p
+			} else if c, ok := argsMap["command"].(string); ok && c != "" {
+				pathVal = c
+			} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
+				pathVal = pat
+			}
+		}
+
+		finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
+		fmt.Fprintln(w, finalTitle)
+	}
+
+	if collapse && !isError {
+		return
+	}
+
 	fmt.Fprintln(w) // Print a leading blank line to separate from the tool call or previous elements
 	borderColor := theme.Success
 	title := "tool output"
@@ -350,28 +449,46 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		Foreground(theme.Text)
 
 	body := output
-	if !isError && (toolName == "read" || toolName == "write") {
-		lang := "plaintext"
-		var args struct {
-			Path         string `json:"path"`
-			Content      string `json:"content"`
-			WriteContent string `json:"write_content"`
-		}
-		if argsJSON != "" {
-			_ = json.Unmarshal([]byte(argsJSON), &args)
-			if args.Content == "" && args.WriteContent != "" {
-				args.Content = args.WriteContent
-			}
-			if args.Path != "" {
-				ext := filepath.Ext(args.Path)
-				if len(ext) > 1 {
-					lang = ext[1:]
+	isJSON := false
+	if !isError {
+		trimmedBody := strings.TrimSpace(body)
+		if (strings.HasPrefix(trimmedBody, "{") && strings.HasSuffix(trimmedBody, "}")) || (strings.HasPrefix(trimmedBody, "[") && strings.HasSuffix(trimmedBody, "]")) {
+			var temp interface{}
+			if json.Unmarshal([]byte(trimmedBody), &temp) == nil {
+				if pretty, err := json.MarshalIndent(temp, "", "  "); err == nil {
+					body = string(pretty)
+					isJSON = true
 				}
 			}
 		}
+	}
 
-		if toolName == "write" && args.Content != "" {
-			body = args.Content
+	if !isError && (toolName == "read" || toolName == "write" || isJSON) {
+		lang := "plaintext"
+		if isJSON {
+			lang = "json"
+		} else {
+			var args struct {
+				Path         string `json:"path"`
+				Content      string `json:"content"`
+				WriteContent string `json:"write_content"`
+			}
+			if argsJSON != "" {
+				_ = json.Unmarshal([]byte(argsJSON), &args)
+				if args.Content == "" && args.WriteContent != "" {
+					args.Content = args.WriteContent
+				}
+				if args.Path != "" {
+					ext := filepath.Ext(args.Path)
+					if len(ext) > 1 {
+						lang = ext[1:]
+					}
+				}
+			}
+
+			if toolName == "write" && args.Content != "" {
+				body = args.Content
+			}
 		}
 
 		chromaStyle := theme.ChromaStyle
@@ -533,25 +650,19 @@ func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEf
 		thinkingText = reasoningEffort
 	}
 	
-	var statusPart string
-	if spinnerFrame != "" {
-		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
-		statusPart = fmt.Sprintf("%s [reasoning:%s]", spinnerStyled, thinkingText)
-	} else {
-		statusPart = fmt.Sprintf("  [reasoning:%s]", thinkingText)
-	}
+	statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
+	prefixCombined := borderStyle.Render("─── prompt ")
 
-	prefix := "─── prompt "
 	width, _ := getTerminalSize()
-	statusLen := len(stripAnsi(statusPart))
-	prefixLen := len(prefix)
+	statusLen := utf8.RuneCountInString(stripAnsi(statusPart))
+	prefixLen := 11 // visual column length of "─── prompt " is always 11 columns
 
 	dashesCount := width - prefixLen - statusLen - 2
 	if dashesCount < 3 {
 		dashesCount = 3
 	}
 	dashes := strings.Repeat("─", dashesCount)
-	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
+	fmt.Fprintf(w, "%s%s\n", prefixCombined+borderStyle.Render(dashes), statusStyle.Render(statusPart))
 }
 
 func getWriterHeight(w io.Writer) int {
@@ -576,6 +687,49 @@ func getWriterHeight(w io.Writer) int {
 	return 0
 }
 
+func DrawStaticStatsLine(w io.Writer, theme UITheme, spinnerFrame string, statsText string) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
+	height := getWriterHeight(w)
+	if height <= 0 {
+		_, h := getTerminalSize()
+		height = h
+	}
+
+	stateMu.Lock()
+	if spinnerFrame == "" {
+		if statsText != "" {
+			lastStatsText = statsText
+		}
+	}
+	textToDraw := statsText
+	if textToDraw == "" && spinnerFrame == "" {
+		textToDraw = lastStatsText
+	}
+	stateMu.Unlock()
+
+	var buf bytes.Buffer
+	// Move cursor to height-4-pasteLinesOffset absolutely, clear line
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-4-pasteLinesOffset)
+
+	if spinnerFrame != "" {
+		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
+		if textToDraw != "" {
+			fmt.Fprintf(&buf, "%s %s", spinnerStyled, textToDraw)
+		} else {
+			fmt.Fprintf(&buf, "%s ", spinnerStyled)
+		}
+	} else if textToDraw != "" {
+		fmt.Fprint(&buf, textToDraw)
+	}
+
+	// Restore cursor
+	fmt.Fprint(&buf, "\x1b8")
+
+	_, _ = w.Write(buf.Bytes())
+}
+
 func DrawStaticPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
 	DrawStaticPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, "")
 }
@@ -591,8 +745,8 @@ func DrawStaticPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reason
 	}
 
 	var buf bytes.Buffer
-	// Save cursor, move cursor to height-3 absolutely, clear line, print separator, restore cursor
-	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3)
+	// Save cursor, move cursor to height-3-pasteLinesOffset absolutely, clear line, print separator, restore cursor
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3-pasteLinesOffset)
 	PrintPromptSeparatorWithSpinner(&buf, showThinking, reasoningEffort, theme, spinnerFrame)
 	fmt.Fprint(&buf, "\x1b8")
 
@@ -647,7 +801,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			hasPrintedAnything := false
 			if msg.ReasoningContent != "" && cfg.ShowThinking {
 				dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-				fmt.Fprintln(w, dimStyle.Render(msg.ReasoningContent))
+				fmt.Fprintln(w, dimStyle.Render(strings.TrimRight(msg.ReasoningContent, "\r\n")))
 				fmt.Fprintln(w)
 
 				iconStyle := style.NewStyle().Foreground(theme.Success)
@@ -720,5 +874,66 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 		}
 		lastRole = msg.Role
 	}
+}
+
+func RenderProviders(w io.Writer, cfg *config.Config, theme UITheme) {
+	borderStyle := style.NewStyle().
+		Border(style.RoundedBorder()).
+		BorderForeground(theme.Border).
+		Padding(1, 2).
+		Margin(0, 0)
+
+	titleStyle := style.NewStyle().
+		Foreground(theme.Primary).
+		Bold(true)
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("configured endpoint providers") + "\n\n")
+
+	if cfg.Providers == nil || len(cfg.Providers) == 0 {
+		sb.WriteString(style.NewStyle().Foreground(theme.Border).Italic(true).Render("  (no endpoint providers configured)") + "\n")
+	} else {
+		var keys []string
+		for k := range cfg.Providers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, name := range keys {
+			p := cfg.Providers[name]
+			marker := "  "
+			if name == cfg.ActiveProvider {
+				marker = style.NewStyle().Foreground(theme.Success).Render("➔ ")
+			}
+
+			apiKeyDisplay := "none"
+			if p.ApiKey != "" {
+				apiKeyDisplay = "configured"
+			}
+
+			sb.WriteString(fmt.Sprintf("%s%-12s : URL: %s | Model: %s | API Key: %s\n",
+				marker,
+				style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(name),
+				p.Endpoint,
+				p.Model,
+				apiKeyDisplay,
+			))
+		}
+	}
+
+	activeMarker := "  "
+	if cfg.ActiveProvider == "" {
+		activeMarker = style.NewStyle().Foreground(theme.Success).Render("➔ ")
+	}
+	sb.WriteString(fmt.Sprintf("\n%s%-12s : URL: %s | Model: %s | (default settings)\n",
+		activeMarker,
+		style.NewStyle().Foreground(theme.Secondary).Bold(true).Render("default"),
+		cfg.Endpoint,
+		cfg.Model,
+	))
+
+	sb.WriteString("\ntip: manage providers via REPL: /provider add/select/model/remove/list")
+
+	fmt.Fprintln(w, borderStyle.Render(sb.String()))
 }
 
