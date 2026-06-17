@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,9 +10,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 
 	"maquis/pkg/agent"
 	"maquis/pkg/agent/tool"
@@ -302,21 +305,74 @@ type keyInterceptorReader struct {
 	mam              *agent.MultiAgentManager
 	inputChan        chan byte
 	injectChan       chan byte
-	paused           bool
-	pausedMu         sync.Mutex
+	typeAheadBuffer  []byte
 }
 
-func (ki *keyInterceptorReader) setPaused(paused bool) {
-	ki.pausedMu.Lock()
-	ki.paused = paused
-	ki.pausedMu.Unlock()
+func (ki *keyInterceptorReader) redrawTypeAhead() {
+	activeTheme := GetConfiguredTheme(ki.agent.Config)
+	promptPrefix := "> "
+	if ki.mam != nil && ki.mam.ActiveAgent != nil {
+		promptPrefix = fmt.Sprintf("[%s]> ", ki.mam.ActiveAgent.Name)
+	}
+	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
+	promptStr := promptStyle.Render(promptPrefix)
+
+	_, height := getTerminalSize()
+	if height <= 0 {
+		return
+	}
+
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
+	// Save cursor, move cursor to height-2-pasteLinesOffset, clear line, print prompt prefix + type-ahead buffer, restore cursor
+	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-pasteLinesOffset, promptStr, string(ki.typeAheadBuffer))
 }
 
-func (ki *keyInterceptorReader) isPaused() bool {
-	ki.pausedMu.Lock()
-	p := ki.paused
-	ki.pausedMu.Unlock()
-	return p
+func (ki *keyInterceptorReader) printCancelMessage() {
+	fmt.Fprintln(ki.w, "\n\n[Operation Cancelled by User]")
+}
+
+func (ki *keyInterceptorReader) handleCtrlO() {
+	activeTheme := GetConfiguredTheme(ki.agent.Config)
+	runningTaskId := ki.agent.GetLastRunningTaskId()
+	if runningTaskId != "" {
+		ki.agent.ToggleStreaming(runningTaskId, ki.w)
+	} else {
+		ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
+		_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+		SetCollapseStatus(ki.agent.Config.CollapseResults)
+		DrawStatusBar(ki.w, activeTheme)
+	}
+}
+
+func (ki *keyInterceptorReader) handleCtrlT() {
+	activeTheme := GetConfiguredTheme(ki.agent.Config)
+	ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
+	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+	frame := agent.GetCurrentSpinnerFrame()
+	DrawStaticPromptSeparatorWithSpinner(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme, frame)
+}
+
+func (ki *keyInterceptorReader) handleCtrlR() {
+	activeTheme := GetConfiguredTheme(ki.agent.Config)
+	nextEffort := "low"
+	switch strings.ToLower(ki.agent.Config.ReasoningEffort) {
+	case "low":
+		nextEffort = "medium"
+	case "medium":
+		nextEffort = "high"
+	case "high":
+		nextEffort = "max"
+	case "max":
+		nextEffort = "low"
+	default:
+		nextEffort = "low"
+	}
+	ki.agent.Config.ReasoningEffort = nextEffort
+	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+	frame := agent.GetCurrentSpinnerFrame()
+	DrawStaticPromptSeparatorWithSpinner(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme, frame)
 }
 
 func stylePrompt(p []byte, prefix string, styledPrefix string) []byte {
@@ -731,18 +787,15 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	activeInputReader = kiReader
 	defer func() { activeInputReader = nil }()
 
+	rawChan := make(chan byte, 1000)
 	// Start input reader goroutine
 	go func() {
 		buf := make([]byte, 1024)
 		for {
-			if kiReader.isPaused() {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
 			n, err := kiReader.r.Read(buf)
 			if err != nil {
 				if err == io.EOF || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "closed") {
-					close(kiReader.inputChan)
+					close(rawChan)
 					return
 				}
 				// Sleep and retry for EAGAIN/EWOULDBLOCK errors when fd is in non-blocking mode
@@ -750,7 +803,103 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				continue
 			}
 			for i := 0; i < n; i++ {
-				kiReader.inputChan <- buf[i]
+				rawChan <- buf[i]
+			}
+		}
+	}()
+
+	// Start processing input goroutine
+	go func() {
+		for {
+			b, ok := <-rawChan
+			if !ok {
+				close(kiReader.inputChan)
+				return
+			}
+
+			stateMu.Lock()
+			cancelFunc := ActiveCancelFunc
+			stateMu.Unlock()
+
+			if cancelFunc != nil {
+				// Agent is running! Intercept hotkeys.
+				if b == 3 { // Ctrl+C
+					cancelFunc()
+					kiReader.printCancelMessage()
+					stateMu.Lock()
+					kiReader.typeAheadBuffer = nil
+					stateMu.Unlock()
+					continue
+				}
+				if b == 27 { // Escape
+					// Check if it's a standalone Escape or an escape sequence
+					select {
+					case next := <-rawChan:
+						// Escape sequence. Push both to inputChan.
+						kiReader.inputChan <- b
+						kiReader.inputChan <- next
+					case <-time.After(50 * time.Millisecond):
+						// Standalone Escape. Cancel!
+						cancelFunc()
+						kiReader.printCancelMessage()
+						stateMu.Lock()
+						kiReader.typeAheadBuffer = nil
+						stateMu.Unlock()
+					}
+					continue
+				}
+				if b == 15 { // Ctrl+O
+					kiReader.handleCtrlO()
+					continue
+				}
+				if b == 20 { // Ctrl+T
+					kiReader.handleCtrlT()
+					continue
+				}
+				if b == 18 { // Ctrl+R
+					kiReader.handleCtrlR()
+					continue
+				}
+
+				// Handle Backspace
+				if b == 127 || b == 8 {
+					stateMu.Lock()
+					if len(kiReader.typeAheadBuffer) > 0 {
+						r, size := utf8.DecodeLastRune(kiReader.typeAheadBuffer)
+						if r != utf8.RuneError || size > 0 {
+							kiReader.typeAheadBuffer = kiReader.typeAheadBuffer[:len(kiReader.typeAheadBuffer)-size]
+						} else {
+							kiReader.typeAheadBuffer = kiReader.typeAheadBuffer[:len(kiReader.typeAheadBuffer)-1]
+						}
+					}
+					kiReader.redrawTypeAhead()
+					stateMu.Unlock()
+					kiReader.inputChan <- b
+					continue
+				}
+
+				// Handle Enter
+				if b == 10 || b == 13 {
+					stateMu.Lock()
+					kiReader.typeAheadBuffer = nil
+					stateMu.Unlock()
+					kiReader.inputChan <- b
+					continue
+				}
+
+				// For any other printable/valid characters, append to typeAheadBuffer and redraw
+				if b >= 32 || b == '\t' {
+					stateMu.Lock()
+					kiReader.typeAheadBuffer = append(kiReader.typeAheadBuffer, b)
+					kiReader.redrawTypeAhead()
+					stateMu.Unlock()
+				}
+
+				// Push to inputChan for type-ahead
+				kiReader.inputChan <- b
+			} else {
+				// Agent is not running. Just forward to inputChan.
+				kiReader.inputChan <- b
 			}
 		}
 	}()
@@ -1086,9 +1235,23 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				fmt.Fprint(ppWriter, "\n\n")
 			}
 		} else {
-			kiReader.setPaused(true)
-			a.RunAgentLoop(os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
-			kiReader.setPaused(false)
+			ctx, cancel := context.WithCancel(context.Background())
+			stateMu.Lock()
+			ActiveCancelFunc = cancel
+			kiReader.typeAheadBuffer = nil
+			stateMu.Unlock()
+
+			restore, err := setNonCanonical(fd)
+
+			a.RunAgentLoop(ctx, os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
+
+			if err == nil && restore != nil {
+				restore()
+			}
+			cancel()
+			stateMu.Lock()
+			ActiveCancelFunc = nil
+			stateMu.Unlock()
 		}
 		activeTasks := 0
 		for _, t := range a.ListTasks() {
@@ -1258,4 +1421,29 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	fmt.Fprint(cw, promptStr)
 	fmt.Fprint(cw, kiReader.currentInputLine)
 	fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-pasteLinesOffset, 1+len(promptPrefix)+len(kiReader.currentInputLine))
+}
+
+func setNonCanonical(fd int) (func(), error) {
+	if !term.IsTerminal(fd) {
+		return func() {}, nil
+	}
+	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return nil, err
+	}
+	oldTermios := *termios
+
+	termios.Lflag &^= unix.ICANON | unix.ECHO
+	termios.Cc[unix.VMIN] = 1
+	termios.Cc[unix.VTIME] = 0
+
+	err = unix.IoctlSetTermios(fd, unix.TCSETS, termios)
+	if err != nil {
+		return nil, err
+	}
+
+	restore := func() {
+		_ = unix.IoctlSetTermios(fd, unix.TCSETS, &oldTermios)
+	}
+	return restore, nil
 }

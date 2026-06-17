@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"maquis/pkg/ui/style"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"maquis/pkg/config"
@@ -24,7 +23,13 @@ var (
 	spinnerFrameMu      sync.RWMutex
 )
 
-func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme style.UITheme, isNonInteractive bool, sessionID string) {
+func GetCurrentSpinnerFrame() string {
+	spinnerFrameMu.RLock()
+	defer spinnerFrameMu.RUnlock()
+	return currentSpinnerFrame
+}
+
+func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme style.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return
@@ -142,7 +147,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 		_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
@@ -201,96 +206,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
 
-		stopKeyListen := make(chan struct{})
-		keyListenDone := make(chan struct{})
-		go func() {
-			defer close(keyListenDone)
-			fd := int(os.Stdin.Fd())
-			if !term.IsTerminal(fd) {
-				return
-			}
-			termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
-			if err != nil {
-				return
-			}
-			oldTermios := *termios
 
-			termios.Lflag &^= unix.ICANON | unix.ECHO
-			termios.Cc[unix.VMIN] = 1
-			termios.Cc[unix.VTIME] = 0
-
-			err = unix.IoctlSetTermios(fd, unix.TCSETS, termios)
-			if err != nil {
-				return
-			}
-			defer func() {
-				_ = unix.IoctlSetTermios(fd, unix.TCSETS, &oldTermios)
-			}()
-
-			_ = syscall.SetNonblock(fd, true)
-			defer syscall.SetNonblock(fd, false)
-
-			buf := make([]byte, 1)
-			for {
-				select {
-				case <-stopKeyListen:
-					return
-				default:
-					n, err := unix.Read(fd, buf)
-					if err == nil && n > 0 {
-						if buf[0] == 15 { // Ctrl+O
-							runningTaskId := a.GetLastRunningTaskId()
-							if runningTaskId != "" {
-								a.ToggleStreaming(runningTaskId, writerToUse)
-							} else {
-								a.Config.CollapseResults = !a.Config.CollapseResults
-								_ = config.SaveConfig(a.ConfigPath, a.Config)
-								if a.UI != nil {
-									a.UI.SetCollapseStatus(a.Config.CollapseResults)
-									a.UI.DrawStatusBar(w, theme)
-								}
-							}
-						} else if buf[0] == 20 { // Ctrl+T
-							a.Config.ShowThinking = !a.Config.ShowThinking
-							_ = config.SaveConfig(a.ConfigPath, a.Config)
-							if a.UI != nil {
-								spinnerFrameMu.RLock()
-								frame := currentSpinnerFrame
-								spinnerFrameMu.RUnlock()
-								a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
-							}
-						} else if buf[0] == 18 { // Ctrl+R
-							nextEffort := "low"
-							switch strings.ToLower(a.Config.ReasoningEffort) {
-							case "low":
-								nextEffort = "medium"
-							case "medium":
-								nextEffort = "high"
-							case "high":
-								nextEffort = "max"
-							case "max":
-								nextEffort = "low"
-							default:
-								nextEffort = "low"
-							}
-							a.Config.ReasoningEffort = nextEffort
-							_ = config.SaveConfig(a.ConfigPath, a.Config)
-							if a.UI != nil {
-								spinnerFrameMu.RLock()
-								frame := currentSpinnerFrame
-								spinnerFrameMu.RUnlock()
-								a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
-							}
-						} else if buf[0] == 3 || buf[0] == 27 { // Ctrl+C or Escape
-							fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
-							cancel()
-							return
-						}
-					}
-					time.Sleep(50 * time.Millisecond)
-				}
-			}
-		}()
 
 		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
@@ -378,8 +294,7 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 				}
 			}
 		}
-		close(stopKeyListen)
-		<-keyListenDone
+
 		sr.Flush()
 		stopTicker()
 

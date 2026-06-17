@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -175,7 +176,7 @@ var rootCmd = &cobra.Command{
 				}
 			}
 
-			a.RunAgentLoop(os.Stdout, &messages, prompt, allowedTools, theme, true, sessionID)
+			a.RunAgentLoop(context.Background(), os.Stdout, &messages, prompt, allowedTools, theme, true, sessionID)
 			return
 		}
 

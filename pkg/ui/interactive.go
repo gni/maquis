@@ -20,25 +20,15 @@ import (
 )
 
 func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
-	var input io.Reader = activeInputReader
+	var input io.Reader = os.Stdin
 	var output io.Writer = os.Stdout
 	var fd int = int(os.Stdin.Fd())
 
-	if input == nil {
-		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-		input = os.Stdin
-		if err == nil {
-			defer tty.Close()
-			input = tty
-			output = tty
-			fd = int(tty.Fd())
-		}
-	} else {
-		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-			defer tty.Close()
-			output = tty
-			fd = int(tty.Fd())
-		}
+	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		defer tty.Close()
+		input = tty
+		output = tty
+		fd = int(tty.Fd())
 	}
 
 

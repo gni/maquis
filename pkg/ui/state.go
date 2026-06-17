@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"context"
 	"io"
 	"sync"
 
 	"maquis/pkg/agent"
 )
+
+// ActiveCancelFunc holds the cancel function for the currently running agent loop.
+var ActiveCancelFunc context.CancelFunc
 
 // TerminalMu protects terminal output operations.
 var TerminalMu = &agent.TerminalMu
