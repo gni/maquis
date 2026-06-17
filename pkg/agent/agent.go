@@ -38,6 +38,7 @@ type AgentUI interface {
 	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool)
 	DrawStatsLine(w io.Writer, theme style.UITheme, spinnerFrame string, statsText string)
 	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)
+	RenderToolHeader(w io.Writer, theme style.UITheme, toolName string, toolArgs string)
 	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int)
 }
 
@@ -62,11 +63,17 @@ type Agent struct {
 	ThinkingSupportChecked bool
 
 	CurrentWriter          io.Writer
+	CurrentContext         context.Context
 
 	lastToolOutput         string
 	lastToolIsError        bool
 	lastToolWasEdit        bool
 	lastGenerationDuration time.Duration
+
+	TurnStartTime          time.Time
+
+	SpawnedAgents          map[string]bool
+	SpawnedAgentsMu        sync.RWMutex
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -86,6 +93,7 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 		WorkspaceRoot:  absWorkspace,
 		Tasks:          make(map[string]*Task),
 		NextTaskId:     1,
+		SpawnedAgents:  make(map[string]bool),
 	}
 
 	// Register built-in tools
@@ -117,6 +125,13 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 
 func (a *Agent) GetWorkspaceRoot() string {
 	return a.WorkspaceRoot
+}
+
+func (a *Agent) Context() context.Context {
+	if a.CurrentContext != nil {
+		return a.CurrentContext
+	}
+	return context.Background()
 }
 
 func (a *Agent) GetActiveSkills() []tool.Skill {
@@ -378,4 +393,10 @@ func (a *Agent) runAfterToolHook(tc db.ToolCall, output string, toolErr error) (
 		return hookOutput, nil
 	}
 	return output, toolErr
+}
+
+func (a *Agent) HasSubagent(name string) bool {
+	a.SpawnedAgentsMu.RLock()
+	defer a.SpawnedAgentsMu.RUnlock()
+	return a.SpawnedAgents[name]
 }

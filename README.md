@@ -4,6 +4,7 @@ maquis is a minimalist terminal-based AI agent harness written in Go. It execute
 
 This project is tested only on llama.cpp.
 Don't use this on production, still experimental
+Agent designed to consume tokens, UI may broke
 
 ## Installation
 

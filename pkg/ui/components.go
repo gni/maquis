@@ -355,6 +355,29 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 	fmt.Fprintln(w, titleStyle.Render(fmt.Sprintf("tool call: %s", toolName)))
 	fmt.Fprint(w, formattedArgs)
 }
+func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
+	var symbol string
+	if toolName == "write" {
+		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+	} else {
+		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+	}
+
+	pathVal := ""
+	var argsMap map[string]interface{}
+	if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
+		if p, ok := argsMap["path"].(string); ok && p != "" {
+			pathVal = p
+		} else if c, ok := argsMap["command"].(string); ok && c != "" {
+			pathVal = c
+		} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
+			pathVal = pat
+		}
+	}
+
+	title := FormatToolTitle(symbol, toolName, pathVal, theme)
+	fmt.Fprintln(w, title)
+}
 
 func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, newlineCount int) {
 	if newlineCount >= 0 {

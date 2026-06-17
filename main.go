@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"maquis/pkg/cmd"
 	"maquis/pkg/config"
@@ -25,10 +26,25 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
+		var lastInterrupt time.Time
 		for sig := range sigChan {
-			if sig == os.Interrupt && ui.IsInteractive {
-				// Let the interactive REPL or agent loop handle Ctrl+C
-				continue
+			if sig == os.Interrupt {
+				now := time.Now()
+				// If Ctrl+C is pressed twice within 1.5 seconds, force exit
+				if now.Sub(lastInterrupt) < 1500*time.Millisecond {
+					ui.ShutdownStatusBar(os.Stderr)
+					os.Exit(130)
+				}
+				lastInterrupt = now
+
+				if ui.IsInteractive {
+					if ui.CancelActiveOperation() {
+						continue
+					}
+					// If there is no active operation to cancel, exit immediately
+					ui.ShutdownStatusBar(os.Stderr)
+					os.Exit(130)
+				}
 			}
 			ui.ShutdownStatusBar(os.Stderr)
 			os.Exit(0)

@@ -24,19 +24,37 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	var output io.Writer = os.Stdout
 	var fd int = int(os.Stdin.Fd())
 
-	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-		defer tty.Close()
-		input = tty
-		output = tty
-		fd = int(tty.Fd())
+	stateMu.Lock()
+	hasActiveReader := activeInputReader != nil
+	if hasActiveReader {
+		input = activeInputReader
+		output = w
 	}
+	stateMu.Unlock()
 
+	stateMu.Lock()
+	inApprovalPrompt = true
+	stateMu.Unlock()
+	defer func() {
+		stateMu.Lock()
+		inApprovalPrompt = false
+		stateMu.Unlock()
+	}()
+
+	if !hasActiveReader {
+		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+			defer tty.Close()
+			input = tty
+			output = tty
+			fd = int(tty.Fd())
+		}
+	}
 
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 	fmt.Fprint(output, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
 
 	isTerm := term.IsTerminal(fd)
-	if isTerm {
+	if isTerm && !hasActiveReader {
 		oldState, err := term.MakeRaw(fd)
 		if err == nil {
 			defer term.Restore(fd, oldState)

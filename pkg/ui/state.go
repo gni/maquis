@@ -20,6 +20,9 @@ var pasteLinesOffset int
 // activeInputReader keeps track of the currently active keyInterceptorReader.
 var activeInputReader io.Reader
 
+// inApprovalPrompt is true when the UI is waiting for user approval.
+var inApprovalPrompt bool
+
 // state holds the current state metrics for the status bar.
 var state StatusBarState
 
@@ -43,3 +46,15 @@ var lastStatsText string
 
 // IsInteractive indicates if the interactive REPL session is currently running.
 var IsInteractive bool
+
+// CancelActiveOperation safely cancels the currently running agent turn.
+func CancelActiveOperation() bool {
+	stateMu.Lock()
+	cancel := ActiveCancelFunc
+	stateMu.Unlock()
+	if cancel != nil {
+		cancel()
+		return true
+	}
+	return false
+}

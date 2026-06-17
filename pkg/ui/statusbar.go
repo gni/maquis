@@ -90,8 +90,8 @@ func ShutdownStatusBar(w io.Writer) {
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-3)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-1)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height)
-		// Reset cursor position to height-2 (prompt line)
-		fmt.Fprintf(&buf, "\x1b[%d;1H", height-2)
+		// Reset cursor position to height (bottom line)
+		fmt.Fprintf(&buf, "\x1b[%d;1H", height)
 	}
 	fmt.Fprint(&buf, "\x1b[r\x1b[?25h") // Reset scrolling region and show cursor
 	_, _ = w.Write(buf.Bytes())
@@ -100,8 +100,12 @@ func ShutdownStatusBar(w io.Writer) {
 func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {
 	stateMu.Lock()
 	state.Model = model
-	state.PromptTokens = promptTokens
-	state.CompletionTokens = completionTokens
+	if promptTokens >= state.PromptTokens {
+		state.PromptTokens = promptTokens
+	}
+	if completionTokens >= state.CompletionTokens {
+		state.CompletionTokens = completionTokens
+	}
 	state.CurrentCompletionTokens = currentCompletionTokens
 	state.ContextLimit = contextLimit
 	state.IsGenerating = isGenerating

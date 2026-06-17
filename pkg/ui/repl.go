@@ -325,8 +325,12 @@ func (ki *keyInterceptorReader) redrawTypeAhead() {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 
+	stateMu.Lock()
+	typeAheadCopy := string(ki.typeAheadBuffer)
+	stateMu.Unlock()
+
 	// Save cursor, move cursor to height-2-pasteLinesOffset, clear line, print prompt prefix + type-ahead buffer, restore cursor
-	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-pasteLinesOffset, promptStr, string(ki.typeAheadBuffer))
+	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-pasteLinesOffset, promptStr, typeAheadCopy)
 }
 
 func (ki *keyInterceptorReader) printCancelMessage() {
@@ -822,6 +826,55 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			stateMu.Unlock()
 
 			if cancelFunc != nil {
+				stateMu.Lock()
+				inApproval := inApprovalPrompt
+				stateMu.Unlock()
+
+				if inApproval {
+					if b == 3 { // Ctrl+C
+						cancelFunc()
+						kiReader.printCancelMessage()
+						stateMu.Lock()
+						kiReader.typeAheadBuffer = nil
+						stateMu.Unlock()
+						kiReader.inputChan <- b
+						continue
+					}
+					if b == 27 { // Escape
+						// Check if it's a standalone Escape or an escape sequence
+						select {
+						case next := <-rawChan:
+							// Escape sequence. Push both to inputChan.
+							kiReader.inputChan <- b
+							kiReader.inputChan <- next
+						case <-time.After(50 * time.Millisecond):
+							// Standalone Escape. Cancel!
+							cancelFunc()
+							kiReader.printCancelMessage()
+							stateMu.Lock()
+							kiReader.typeAheadBuffer = nil
+							stateMu.Unlock()
+							kiReader.inputChan <- b
+						}
+						continue
+					}
+					if b == 15 { // Ctrl+O
+						kiReader.handleCtrlO()
+						continue
+					}
+					if b == 20 { // Ctrl+T
+						kiReader.handleCtrlT()
+						continue
+					}
+					if b == 18 { // Ctrl+R
+						kiReader.handleCtrlR()
+						continue
+					}
+					// Directly forward keys (like y, n, a, etc.) to the approval reader
+					kiReader.inputChan <- b
+					continue
+				}
+
 				// Agent is running! Intercept hotkeys.
 				if b == 3 { // Ctrl+C
 					cancelFunc()
@@ -872,8 +925,8 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 							kiReader.typeAheadBuffer = kiReader.typeAheadBuffer[:len(kiReader.typeAheadBuffer)-1]
 						}
 					}
-					kiReader.redrawTypeAhead()
 					stateMu.Unlock()
+					kiReader.redrawTypeAhead()
 					kiReader.inputChan <- b
 					continue
 				}
@@ -891,8 +944,8 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				if b >= 32 || b == '\t' {
 					stateMu.Lock()
 					kiReader.typeAheadBuffer = append(kiReader.typeAheadBuffer, b)
-					kiReader.redrawTypeAhead()
 					stateMu.Unlock()
+					kiReader.redrawTypeAhead()
 				}
 
 				// Push to inputChan for type-ahead
@@ -1222,6 +1275,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
 			fmt.Fprintln(ppWriter, divider)
 
+			stateMu.Lock()
+			ActiveCancelFunc = mam.ActiveAgent.CancelActiveTurn
+			stateMu.Unlock()
+
 			err := mam.SendMessage(mam.ActiveAgent.Name, line)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
@@ -1234,6 +1291,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				}
 				fmt.Fprint(ppWriter, "\n\n")
 			}
+
+			stateMu.Lock()
+			ActiveCancelFunc = nil
+			stateMu.Unlock()
 		} else {
 			ctx, cancel := context.WithCancel(context.Background())
 			stateMu.Lock()

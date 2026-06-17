@@ -232,6 +232,9 @@ func (a *Agent) StreamChatCompletions(
 	var promptTokens, completionTokens int
 	var generationStart time.Time
 
+	inThoughtMode := false
+	streamBuffer := ""
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -289,8 +292,78 @@ func (a *Agent) StreamChatCompletions(
 		}
 
 		if choice.Delta.Content != "" {
-			textBuilder.WriteString(choice.Delta.Content)
-			chunkChan <- StreamChunk{Type: "text", Content: choice.Delta.Content}
+			streamBuffer += choice.Delta.Content
+			for {
+				if !inThoughtMode {
+					tag := "<|channel>thought"
+					idx := strings.Index(streamBuffer, tag)
+					if idx != -1 {
+						preText := streamBuffer[:idx]
+						if preText != "" {
+							textBuilder.WriteString(preText)
+							chunkChan <- StreamChunk{Type: "text", Content: preText}
+						}
+						streamBuffer = streamBuffer[idx+len(tag):]
+						inThoughtMode = true
+						continue
+					}
+					var prefixMatched int
+					for i := len(tag) - 1; i >= 1; i-- {
+						if strings.HasSuffix(streamBuffer, tag[:i]) {
+							prefixMatched = i
+							break
+						}
+					}
+					if prefixMatched > 0 {
+						sendLen := len(streamBuffer) - prefixMatched
+						if sendLen > 0 {
+							preText := streamBuffer[:sendLen]
+							textBuilder.WriteString(preText)
+							chunkChan <- StreamChunk{Type: "text", Content: preText}
+							streamBuffer = streamBuffer[sendLen:]
+						}
+						break
+					}
+					textBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+					streamBuffer = ""
+					break
+				} else {
+					tag := "<channel|>"
+					idx := strings.Index(streamBuffer, tag)
+					if idx != -1 {
+						preReasoning := streamBuffer[:idx]
+						if preReasoning != "" {
+							reasoningBuilder.WriteString(preReasoning)
+							chunkChan <- StreamChunk{Type: "reasoning", Content: preReasoning}
+						}
+						streamBuffer = streamBuffer[idx+len(tag):]
+						inThoughtMode = false
+						continue
+					}
+					var prefixMatched int
+					for i := len(tag) - 1; i >= 1; i-- {
+						if strings.HasSuffix(streamBuffer, tag[:i]) {
+							prefixMatched = i
+							break
+						}
+					}
+					if prefixMatched > 0 {
+						sendLen := len(streamBuffer) - prefixMatched
+						if sendLen > 0 {
+							preReasoning := streamBuffer[:sendLen]
+							reasoningBuilder.WriteString(preReasoning)
+							chunkChan <- StreamChunk{Type: "reasoning", Content: preReasoning}
+							streamBuffer = streamBuffer[sendLen:]
+						}
+						break
+					}
+					reasoningBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+					streamBuffer = ""
+					break
+				}
+			}
 		}
 
 		if len(choice.Delta.ToolCalls) > 0 {
@@ -303,6 +376,9 @@ func (a *Agent) StreamChatCompletions(
 				existing, ok := toolCallsMap[idx]
 				if !ok {
 					newTC := tc
+					if newTC.ID == "" {
+						newTC.ID = fmt.Sprintf("call_%d_%s", idx, db.NewUUID()[:8])
+					}
 					toolCallsMap[idx] = &newTC
 					if tc.Function.Name != "" {
 						chunkChan <- StreamChunk{Type: "tool_name", Content: tc.Function.Name, ToolCallIndex: idx}
@@ -324,6 +400,16 @@ func (a *Agent) StreamChatCompletions(
 					chunkChan <- StreamChunk{Type: "tool_call", Content: tc.Function.Arguments, ToolCallIndex: idx}
 				}
 			}
+		}
+	}
+
+	if streamBuffer != "" {
+		if inThoughtMode {
+			reasoningBuilder.WriteString(streamBuffer)
+			chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+		} else {
+			textBuilder.WriteString(streamBuffer)
+			chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
 		}
 	}
 

@@ -33,6 +33,9 @@ type MultiAgent struct {
 	Parent       *MultiAgent
 	Context      context.Context
 	Cancel       context.CancelFunc
+
+	ActiveContext context.Context
+	ActiveCancel  context.CancelFunc
 }
 
 // GetSystemPrompt generates the system instructions and reference guides list for the agent.
@@ -122,6 +125,43 @@ func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAge
 	return ma
 }
 
+// CancelActiveTurn cancels the active turn/query context of the subagent without stopping its lifetime.
+func (ma *MultiAgent) CancelActiveTurn() {
+	ma.HistoryMu.Lock()
+	cancel := ma.ActiveCancel
+	ma.HistoryMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// GetToolAllowlist returns a list of allowed tools for this subagent, restricting it to only call its own children.
+func (ma *MultiAgent) GetToolAllowlist() []string {
+	var allowlist []string
+
+	executors := ma.BaseAgent.Registry.GetAllExecutors()
+
+	ma.SubagentsMu.RLock()
+	children := make(map[string]bool)
+	for name := range ma.Subagents {
+		children[name] = true
+	}
+	ma.SubagentsMu.RUnlock()
+
+	for name := range executors {
+		if strings.HasPrefix(name, "subagent__") {
+			subagentName := strings.TrimPrefix(name, "subagent__")
+			if children[subagentName] {
+				allowlist = append(allowlist, name)
+			}
+		} else {
+			allowlist = append(allowlist, name)
+		}
+	}
+
+	return allowlist
+}
+
 // Start launches the background processing loop for the agent.
 func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 	go func() {
@@ -151,15 +191,32 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 						msg.Content,
 					)
 
+					// Set turn-specific context
+					turnCtx, turnCancel := context.WithCancel(ma.Context)
+					ma.HistoryMu.Lock()
+					ma.ActiveContext = turnCtx
+					ma.ActiveCancel = turnCancel
+					ma.HistoryMu.Unlock()
+
 					// Run completion loop
-					response, err := ma.executeLoop(writer, theme)
+					response, err := ma.executeLoop(turnCtx, writer, theme)
+
+					// Clear turn context
+					turnCancel()
+					ma.HistoryMu.Lock()
+					ma.ActiveContext = nil
+					ma.ActiveCancel = nil
+					ma.HistoryMu.Unlock()
+
 					if err != nil {
-						errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-						fmt.Fprintf(writer, "\n%s [%s] error: %v\n",
-							errStyle.Render("✘"),
-							style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(ma.Name),
-							err,
-						)
+						if err != context.Canceled {
+							errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
+							fmt.Fprintf(writer, "\n%s [%s] error: %v\n",
+								errStyle.Render("✘"),
+								style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(ma.Name),
+								err,
+							)
+						}
 						errMsg := db.Message{
 							Role:    "assistant",
 							Name:    ma.Name,
@@ -184,7 +241,7 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 }
 
 // executeLoop runs the agent's internal reasoning and tool execution loop.
-func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message, error) {
+func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.UITheme) (db.Message, error) {
 	writer := w
 	if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 		writer = ma.BaseAgent.CurrentWriter
@@ -197,11 +254,17 @@ func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message,
 
 	var stopSpinner chan struct{}
 	var spinnerDone chan struct{}
+	var pauseThinkingSpinner chan bool
 
 	if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 		stopSpinner = make(chan struct{})
 		spinnerDone = make(chan struct{})
+		pauseThinkingSpinner = make(chan bool, 1)
 		startTime := time.Now()
+		gStart := startTime
+		if ma.BaseAgent != nil && !ma.BaseAgent.TurnStartTime.IsZero() {
+			gStart = ma.BaseAgent.TurnStartTime
+		}
 
 		go func() {
 			defer close(spinnerDone)
@@ -209,14 +272,25 @@ func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message,
 			defer ticker.Stop()
 			frames := []string{"◜", "◝", "◞", "◟"}
 			i := 0
+			paused := false
 			for {
 				select {
 				case <-stopSpinner:
 					return
+				case <-ctx.Done():
+					return
+				case p := <-pauseThinkingSpinner:
+					paused = p
+					if paused {
+						ma.BaseAgent.UI.DrawStatsLine(os.Stderr, theme, "", "")
+					}
 				case <-ticker.C:
+					if paused {
+						continue
+					}
 					frame := frames[i%len(frames)]
 					i++
-					elapsed := time.Since(startTime).Seconds()
+					elapsed := time.Since(gStart).Seconds()
 
 					activeTasks := 0
 					for _, t := range ma.BaseAgent.ListTasks() {
@@ -246,6 +320,9 @@ func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message,
 	}
 
 	for iter := 1; iter <= maxSteps; iter++ {
+		if ctx.Err() != nil {
+			return db.Message{}, ctx.Err()
+		}
 		ma.HistoryMu.RLock()
 		historyCopy := make([]db.Message, len(ma.History))
 		copy(historyCopy, ma.History)
@@ -256,7 +333,8 @@ func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message,
 
 		var assistantMsg *db.Message
 		go func() {
-			msg, err := ma.BaseAgent.StreamChatCompletions(ma.Context, historyCopy, nil, chunkChan)
+			allowlist := ma.GetToolAllowlist()
+			msg, err := ma.BaseAgent.StreamChatCompletions(ctx, historyCopy, allowlist, chunkChan)
 			errChan <- err
 			if msg != nil {
 				assistantMsg = msg
@@ -317,13 +395,24 @@ func (ma *MultiAgent) executeLoop(w io.Writer, theme style.UITheme) (db.Message,
 				style.NewStyle().Foreground(theme.Secondary).Bold(true).Render("❖"),
 				prefixStyle.Render(ma.Name),
 			)
+			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+				ma.BaseAgent.UI.RenderToolHeader(writer, theme, tc.Function.Name, tc.Function.Arguments)
+			} else {
+				fmt.Fprintf(writer, "▸ %s\n", tc.Function.Name)
+			}
 
 			// Execute tool securely using wrapped multiAgentContext
 			mac := &multiAgentContext{
 				AgentContext: ma.BaseAgent,
 				ma:           ma,
 			}
+			if pauseThinkingSpinner != nil {
+				pauseThinkingSpinner <- true
+			}
 			output, toolErr := ma.BaseAgent.Registry.Execute(mac, tc.Function.Name, tc.Function.Arguments)
+			if pauseThinkingSpinner != nil {
+				pauseThinkingSpinner <- false
+			}
 			isErr := toolErr != nil
 			if toolErr != nil {
 				output = fmt.Sprintf("Error: %v", toolErr)
@@ -386,9 +475,12 @@ func (s *subagentExecutor) Execute(ctx tool.AgentContext, arguments string) (str
 	select {
 	case resp := <-s.subagent.Output:
 		return resp.Content, nil
+	case <-ctx.Context().Done():
+		s.subagent.CancelActiveTurn()
+		return "", ctx.Context().Err()
 	case <-s.subagent.Context.Done():
 		return "", fmt.Errorf("subagent was terminated during execution")
-	case <-time.After(60 * time.Second):
+	case <-time.After(10 * time.Minute):
 		return "", fmt.Errorf("subagent execution timed out")
 	}
 }
@@ -560,8 +652,48 @@ func (t *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (st
 	}
 
 	parent := args.Parent
-	if parent == "base" || parent == "me" || parent == "maquis" || parent == "" {
+	if parent == "me" || parent == "" {
+		if mac, ok := ctx.(*multiAgentContext); ok {
+			parent = mac.ma.Name
+		} else {
+			parent = ""
+		}
+	} else if parent == "base" || parent == "maquis" {
 		parent = ""
+	}
+
+	if t.mam.HasAgent(args.Name) {
+		t.mam.mu.Lock()
+		if ag, ok := t.mam.Agents[args.Name]; ok {
+			// Update instructions/prompt if different and not empty
+			if args.Instructions != "" {
+				ag.SystemPrompt = args.Instructions
+			}
+			// Update parent if not already set, or if new parent is specified
+			if parent != "" && (ag.Parent == nil || ag.Parent.Name != parent) {
+				if p, exists := t.mam.Agents[parent]; exists {
+					// Unregister from old parent if any
+					if ag.Parent != nil {
+						ag.Parent.SubagentsMu.Lock()
+						delete(ag.Parent.Subagents, ag.Name)
+						ag.Parent.SubagentsMu.Unlock()
+					}
+					ag.Parent = p
+					p.SubagentsMu.Lock()
+					p.Subagents[ag.Name] = ag
+					p.SubagentsMu.Unlock()
+				}
+			}
+			// Save updated agent definition
+			_ = t.mam.saveAgentDef(ag)
+		}
+		t.mam.mu.Unlock()
+
+		// Load skill if specified
+		if args.Skill != "" {
+			_ = t.mam.LoadAgentSkill(args.Name, args.Skill)
+		}
+		return fmt.Sprintf("Subagent '%s' already exists. You can now delegate tasks to it using the 'subagent__%s' tool.", args.Name, args.Name), nil
 	}
 
 	if t.mam.BaseAgent != nil {
@@ -866,6 +998,16 @@ func (mam *MultiAgentManager) JoinAgent(name string) bool {
 type multiAgentContext struct {
 	tool.AgentContext
 	ma *MultiAgent
+}
+
+func (mac *multiAgentContext) Context() context.Context {
+	mac.ma.HistoryMu.RLock()
+	ctx := mac.ma.ActiveContext
+	mac.ma.HistoryMu.RUnlock()
+	if ctx != nil {
+		return ctx
+	}
+	return mac.ma.Context
 }
 
 func (mac *multiAgentContext) GetActiveSkills() []tool.Skill {

@@ -35,11 +35,20 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		return
 	}
 
-	startTime := time.Now()
+	if a.TurnStartTime.IsZero() {
+		a.TurnStartTime = time.Now()
+	}
+	startTime := a.TurnStartTime
+	defer func() {
+		a.TurnStartTime = time.Time{}
+	}()
+
 	writerToUse := w
 	a.CurrentWriter = writerToUse
+	a.CurrentContext = ctx
 	defer func() {
 		a.CurrentWriter = nil
+		a.CurrentContext = nil
 	}()
 	var height int
 	var pauseThinkingSpinner chan bool
@@ -395,15 +404,35 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			tc     db.ToolCall
 		}
 
-		resultsChan := make(chan toolExecutionResult, len(assistantMsg.ToolCalls))
-		var wg sync.WaitGroup
-
-		var approvedBatch []db.ToolCall
-		var rejectedBatch []db.ToolCall
+		// Clear all streamed titles and any prompts printed after them
+		firstTitleLine := sr.GetToolTitleLineNumber(0)
+		if firstTitleLine != -1 && ncw.count > firstTitleLine {
+			linesToClear := ncw.count - firstTitleLine
+			// Move up, then for each line, clear it and move down
+			var clearCmd strings.Builder
+			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
+			for i := 0; i < linesToClear; i++ {
+				clearCmd.WriteString("\x1b[K\x1b[1B")
+			}
+			// Move back up to the starting line where we want to place the cursor
+			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
+			fmt.Fprint(ncw, clearCmd.String())
+			ncw.count = firstTitleLine
+			ncw.col = 0
+		}
 
 		for _, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
 				return
+			}
+
+			startLine := ncw.count
+
+			// Render the tool header
+			if a.UI != nil {
+				a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
+			} else {
+				fmt.Fprintf(ncw, "tool call: %s %s\n", tc.Function.Name, tc.Function.Arguments)
 			}
 
 			approved := false
@@ -430,36 +459,118 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			}
 
 			if approved {
-				approvedBatch = append(approvedBatch, tc)
+				isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
+
+				// If it's a subagent tool, update the tool header to green BEFORE executing it.
+				// This way, the subagent outputs its results below the green header, and we don't
+				// overwrite/duplicate the output after it completes.
+				if isSubagent && a.UI != nil {
+					linesToGoBack := ncw.count - startLine
+					a.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+				}
+
+				// Execute the tool call
+				if !isNonInteractive && pauseThinkingSpinner != nil {
+					pauseThinkingSpinner <- true
+				}
+
+				allowed, reason := a.runBeforeToolHook(tc)
+				var toolOutput string
+				var toolErr error
+
+				if !allowed {
+					toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
+					toolErr = fmt.Errorf("blocked by hook")
+				} else {
+					// Draw temporary executing status line if UI is present
+					var stopSpinner chan struct{}
+					var spinnerDone chan struct{}
+					if a.UI != nil && !isSubagent {
+						stopSpinner = make(chan struct{})
+						spinnerDone = make(chan struct{})
+						go func() {
+							defer close(spinnerDone)
+							frames := []string{"◜", "◝", "◞", "◟"}
+							i := 0
+							for {
+								select {
+								case <-stopSpinner:
+									return
+								default:
+									time.Sleep(80 * time.Millisecond)
+									select {
+									case <-stopSpinner:
+										return
+									default:
+									}
+									frame := frames[i%len(frames)]
+									i++
+									a.UI.DrawStatsLine(w, theme, frame, fmt.Sprintf("executing %s...", tc.Function.Name))
+								}
+							}
+						}()
+					}
+
+					toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
+					toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
+
+					if a.UI != nil && !isSubagent {
+						close(stopSpinner)
+						<-spinnerDone
+						a.UI.DrawStatsLine(w, theme, "", "")
+					}
+				}
+
+				if !isNonInteractive && pauseThinkingSpinner != nil {
+					pauseThinkingSpinner <- false
+				}
+
+				if toolErr != nil {
+					toolOutput = fmt.Sprintf("Error: %v", toolErr)
+				}
+				if toolOutput == "" {
+					toolOutput = "(no output)"
+				}
+
+				// Render the tool output
+				if !isSubagent {
+					linesToGoBack := ncw.count - startLine
+					if a.UI != nil {
+						a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+					} else {
+						fmt.Fprintln(ncw, toolOutput)
+					}
+				}
+
+				// Update agent state
+				isReadOnlyTool := tc.Function.Name == "read" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find"
+				isPrevEdit := a.lastToolWasEdit
+				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
+					a.lastToolOutput = toolOutput
+					a.lastToolIsError = toolErr != nil
+					a.lastToolWasEdit = (tc.Function.Name == "edit")
+				}
+
+				// Append message to history
+				*messages = append(*messages, db.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    toolOutput,
+				})
+				if sessionID != "" {
+					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+				}
+
 			} else {
-				rejectedBatch = append(rejectedBatch, tc)
-			}
-		}
-
-		// Clear all streamed titles and any prompts printed after them
-		firstTitleLine := sr.GetToolTitleLineNumber(0)
-		if firstTitleLine != -1 && ncw.count > firstTitleLine {
-			linesToClear := ncw.count - firstTitleLine
-			// Move up, then for each line, clear it and move down
-			var clearCmd strings.Builder
-			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-			for i := 0; i < linesToClear; i++ {
-				clearCmd.WriteString("\x1b[K\x1b[1B")
-			}
-			// Move back up to the starting line where we want to place the cursor
-			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-			fmt.Fprint(ncw, clearCmd.String())
-			ncw.count = firstTitleLine
-			ncw.col = 0
-		}
-
-		if len(rejectedBatch) > 0 {
-			for _, tc := range rejectedBatch {
+				// Rejected!
 				toolOutput := "Error: Tool execution rejected by user."
 				a.lastToolOutput = toolOutput
 				a.lastToolIsError = true
+
+				linesToGoBack := ncw.count - startLine
 				if a.UI != nil {
-					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, -2)
+					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
 				} else {
 					fmt.Fprintln(ncw, toolOutput)
 				}
@@ -473,182 +584,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				if sessionID != "" {
 					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 				}
-			}
-			return
-		}
 
-		if len(approvedBatch) > 0 {
-			if !isNonInteractive && pauseThinkingSpinner != nil {
-				pauseThinkingSpinner <- true
-			}
-
-			hasSubagentTool := false
-			for _, tc := range approvedBatch {
-				if strings.HasPrefix(tc.Function.Name, "subagent__") {
-					hasSubagentTool = true
-					break
-				}
-			}
-
-			var stopSpinner chan struct{}
-			var spinnerDone chan struct{}
-
-			if !hasSubagentTool {
-				stopSpinner = make(chan struct{})
-				spinnerDone = make(chan struct{})
-				go func() {
-					defer close(spinnerDone)
-					frames := []string{"◜", "◝", "◞", "◟"}
-					i := 0
-					var toolNames []string
-					for _, tc := range approvedBatch {
-						toolNames = append(toolNames, tc.Function.Name)
-					}
-					toolsStr := strings.Join(toolNames, ", ")
-
-					if a.UI != nil {
-						a.UI.DrawStatsLine(w, theme, frames[0], fmt.Sprintf("executing %d tools (%s)...", len(approvedBatch), toolsStr))
-					} else {
-						fmt.Fprintf(ncw, "\r\x1b[K%s executing %d tools (%s)...",
-							style.NewStyle().Foreground(theme.Secondary).Render(frames[0]),
-							len(approvedBatch),
-							toolsStr,
-						)
-					}
-					i++
-
-					for {
-						select {
-						case <-stopSpinner:
-							return
-						default:
-							time.Sleep(80 * time.Millisecond)
-							select {
-							case <-stopSpinner:
-								return
-							default:
-							}
-							frame := frames[i%len(frames)]
-							i++
-							if a.UI != nil {
-								a.UI.DrawStatsLine(w, theme, frame, fmt.Sprintf("executing %d tools (%s)...", len(approvedBatch), toolsStr))
-							} else {
-								fmt.Fprintf(ncw, "\r\x1b[K%s executing %d tools (%s)...",
-									style.NewStyle().Foreground(theme.Secondary).Render(frame),
-									len(approvedBatch),
-									toolsStr,
-								)
-							}
-						}
-					}
-				}()
-			}
-
-			// Pre-calculate which read tool calls are allowed concurrently (maximum 10 read calls in parallel)
-			allowedReadIndices := make(map[int]bool)
-			readCount := 0
-			for i, tc := range approvedBatch {
-				if tc.Function.Name == "read" {
-					readCount++
-					if readCount <= 10 {
-						allowedReadIndices[i] = true
-					}
-				} else {
-					allowedReadIndices[i] = true
-				}
-			}
-
-			for idx, tc := range approvedBatch {
-				wg.Add(1)
-				go func(i int, call db.ToolCall) {
-					defer wg.Done()
-
-					allowed, reason := a.runBeforeToolHook(call)
-					if !allowed {
-						resultsChan <- toolExecutionResult{
-							index:  i,
-							output: fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason),
-							err:    fmt.Errorf("blocked by hook"),
-							tc:     call,
-						}
-						return
-					}
-
-					var out string
-					var err error
-					if !allowedReadIndices[i] {
-						out = "Error: Too many parallel read tool calls in a single turn. Please inspect files one by one or in small batches (maximum 10 at once) to avoid UI clutter and context window overflow."
-						err = fmt.Errorf("too many parallel read calls")
-					} else {
-						out, err = a.Registry.Execute(a, call.Function.Name, call.Function.Arguments)
-					}
-					out, err = a.runAfterToolHook(call, out, err)
-
-					resultsChan <- toolExecutionResult{
-						index:  i,
-						output: out,
-						err:    err,
-						tc:     call,
-					}
-				}(idx, tc)
-			}
-
-			wg.Wait()
-			if !hasSubagentTool {
-				close(stopSpinner)
-				<-spinnerDone
-				if a.UI != nil {
-					a.UI.DrawStatsLine(w, theme, "", "")
-				} else {
-					fmt.Fprint(ncw, "\r\x1b[K")
-				}
-			}
-			close(resultsChan)
-
-			sortedResults := make([]toolExecutionResult, len(approvedBatch))
-			for r := range resultsChan {
-				sortedResults[r.index] = r
-			}
-
-			for _, r := range sortedResults {
-				toolOutput := r.output
-				toolErr := r.err
-				if toolErr != nil {
-					toolOutput = fmt.Sprintf("Error: %v", toolErr)
-				}
-
-				if toolOutput == "" {
-					toolOutput = "(no output)"
-				}
-
-				if a.UI != nil {
-					a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, r.tc.Function.Name, r.tc.Function.Arguments, -2)
-				} else {
-					fmt.Fprintln(ncw, toolOutput)
-				}
-
-				isReadOnlyTool := r.tc.Function.Name == "read" || r.tc.Function.Name == "ls" || r.tc.Function.Name == "grep" || r.tc.Function.Name == "find"
-				isPrevEdit := a.lastToolWasEdit
-
-				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
-					a.lastToolOutput = toolOutput
-					a.lastToolIsError = toolErr != nil
-					a.lastToolWasEdit = (r.tc.Function.Name == "edit")
-				}
-
-				*messages = append(*messages, db.Message{
-					Role:       "tool",
-					ToolCallID: r.tc.ID,
-					Name:       r.tc.Function.Name,
-					Content:    toolOutput,
-				})
-				if sessionID != "" {
-					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
-				}
-			}
-
-			if !isNonInteractive && pauseThinkingSpinner != nil {
-				pauseThinkingSpinner <- false
+				// Abort execution of subsequent tools in the batch
+				return
 			}
 		}
 

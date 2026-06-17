@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -101,6 +102,8 @@ type AgentContext interface {
 	SpawnTask(command string, w io.Writer) (string, error)
 	GetTaskStatus(taskID string) (string, string, error)
 	KillTask(taskID string) error
+	Context() context.Context
+	HasSubagent(name string) bool
 }
 
 type ToolExecutor interface {

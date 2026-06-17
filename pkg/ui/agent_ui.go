@@ -37,6 +37,10 @@ func (ui *AgentUIImpl) AskForApproval(w io.Writer, theme style.UITheme) (bool, b
 	return AskForApproval(w, theme)
 }
 
+func (ui *AgentUIImpl) RenderToolHeader(w io.Writer, theme style.UITheme, toolName string, toolArgs string) {
+	RenderToolHeader(w, theme, toolName, toolArgs)
+}
+
 func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int) {
 	RenderToolOutput(w, output, isError, collapseResults, theme, toolName, toolArgs, highlightLines)
 }
