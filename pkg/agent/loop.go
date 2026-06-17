@@ -245,12 +245,6 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 							} else {
 								a.Config.CollapseResults = !a.Config.CollapseResults
 								_ = config.SaveConfig(a.ConfigPath, a.Config)
-								status := "EXPANDED"
-								if a.Config.CollapseResults {
-									status = "COLLAPSED"
-								}
-								infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-								fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+O: Tool results will be %s]", status)))
 								if a.UI != nil {
 									a.UI.SetCollapseStatus(a.Config.CollapseResults)
 									a.UI.DrawStatusBar(w, theme)
@@ -259,12 +253,12 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 						} else if buf[0] == 20 { // Ctrl+T
 							a.Config.ShowThinking = !a.Config.ShowThinking
 							_ = config.SaveConfig(a.ConfigPath, a.Config)
-							status := "ENABLED"
-							if !a.Config.ShowThinking {
-								status = "DISABLED"
+							if a.UI != nil {
+								spinnerFrameMu.RLock()
+								frame := currentSpinnerFrame
+								spinnerFrameMu.RUnlock()
+								a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
 							}
-							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-							fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+T: Thinking is now %s]", status)))
 						} else if buf[0] == 18 { // Ctrl+R
 							nextEffort := "low"
 							switch strings.ToLower(a.Config.ReasoningEffort) {
@@ -281,8 +275,12 @@ func (a *Agent) RunAgentLoop(w io.Writer, messages *[]db.Message, prompt string,
 							}
 							a.Config.ReasoningEffort = nextEffort
 							_ = config.SaveConfig(a.ConfigPath, a.Config)
-							infoStyle := style.NewStyle().Foreground(theme.Primary).Italic(true)
-							fmt.Fprintf(writerToUse, "\n%s\n", infoStyle.Render(fmt.Sprintf("[Ctrl+R: Reasoning effort set to %s]", nextEffort)))
+							if a.UI != nil {
+								spinnerFrameMu.RLock()
+								frame := currentSpinnerFrame
+								spinnerFrameMu.RUnlock()
+								a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, frame)
+							}
 						} else if buf[0] == 3 || buf[0] == 27 { // Ctrl+C or Escape
 							fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
 							cancel()

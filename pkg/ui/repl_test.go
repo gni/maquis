@@ -144,11 +144,8 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+O: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("expected 1 byte returned for Ctrl+O, got %d", n)
-	}
-	if p[0] != 12 {
-		t.Errorf("expected injected Ctrl+L (12) for Ctrl+O, got %d", p[0])
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+O, got %d", n)
 	}
 	if !a.Config.CollapseResults {
 		t.Errorf("expected CollapseResults to be true, got false")
@@ -160,11 +157,8 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+T: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("expected 1 byte returned for Ctrl+T, got %d", n)
-	}
-	if p[0] != 12 {
-		t.Errorf("expected injected Ctrl+L (12) for Ctrl+T, got %d", p[0])
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+T, got %d", n)
 	}
 	if a.Config.ShowThinking {
 		t.Errorf("expected ShowThinking to be false, got true")
@@ -176,11 +170,8 @@ func TestKeyInterceptorReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read Ctrl+R: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("expected 1 byte returned for Ctrl+R, got %d", n)
-	}
-	if p[0] != 12 {
-		t.Errorf("expected injected Ctrl+L (12) for Ctrl+R, got %d", p[0])
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for Ctrl+R, got %d", n)
 	}
 	if a.Config.ReasoningEffort != "medium" {
 		t.Errorf("expected ReasoningEffort to be 'medium', got %q", a.Config.ReasoningEffort)

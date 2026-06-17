@@ -3,6 +3,7 @@
 maquis is a minimalist terminal-based AI agent harness written in Go. It executes stateful agentic loops using OpenAI-compatible APIs and standard filesystem/execution tools.
 
 This project is tested only on llama.cpp.
+Don't use this on production, still experimental
 
 ## Installation
 

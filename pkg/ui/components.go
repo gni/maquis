@@ -19,8 +19,6 @@ import (
 	"github.com/alecthomas/chroma/v2/quick"
 )
 
-var TerminalMu = &agent.TerminalMu
-
 func PrintBanner(w io.Writer, a *agent.Agent) {
 	if a == nil || a.Config == nil {
 		return

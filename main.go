@@ -25,9 +25,14 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		ui.ShutdownStatusBar(os.Stderr)
-		os.Exit(0)
+		for sig := range sigChan {
+			if sig == os.Interrupt && ui.IsInteractive {
+				// Let the interactive REPL or agent loop handle Ctrl+C
+				continue
+			}
+			ui.ShutdownStatusBar(os.Stderr)
+			os.Exit(0)
+		}
 	}()
 
 	if err := cmd.Execute(); err != nil {

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,10 +20,6 @@ import (
 	"maquis/pkg/ui/style"
 	"golang.org/x/term"
 )
-
-var pasteLinesOffset int
-var activeInputReader io.Reader
-
 func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (string, int, bool) {
 	if key != '\t' {
 		return line, pos, false
@@ -305,6 +302,21 @@ type keyInterceptorReader struct {
 	mam              *agent.MultiAgentManager
 	inputChan        chan byte
 	injectChan       chan byte
+	paused           bool
+	pausedMu         sync.Mutex
+}
+
+func (ki *keyInterceptorReader) setPaused(paused bool) {
+	ki.pausedMu.Lock()
+	ki.paused = paused
+	ki.pausedMu.Unlock()
+}
+
+func (ki *keyInterceptorReader) isPaused() bool {
+	ki.pausedMu.Lock()
+	p := ki.paused
+	ki.pausedMu.Unlock()
+	return p
 }
 
 func stylePrompt(p []byte, prefix string, styledPrefix string) []byte {
@@ -390,8 +402,8 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	// Reset lastH to 0 so DrawStatusBar doesn't perform clamped clear on old height
 	lastH = 0
 
-	// 1. Clear screen
-	fmt.Fprint(cw, "\x1b[H\x1b[2J")
+	// 1. Reset scrolling region to whole screen and clear screen
+	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[2J")
 
 	// Buffer everything that goes into the scroll region (rows 1..height-4)
 	var buf bytes.Buffer
@@ -618,9 +630,11 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			p[writeIdx] = '\n'
 			writeIdx++
 		} else if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
+			activeTheme := GetConfiguredTheme(ki.agent.Config)
 			if b == 20 { // Ctrl+T
 				ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+				DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 			} else if b == 18 { // Ctrl+R
 				nextEffort := "low"
 				switch strings.ToLower(ki.agent.Config.ReasoningEffort) {
@@ -637,15 +651,13 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 				}
 				ki.agent.Config.ReasoningEffort = nextEffort
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
+				DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 			} else if b == 15 { // Ctrl+O
 				ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 				SetCollapseStatus(ki.agent.Config.CollapseResults)
+				DrawStatusBar(ki.w, activeTheme)
 			}
-
-			// Inject Ctrl+L (12) to trigger a redraw via term.Terminal
-			p[writeIdx] = 12
-			writeIdx++
 		} else {
 			p[writeIdx] = b
 			writeIdx++
@@ -656,6 +668,9 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 }
 
 func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initialSessionID string) {
+	IsInteractive = true
+	defer func() { IsInteractive = false }()
+
 	currentSessionID := initialSessionID
 	if currentSessionID == "" {
 		currentSessionID = db.NewUUID()
@@ -720,6 +735,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	go func() {
 		buf := make([]byte, 1024)
 		for {
+			if kiReader.isPaused() {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
 			n, err := kiReader.r.Read(buf)
 			if err != nil {
 				if err == io.EOF || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "closed") {
@@ -1067,7 +1086,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				fmt.Fprint(ppWriter, "\n\n")
 			}
 		} else {
+			kiReader.setPaused(true)
 			a.RunAgentLoop(os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
+			kiReader.setPaused(false)
 		}
 		activeTasks := 0
 		for _, t := range a.ListTasks() {
@@ -1153,8 +1174,8 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	// Reset lastH to 0 so DrawStatusBar doesn't perform clamped clear on old height
 	lastH = 0
 
-	// 1. Clear screen
-	fmt.Fprint(cw, "\x1b[H\x1b[2J")
+	// 1. Reset scrolling region to whole screen and clear screen
+	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[2J")
 
 	// Buffer everything that goes into the scroll region (rows 1..height-4)
 	var buf bytes.Buffer

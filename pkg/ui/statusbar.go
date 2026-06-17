@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"maquis/pkg/ui/style"
@@ -26,16 +25,6 @@ type StatusBarState struct {
 	ActiveTasksCount       int
 	ShowTokens             bool
 }
-
-var (
-	state              StatusBarState
-	stateMu            sync.Mutex
-	lastH              int
-	enabled            bool
-	scrollRegionOffset int // extra lines reserved above the status bar (e.g. prompt separator + input)
-	collapseResults    bool
-	lastStatsText      string
-)
 
 // SetCollapseStatus updates the results collapsing state in the status bar.
 func SetCollapseStatus(collapsed bool) {

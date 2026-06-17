@@ -107,6 +107,7 @@ var rootCmd = &cobra.Command{
 
 		httpClient := &http.Client{
 			Transport: transport,
+			Timeout:   120 * time.Second,
 		}
 
 		// Instantiate Agent context

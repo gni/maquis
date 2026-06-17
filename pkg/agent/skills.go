@@ -136,8 +136,15 @@ func (a *Agent) GetSystemPrompt() string {
 		"  followed by your markdown formatted technical guidance and instructions.\n"+
 		"- Newly created skills will automatically be discoverable by you and all subagents via the 'load_skill' tool, and can be assigned when spawning new subagents.",
 		a.Config.SkillsDir, a.Config.SkillsDir)
+	swarmInfo := "\n\nMulti-Agent Swarm System (Subagents):\n" +
+		"- You can spawn specialized subagents to delegate subtasks to them using the 'spawn_subagent' tool.\n" +
+		"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n" +
+		"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n" +
+		"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n" +
+		"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n" +
+		"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate."
 
-	basePrompt := a.Config.SystemInstruction + thinkingGuidelines + skillsInfo
+	basePrompt := a.Config.SystemInstruction + thinkingGuidelines + skillsInfo + swarmInfo
 
 	var sb strings.Builder
 	sb.WriteString(basePrompt)
