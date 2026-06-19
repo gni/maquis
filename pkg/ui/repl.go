@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -346,7 +348,16 @@ func (ki *keyInterceptorReader) handleCtrlO() {
 		ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 		_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 		SetCollapseStatus(ki.agent.Config.CollapseResults)
-		DrawStatusBar(ki.w, activeTheme)
+		stateMu.Lock()
+		isGenerating := state.IsGenerating
+		cancelFunc := ActiveCancelFunc
+		inApproval := inApprovalPrompt
+		stateMu.Unlock()
+		if !isGenerating && (cancelFunc == nil || inApproval) {
+			redrawScreen(ki.w, ki.agent, ki, ki.rl)
+		} else {
+			DrawStatusBar(ki.w, activeTheme)
+		}
 	}
 }
 
@@ -715,8 +726,7 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			} else if b == 15 { // Ctrl+O
 				ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-				SetCollapseStatus(ki.agent.Config.CollapseResults)
-				DrawStatusBar(ki.w, activeTheme)
+				redrawScreen(ki.w, ki.agent, ki, ki.rl)
 			}
 		} else {
 			p[writeIdx] = b
@@ -1131,6 +1141,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					fmt.Fprintf(os.Stderr, "cd: %v\n", err)
 				} else {
 					pwd, _ := os.Getwd()
+					a.WorkspaceRoot = pwd
 					fmt.Fprintf(os.Stderr, "changed directory to: %s\n", pwd)
 				}
 				contextMsg := fmt.Sprintf("[user manually changed working directory to: `%s`]", target)
@@ -1381,6 +1392,7 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 }
 
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	SetCollapseStatus(a.Config.CollapseResults)
 	activeTheme := GetConfiguredTheme(a.Config)
 	promptPrefix := "> "
 	if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
@@ -1421,6 +1433,16 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		activeMessages = kiReader.mam.ActiveAgent.History
 		kiReader.mam.ActiveAgent.HistoryMu.RUnlock()
 	}
+
+	// DEBUG LOG
+	{
+		var logLines []string
+		for idx, msg := range activeMessages {
+			logLines = append(logLines, fmt.Sprintf("[%d] Role: %s, Name: %s, ToolCallID: %s, ContentLen: %d", idx, msg.Role, msg.Name, msg.ToolCallID, len(msg.Content)))
+		}
+		_ = os.WriteFile("/workspace/maquis/debug_messages.txt", []byte(strings.Join(logLines, "\n")), 0644)
+	}
+
 	if len(activeMessages) > 0 {
 		PrintSessionHistory(cwBuf, activeMessages, activeTheme, a.Config)
 	}
@@ -1478,10 +1500,25 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	DrawStatusBar(cw, activeTheme)
 
 	// 6. Draw input line and place cursor
-	fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-pasteLinesOffset)
-	fmt.Fprint(cw, promptStr)
-	fmt.Fprint(cw, kiReader.currentInputLine)
-	fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-pasteLinesOffset, 1+len(promptPrefix)+len(kiReader.currentInputLine))
+	stateMu.Lock()
+	inApproval := inApprovalPrompt
+	stateMu.Unlock()
+	if inApproval {
+		promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
+		fmt.Fprint(cw, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
+	} else {
+		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-pasteLinesOffset)
+		fmt.Fprint(cw, promptStr)
+		inputLine := kiReader.currentInputLine
+		posOffset := len(inputLine)
+		if rl != nil {
+			line, pos := getTerminalLine(rl)
+			inputLine = line
+			posOffset = pos
+		}
+		fmt.Fprint(cw, inputLine)
+		fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-pasteLinesOffset, 1+len(promptPrefix)+posOffset)
+	}
 }
 
 func setNonCanonical(fd int) (func(), error) {
@@ -1507,4 +1544,23 @@ func setNonCanonical(fd int) (func(), error) {
 		_ = unix.IoctlSetTermios(fd, unix.TCSETS, &oldTermios)
 	}
 	return restore, nil
+}
+
+func getTerminalLine(rl *term.Terminal) (string, int) {
+	if rl == nil {
+		return "", 0
+	}
+	val := reflect.ValueOf(rl).Elem()
+	lineField := val.FieldByName("line")
+	posField := val.FieldByName("pos")
+	if lineField.IsValid() && posField.IsValid() {
+		ptrLine := unsafe.Pointer(lineField.UnsafeAddr())
+		runes := *(*[]rune)(ptrLine)
+
+		ptrPos := unsafe.Pointer(posField.UnsafeAddr())
+		pos := *(*int)(ptrPos)
+
+		return string(runes), pos
+	}
+	return "", 0
 }

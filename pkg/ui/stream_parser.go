@@ -45,7 +45,7 @@ type jsonStreamParser struct {
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find" || p.activeToolName == "bash"
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find" || p.activeToolName == "bash" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
 }
 
 type parserWriter struct {
@@ -169,7 +169,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.outputBuf.Reset()
 						}
 					}
-				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "bash") {
+				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "bash") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
 					p.isPath = true
 				} else if p.currentKey == "oldText" {
 					p.isOldText = true

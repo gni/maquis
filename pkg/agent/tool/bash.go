@@ -61,7 +61,7 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return fmt.Sprintf("Task spawned in background with ID: %s. You can monitor its output using 'task_status' or kill it using 'task_kill'. Toggle live stream via Ctrl+O.", id), nil
 	}
 
-	cmd := exec.Command("bash", "-c", args.Command)
+	cmd := exec.CommandContext(ctx.Context(), "bash", "-c", args.Command)
 	cmd.Dir = ctx.GetWorkspaceRoot()
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C.UTF-8")
 	var stdout, stderr bytes.Buffer

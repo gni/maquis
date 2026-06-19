@@ -116,7 +116,7 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 		isDir := info.IsDir()
 		relPath, _ := filepath.Rel(safePath, path)
-		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+		if isIgnored(info.Name(), isDir) || (matchesGitignore(relPath, isDir, patterns) && (isDir || isCompiledOrLockfile(info.Name()))) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
 			if isDir {
 				return filepath.SkipDir
 			}
@@ -258,7 +258,7 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 		isDir := info.IsDir()
 		relPath, _ := filepath.Rel(safePath, path)
-		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+		if isIgnored(info.Name(), isDir) || (matchesGitignore(relPath, isDir, patterns) && (isDir || isCompiledOrLockfile(info.Name()))) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
 			if isDir {
 				return filepath.SkipDir
 			}

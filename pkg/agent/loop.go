@@ -404,35 +404,46 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			tc     db.ToolCall
 		}
 
-		// Clear all streamed titles and any prompts printed after them
+		collapse := a.Config.CollapseResults
 		firstTitleLine := sr.GetToolTitleLineNumber(0)
-		if firstTitleLine != -1 && ncw.count > firstTitleLine {
+		wasStreamed := firstTitleLine != -1
+
+		if wasStreamed && !collapse {
 			linesToClear := ncw.count - firstTitleLine
-			// Move up, then for each line, clear it and move down
-			var clearCmd strings.Builder
-			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-			for i := 0; i < linesToClear; i++ {
-				clearCmd.WriteString("\x1b[K\x1b[1B")
+			if linesToClear > 0 {
+				var clearCmd strings.Builder
+				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
+				for i := 0; i < linesToClear; i++ {
+					clearCmd.WriteString("\x1b[K\x1b[1B")
+				}
+				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
+				fmt.Fprint(ncw, clearCmd.String())
+				ncw.count = firstTitleLine
+				ncw.col = 0
 			}
-			// Move back up to the starting line where we want to place the cursor
-			clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-			fmt.Fprint(ncw, clearCmd.String())
-			ncw.count = firstTitleLine
-			ncw.col = 0
+			wasStreamed = false
 		}
 
-		for _, tc := range assistantMsg.ToolCalls {
+		var startLine int
+		if wasStreamed {
+			startLine = firstTitleLine
+		}
+
+		for idx, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
 				return
 			}
 
-			startLine := ncw.count
-
-			// Render the tool header
-			if a.UI != nil {
-				a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
+			if wasStreamed {
+				startLine = sr.GetToolTitleLineNumber(idx)
 			} else {
-				fmt.Fprintf(ncw, "tool call: %s %s\n", tc.Function.Name, tc.Function.Arguments)
+				startLine = ncw.count
+				// Render the tool header
+				if a.UI != nil {
+					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
+				} else {
+					fmt.Fprintf(ncw, "tool call: %s %s\n", tc.Function.Name, tc.Function.Arguments)
+				}
 			}
 
 			approved := false

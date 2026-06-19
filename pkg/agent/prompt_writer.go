@@ -18,7 +18,8 @@ var TerminalMu sync.Mutex
 // back to the prompt input line (height-2, column 3) so it blinks stably
 // at the "> " prompt — even while tokens are streaming above it.
 //
-// The bottom 4 lines of the terminal are reserved:
+// The bottom 5 lines of the terminal are reserved:
+//   - height-4: stats line content
 //   - height-3: ─── prompt ──────────────────────────────[reasoning:low]
 //   - height-2: > (input line, cursor blinks here)
 //   - height-1: ────────────────────────────────────────── (status separator)

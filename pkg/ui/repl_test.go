@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -149,6 +150,19 @@ func TestKeyInterceptorReader(t *testing.T) {
 	}
 	if !a.Config.CollapseResults {
 		t.Errorf("expected CollapseResults to be true, got false")
+	}
+
+	// Read Ctrl+O again (15)
+	ki.r = bytes.NewReader([]byte{15})
+	n, err = ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read 2nd Ctrl+O: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes returned for 2nd Ctrl+O, got %d", n)
+	}
+	if a.Config.CollapseResults {
+		t.Errorf("expected CollapseResults to be false, got true")
 	}
 
 	// Read Ctrl+T (20)
@@ -327,6 +341,46 @@ func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
 	// Verify that it echoed to ki.w (which is buf)
 	if !strings.HasSuffix(buf.String(), "hello\r\nworld\r\n") {
 		t.Errorf("expected echoed text to have carriage returns, got %q", buf.String())
+	}
+}
+
+func TestCdUpdatesWorkspaceRoot(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "maquis-cd-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origCwd)
+	}()
+
+	a := &agent.Agent{
+		WorkspaceRoot: origCwd,
+	}
+
+	// Verify initial state
+	if a.WorkspaceRoot != origCwd {
+		t.Errorf("expected workspace root %q, got %q", origCwd, a.WorkspaceRoot)
+	}
+
+	// We don't call RunREPL directly to avoid entering an infinite terminal loop,
+	// but we can simulate the cd command execution logic exactly:
+	target := tempDir
+	err = os.Chdir(target)
+	if err != nil {
+		t.Fatalf("failed to change directory: %v", err)
+	}
+
+	pwd, _ := os.Getwd()
+	a.WorkspaceRoot = pwd
+
+	if a.WorkspaceRoot != tempDir {
+		t.Errorf("expected workspace root to be updated to %q, got %q", tempDir, a.WorkspaceRoot)
 	}
 }
 

@@ -67,6 +67,10 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", err
 	}
 
+	if hasIgnoredComponent(args.Path) {
+		return "", fmt.Errorf("cannot read: path '%s' is inside a dependency or ignored folder (venv, node_modules, etc.)", args.Path)
+	}
+
 	unlock := lockPath(safePath)
 	defer unlock()
 
@@ -474,7 +478,7 @@ func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 		isDir := info.IsDir()
 		relPath, _ := filepath.Rel(safePath, path)
-		if isIgnored(info.Name(), isDir) || matchesGitignore(relPath, isDir, patterns) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
+		if isIgnored(info.Name(), isDir) || (matchesGitignore(relPath, isDir, patterns) && (isDir || isCompiledOrLockfile(info.Name()))) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
 			if isDir {
 				return filepath.SkipDir
 			}
@@ -650,6 +654,30 @@ func matchesGitignore(path string, isDir bool, patterns []string) bool {
 			if !isDirPattern || isDir {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func isCompiledOrLockfile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || ext == ".o" || ext == ".a" || ext == ".so" || ext == ".dll" || ext == ".dylib" || ext == ".exe" || ext == ".class" || ext == ".jar" || ext == ".zip" || ext == ".tar" || ext == ".gz" {
+		return true
+	}
+	lowName := strings.ToLower(name)
+	if lowName == "package-lock.json" || lowName == "yarn.lock" || lowName == "pnpm-lock.yaml" || lowName == "composer.lock" || lowName == "poetry.lock" || lowName == "cargo.lock" {
+		return true
+	}
+	return false
+}
+
+func hasIgnoredComponent(path string) bool {
+	path = filepath.Clean(path)
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for _, part := range parts {
+		low := strings.ToLower(part)
+		if low == "node_modules" || low == "venv" || low == ".venv" || low == ".git" || low == "__pycache__" {
+			return true
 		}
 	}
 	return false

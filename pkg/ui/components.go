@@ -372,6 +372,12 @@ func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON stri
 			pathVal = c
 		} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
 			pathVal = pat
+		} else if name, ok := argsMap["name"].(string); ok && name != "" {
+			pathVal = name
+		} else if id, ok := argsMap["id"].(string); ok && id != "" {
+			pathVal = id
+		} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
+			pathVal = pr
 		}
 	}
 
@@ -408,6 +414,12 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 					pathVal = c
 				} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
 					pathVal = pat
+				} else if name, ok := argsMap["name"].(string); ok && name != "" {
+					pathVal = name
+				} else if id, ok := argsMap["id"].(string); ok && id != "" {
+					pathVal = id
+				} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
+					pathVal = pr
 				}
 			}
 
@@ -443,6 +455,12 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 				pathVal = c
 			} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
 				pathVal = pat
+			} else if name, ok := argsMap["name"].(string); ok && name != "" {
+				pathVal = name
+			} else if id, ok := argsMap["id"].(string); ok && id != "" {
+				pathVal = id
+			} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
+				pathVal = pr
 			}
 		}
 
@@ -645,13 +663,17 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 
 	if path != "" {
 		relPath := path
-		if toolName != "bash" {
+		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill"
+		if toolName != "bash" && !isNonFilePathTool {
 			wd, err := os.Getwd()
 			if err == nil {
 				if rel, err := filepath.Rel(wd, path); err == nil {
 					relPath = rel
 				}
 			}
+		}
+		if (toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__")) && len(relPath) > 60 {
+			relPath = relPath[:57] + "..."
 		}
 		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
 	}
