@@ -63,7 +63,7 @@ func HandleSlashCommand(
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
 
 		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H\x1b[2J")
+		fmt.Fprint(w, "\x1b[H\x1b[J")
 		if len(a.McpStartErrors) > 0 {
 			RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
 		}
@@ -248,7 +248,7 @@ func HandleSlashCommand(
 			}
 			
 			// Clear screen and redraw everything up to history
-			fmt.Fprint(w, "\x1b[H\x1b[2J")
+			fmt.Fprint(w, "\x1b[H\x1b[J")
 			if len(a.McpStartErrors) > 0 {
 				RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
 			}
@@ -301,7 +301,7 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/rewind":
-		lastStatsText = ""
+		getUI().LastStatsText = ""
 		*messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
 		}
@@ -340,7 +340,7 @@ func HandleSlashCommand(
 					fmt.Fprintf(w, "  - %s [%s] (%d messages) - %s%s\n", s.SessionID, s.Timestamp[:16], s.MsgCount, previewText, activeMarker)
 				}
 			case "new":
-				lastStatsText = ""
+				getUI().LastStatsText = ""
 				*currentSessionID = db.NewUUID()
 				*messages = []db.Message{
 					{Role: "system", Content: a.GetSystemPrompt()},
@@ -373,7 +373,7 @@ func HandleSlashCommand(
 					selected := parts[2]
 					dbHistory, err := db.LoadMessages(selected)
 					if err == nil && len(dbHistory) > 0 {
-						lastStatsText = ""
+						getUI().LastStatsText = ""
 						*currentSessionID = selected
 						*messages = dbHistory
 						fmt.Fprintf(w, "loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
@@ -407,14 +407,14 @@ func HandleSlashCommand(
 				InitStatusBar(os.Stderr)
 				
 				// Clear screen and redraw everything up to history
-				fmt.Fprint(w, "\x1b[H\x1b[2J")
+				fmt.Fprint(w, "\x1b[H\x1b[J")
 				if len(a.McpStartErrors) > 0 {
 					RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
 				}
 				PrintBanner(w, a)
 				
 				if err == nil {
-					lastStatsText = ""
+					getUI().LastStatsText = ""
 					if startNew {
 						*currentSessionID = db.NewUUID()
 						*messages = []db.Message{
@@ -443,7 +443,7 @@ func HandleSlashCommand(
 					fmt.Fprintf(w, "error clearing sessions: %v\n", err)
 					return true, false
 				}
-				lastStatsText = ""
+				getUI().LastStatsText = ""
 				*currentSessionID = db.NewUUID()
 				*messages = []db.Message{
 					{Role: "system", Content: a.GetSystemPrompt()},
@@ -459,39 +459,8 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 		}
 		return true, false
-	case "/mcp":
-		mcpStatuses := a.GetMCPServersStatus()
-		if len(a.Config.MCPServers) == 0 {
-			fmt.Fprintln(w, "no mcp servers configured.")
-			return true, false
-		}
-
-		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("mcp server connections:"))
-		for name, serverCfg := range a.Config.MCPServers {
-			status, active := mcpStatuses[name]
-			if !active {
-				if err, failed := a.McpStartErrors[name]; failed {
-					status = fmt.Sprintf("failed to start (%v)", err)
-				} else {
-					status = fmt.Sprintf("not connected (configured url: %s)", serverCfg.URL)
-				}
-			}
-			fmt.Fprintf(w, "  - %-10s : %s\n", style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(name), status)
-		}
-		fmt.Fprintln(w)
-
-		mcpTools := a.GetMCPTools()
-		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("available mcp tools:"))
-		if len(mcpTools) == 0 {
-			fmt.Fprintln(w, "  (no tools registered)")
-		} else {
-			for _, t := range mcpTools {
-				fmt.Fprintf(w, "  - %s: %s\n",
-					style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(t.Function.Name),
-					t.Function.Description,
-				)
-			}
-		}
+	case "/mcp", "/mcps":
+		HandleMCPCommand(a, parts, messages, *theme, w, rlInput)
 		return true, false
 	case "/agent":
 		if len(parts) < 2 {
@@ -514,7 +483,7 @@ func HandleSlashCommand(
 			InitStatusBar(os.Stderr)
 
 			// Clear screen and redraw everything up to history
-			fmt.Fprint(w, "\x1b[H\x1b[2J")
+			fmt.Fprint(w, "\x1b[H\x1b[J")
 			if len(a.McpStartErrors) > 0 {
 				RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
 			}

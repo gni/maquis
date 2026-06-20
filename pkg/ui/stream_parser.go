@@ -222,63 +222,17 @@ func guessLanguage(line string) string {
 }
 
 func (p *jsonStreamParser) printTitle(w io.Writer, title string) {
-	if p.needsLeadingNewline {
-		fmt.Fprintln(w)
-		p.needsLeadingNewline = false
-	}
-	fmt.Fprint(w, title+"\n")
+	p.titlePrinted = true
 }
 
 func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
-	if p.titlePrinted {
-		return
-	}
 	p.titlePrinted = true
-
-	startCount := getNewlineCount(w)
-	if p.needsLeadingNewline {
-		startCount++
-	}
-	p.toolTitleLineNumbers = append(p.toolTitleLineNumbers, startCount)
-
-	var dotStr string
-	if p.activeToolName == "write" {
-		dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
-	} else {
-		dotStyle := style.NewStyle().Foreground(style.Color("#fbbf24")).Bold(true)
-		dotStr = dotStyle.Render("▸")
-	}
-
-	var title string
-	if p.needsPath() && p.path != "" {
-		title = FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
-	} else {
-		title = FormatToolTitle(dotStr, p.activeToolName, "", theme)
-	}
-	p.printTitle(w, title)
 }
 
 func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme) {
-	if len(p.toolTitleLineNumbers) == 0 {
-		return
-	}
-	titleLine := p.toolTitleLineNumbers[len(p.toolTitleLineNumbers)-1]
-	currentCount := getNewlineCount(w)
-	diff := currentCount - titleLine
-
-	_, height := getTerminalSize()
-	if diff >= 0 && diff < height-1 {
-		var dotStr string
-		if p.activeToolName == "write" {
-			dotStr = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◇")
-		} else {
-			dotStyle := style.NewStyle().Foreground(style.Color("#fbbf24")).Bold(true)
-			dotStr = dotStyle.Render("▸")
-		}
-
-		title := FormatToolTitle(dotStr, p.activeToolName, p.path, theme)
-		fmt.Fprintf(w, "\x1b[%dA\r\x1b[K%s\x1b[%dB\r", diff, title, diff)
-	}
+	// Disabled: Relative downward/upward cursor jumps (\x1b[%dB) corrupt
+	// absolute positioning if the terminal wrapped or scrolled off-screen.
+	// If the LLM sends 'path' late, the title will just remain generically generic.
 }
 
 func getRelativePath(path string) string {

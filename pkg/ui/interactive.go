@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/alecthomas/chroma/v2/quick"
 	"golang.org/x/term"
@@ -24,21 +27,21 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	var output io.Writer = os.Stdout
 	var fd int = int(os.Stdin.Fd())
 
-	stateMu.Lock()
-	hasActiveReader := activeInputReader != nil
+	getUI().StateMu.Lock()
+	hasActiveReader := getUI().ActiveInputReader != nil
 	if hasActiveReader {
-		input = activeInputReader
+		input = getUI().ActiveInputReader
 		output = w
 	}
-	stateMu.Unlock()
+	getUI().StateMu.Unlock()
 
-	stateMu.Lock()
-	inApprovalPrompt = true
-	stateMu.Unlock()
+	getUI().StateMu.Lock()
+	getUI().InApprovalPrompt = true
+	getUI().StateMu.Unlock()
 	defer func() {
-		stateMu.Lock()
-		inApprovalPrompt = false
-		stateMu.Unlock()
+		getUI().StateMu.Lock()
+		getUI().InApprovalPrompt = false
+		getUI().StateMu.Unlock()
 	}()
 
 	if !hasActiveReader {
@@ -73,8 +76,8 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	}
 
 	char := buf[0]
-	// Handle Ctrl+C (3) or Esc (27)
-	if char == 3 || char == 27 {
+	// Handle Ctrl+C (3), Ctrl+D (4), or Esc (27)
+	if char == 3 || char == 4 || char == 27 {
 		if isTerm {
 			fmt.Fprint(output, "\r\x1b[K")
 		} else {
@@ -129,7 +132,13 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	}
 	defer term.Restore(fd, oldState)
 
-	// Save screen state, switch to alternate screen, and hide cursor
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGWINCH)
+	defer signal.Stop(sigChan)
+
+	sr := newSessionReader(rlInput)
+	defer sr.Close()
+
 	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
 	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
 
@@ -140,7 +149,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		return "off"
 	}
 
-	// Create a copy of the config to allow cancellation if desired
 	cloned := *cfg
 
 	type settingItem struct {
@@ -250,7 +258,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 				}
 				nextIdx := (idx + 1) % len(themes)
 				cloned.Theme = themes[nextIdx]
-				theme = GetConfiguredTheme(&cloned) // dynamically apply theme visually in real-time
+				theme = GetConfiguredTheme(&cloned)
 			},
 		},
 		{
@@ -270,7 +278,7 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 				}
 				nextIdx := (idx + 1) % len(styles)
 				cloned.SyntaxTheme = styles[nextIdx]
-				theme = GetConfiguredTheme(&cloned) // dynamically apply theme visually in real-time
+				theme = GetConfiguredTheme(&cloned)
 			},
 		},
 		{
@@ -403,7 +411,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	selectedIdx := 0
 
 	for {
-		// Filter items based on search query
 		var filtered []*settingItem
 		for _, item := range items {
 			valStr := item.value()
@@ -416,7 +423,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			}
 		}
 
-		// Keep selection index in bounds
 		if selectedIdx >= len(filtered) {
 			selectedIdx = len(filtered) - 1
 		}
@@ -424,16 +430,13 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			selectedIdx = 0
 		}
 
-		// Build output buffer
 		var buf strings.Builder
-		buf.WriteString("\x1b[H") // move cursor to top-left
+		buf.WriteString("\x1b[H")
 
-		// Draw Screen Title
 		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		buf.WriteString(titleStyle.Render("settings"))
 		buf.WriteString("\n\n")
 
-		// Draw Search Box
 		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
 		buf.WriteString(searchLabelStyle.Render("  search:  "))
 		
@@ -442,10 +445,9 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		buf.WriteString("\n")
 		
 		underlineStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(underlineStyle.Render("          ────────────────────"))
+		buf.WriteString(underlineStyle.Render("           ────────────────────"))
 		buf.WriteString("\n\n")
 
-		// Draw Settings List
 		if len(filtered) == 0 {
 			dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 			buf.WriteString(dimStyle.Render("  (no matching settings found)"))
@@ -482,7 +484,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 
 		buf.WriteString("\n")
 
-		// Draw Description of selected setting
 		if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
 			descStyle := style.NewStyle().Foreground(theme.Success)
 			buf.WriteString(fmt.Sprintf("  %s\n", descStyle.Render(filtered[selectedIdx].description)))
@@ -492,7 +493,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 
 		buf.WriteString("\n")
 
-		// Draw Color and Syntax Preview
 		borderStyle := style.NewStyle().Foreground(theme.Border)
 		buf.WriteString("  " + borderStyle.Render("──────────────────────────────────────────────────"))
 		buf.WriteString("\n  theme color preview:\n")
@@ -538,83 +538,69 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		buf.WriteString("  " + borderStyle.Render("──────────────────────────────────────────────────"))
 		buf.WriteString("\n\n")
 
-		// Draw Instructions
 		navStyle := style.NewStyle().Foreground(theme.Border)
 		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter edit · esc clear search/exit")))
 		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("esc to cancel")))
 
-		buf.WriteString("\x1b[J") // clear from here to end of screen
+		buf.WriteString("\x1b[J")
 
-		// Write buffer to output, converting \n to \x1b[K\r\n for raw mode
 		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
 		_, _ = rlOutput.Write([]byte(outputStr))
 
-		// Read key input
-		var readBuf [16]byte
-		n, err := rlInput.Read(readBuf[:])
+		readBuf, resized, err := sr.ReadKeyOrResize(sigChan)
 		if err != nil {
 			return nil, err
 		}
+		if resized {
+			continue
+		}
+		n := len(readBuf)
 
 		if n == 1 {
 			char := readBuf[0]
 
-			// Ctrl+C (Interrupt/Cancel) or Ctrl+D (Exit)
 			if char == 3 || char == 4 {
 				return nil, fmt.Errorf("cancelled")
 			}
 
-			// Enter Key (Edit / Toggle)
 			if char == 13 || char == 10 {
 				if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
 					item := filtered[selectedIdx]
 					if item.isBool || len(item.options) > 0 {
-						// instant action for boolean or option cycles
 						if item.onToggle != nil {
 							item.onToggle()
 						}
 					} else if item.onEdit != nil {
-						// prompt editing for text/numeric fields
-						term.Restore(fd, oldState)
-						fmt.Fprint(rlOutput, "\x1b[?25h") // Show cursor
+						fmt.Fprint(rlOutput, "\x1b[?25h")
 
 						fmt.Fprintf(rlOutput, "\r\n\r\n  edit %s (current: %s):\r\n", item.name, item.value())
 						fmt.Fprint(rlOutput, "  enter new value: ")
 
-						reader := bufio.NewReader(rlInput)
-						newVal, err := reader.ReadString('\n')
-						if err == nil {
+						newVal, errRead := sr.ReadLine(rlOutput)
+						if errRead == nil {
 							newVal = strings.TrimSpace(newVal)
 							err = item.onEdit(newVal)
 							if err != nil {
 								fmt.Fprintf(rlOutput, "\r\n  error: %v. press enter to continue...", err)
-								_, _ = reader.ReadString('\n')
+								_, _ = sr.ReadLine(rlOutput)
 							}
 						}
 
-						// Restore raw mode and hide cursor
 						fmt.Fprint(rlOutput, "\x1b[?25l")
-						rawState, err := term.MakeRaw(fd)
-						if err == nil {
-							oldState = rawState
-						}
 					}
 				}
 				continue
 			}
 
-			// Escape Key (Clear Search / Exit)
 			if char == 27 {
 				if searchQuery != "" {
 					searchQuery = ""
 				} else {
-					// cancelled/exited, return the modified configuration clone
 					return &cloned, nil
 				}
 				continue
 			}
 
-			// Backspace Key
 			if char == 127 || char == 8 {
 				if len(searchQuery) > 0 {
 					searchQuery = searchQuery[:len(searchQuery)-1]
@@ -622,21 +608,19 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 				continue
 			}
 
-			// Standard printable characters
 			if char >= 32 && char <= 126 {
 				searchQuery += string(char)
 				continue
 			}
 		}
 
-		// Parse multi-byte key escape sequences (like arrows)
 		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
 			switch readBuf[2] {
-			case 'A': // Arrow Up
+			case 'A':
 				if len(filtered) > 0 {
 					selectedIdx = (selectedIdx - 1 + len(filtered)) % len(filtered)
 				}
-			case 'B': // Arrow Down
+			case 'B':
 				if len(filtered) > 0 {
 					selectedIdx = (selectedIdx + 1) % len(filtered)
 				}
@@ -689,7 +673,7 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 		}
 
 		fmt.Fprintln(rlOutput, "\n==================================================")
-		fmt.Fprintln(rlOutput, "               maquis sessions                 ")
+		fmt.Fprintln(rlOutput, "                maquis sessions                  ")
 		fmt.Fprintln(rlOutput, "==================================================")
 		if len(sessions) == 0 {
 			fmt.Fprintln(rlOutput, "no past sessions found.")
@@ -753,7 +737,6 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 	}
 }
 
-// RunInteractiveAgentManager opens an interactive terminal UI for managing multi-agents
 func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlInput io.Reader, rlOutput io.Writer) error {
 	var fd int
 	if f, ok := rlInput.(*os.File); ok {
@@ -772,18 +755,22 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 	}
 	defer term.Restore(fd, initialState)
 
-	// Save screen state, switch to alternate screen, and hide cursor
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGWINCH)
+	defer signal.Stop(sigChan)
+
+	sr := newSessionReader(rlInput)
+	defer sr.Close()
+
 	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
 	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
 
 	selectedIdx := 0
 
 	for {
-		// Fetch current list of agents
 		agentsList := mam.ListAgents()
 		activeName := mam.ActiveAgentName()
 
-		// Build combined list of agents
 		list := append([]string{"base"}, agentsList...)
 
 		if selectedIdx >= len(list) {
@@ -793,11 +780,9 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 			selectedIdx = 0
 		}
 
-		// Build output buffer
 		var buf strings.Builder
-		buf.WriteString("\x1b[H") // move cursor to top-left
+		buf.WriteString("\x1b[H")
 
-		// Draw Screen Title
 		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		buf.WriteString(titleStyle.Render("agent swarm manager"))
 		buf.WriteString("\n\n")
@@ -807,7 +792,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 		valStyle := style.NewStyle().Foreground(theme.Text)
 		highlightStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 
-		// 1. Prepare Left Column (Active Agents List)
 		var leftLines []string
 		leftLines = append(leftLines, headerStyle.Render("  active swarm nodes:"))
 		leftLines = append(leftLines, style.NewStyle().Foreground(theme.Border).Render("  ───────────────────────────────────"))
@@ -828,7 +812,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 			leftLines = append(leftLines, fmt.Sprintf("   %s%s", marker, nameStr))
 		}
 
-		// 2. Prepare Right Column (Selected Node Info)
 		selectedName := list[selectedIdx]
 		var sysPrompt string
 		var parentStr string
@@ -881,7 +864,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 		rightLines = append(rightLines, fmt.Sprintf("  %s %s", keyStyle.Render("Focus:"), focusVal))
 		rightLines = append(rightLines, fmt.Sprintf("  %s", keyStyle.Render("Instructions / Goal:")))
 
-		// Wrap and truncate system prompt
 		wrappedLines := wrapText(sysPrompt, 45)
 		for i := 0; i < 8 && i < len(wrappedLines); i++ {
 			rightLines = append(rightLines, "  "+valStyle.Render(wrappedLines[i]))
@@ -890,7 +872,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 			rightLines = append(rightLines, "  "+style.NewStyle().Foreground(theme.Border).Italic(true).Render("... (truncated)"))
 		}
 
-		// 3. Render Columns Side-by-Side
 		maxLines := len(leftLines)
 		if len(rightLines) > maxLines {
 			maxLines = len(rightLines)
@@ -919,7 +900,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 				buf.WriteString(fmt.Sprintf("%s%s │ %s\n", leftPart, leftPad, rightPart))
 			}
 		} else {
-			// Stacked layout for narrow terminals
 			for _, line := range leftLines {
 				buf.WriteString(line + "\n")
 			}
@@ -929,7 +909,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 			}
 		}
 
-		// Draw Controls Bar
 		navStyle := style.NewStyle().Foreground(theme.Border)
 		keyStyleBar := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		buf.WriteString("\n")
@@ -939,82 +918,74 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 		buf.WriteString(fmt.Sprintf("%s Delete Agent   ", keyStyleBar.Render("[D]")))
 		buf.WriteString(fmt.Sprintf("%s Exit Swarm Manager\n", keyStyleBar.Render("[Esc]")))
 
-		buf.WriteString("\x1b[J") // clear to end
+		buf.WriteString("\x1b[J")
 
 		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
 		_, _ = rlOutput.Write([]byte(outputStr))
 
-		// Read key input
-		var readBuf [16]byte
-		n, errReader := rlInput.Read(readBuf[:])
+		readBuf, resized, errReader := sr.ReadKeyOrResize(sigChan)
 		if errReader != nil {
 			return errReader
 		}
+		if resized {
+			continue
+		}
+		n := len(readBuf)
 
 		if n == 1 {
 			char := readBuf[0]
 
-			// Escape / Ctrl+C / Ctrl+D
 			if char == 3 || char == 27 || char == 4 {
 				return nil
 			}
 
-			// Enter
 			if char == 13 || char == 10 {
 				mam.JoinAgent(selectedName)
-				term.Restore(fd, initialState)
-				fmt.Fprint(rlOutput, "\x1b[?25h") // Show cursor
-				fmt.Fprintf(rlOutput, "\r\nSwitched active chat focus to agent '%s'.\r\nPress enter to continue...", selectedName)
-				_, _ = bufio.NewReader(rlInput).ReadString('\n')
+				fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
+				fmt.Fprintf(rlOutput, "Switched active chat focus to agent '%s'.\r\nPress enter to continue...", selectedName)
+				_, _ = sr.ReadLine(rlOutput)
 				return nil
 			}
 
-			// Create New (C/c)
 			if char == 'c' || char == 'C' {
-				term.Restore(fd, initialState)
-				fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+				fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 
 				fmt.Fprint(rlOutput, "=== Create New Swarm Agent ===\r\n\r\n")
-				
-				reader := bufio.NewReader(rlInput)
-				
+
 				fmt.Fprint(rlOutput, "Enter unique agent name (e.g. devops, tester): ")
-				agentName, errInput := reader.ReadString('\n')
+				agentName, errInput := sr.ReadLine(rlOutput)
 				if errInput == nil {
 					agentName = strings.TrimSpace(agentName)
 					if agentName == "" {
 						fmt.Fprint(rlOutput, "\r\nError: Agent name cannot be empty. Press enter to continue...")
-						_, _ = reader.ReadString('\n')
+						_, _ = sr.ReadLine(rlOutput)
 					} else {
 						fmt.Fprint(rlOutput, "Enter system instructions / goals: ")
-						sysPrompt, errInput2 := reader.ReadString('\n')
+						sysPrompt, errInput2 := sr.ReadLine(rlOutput)
 						if errInput2 == nil {
 							sysPrompt = strings.TrimSpace(sysPrompt)
 							if sysPrompt == "" {
 								fmt.Fprint(rlOutput, "\r\nError: Instructions cannot be empty. Press enter to continue...")
-								_, _ = reader.ReadString('\n')
+								_, _ = sr.ReadLine(rlOutput)
 							} else {
 								fmt.Fprint(rlOutput, "\x1b[?25l")
-								_, _ = term.MakeRaw(fd)
 
-								// Parent Agent Select
 								parentOptions := []string{"None (Base)"}
 								for _, name := range agentsList {
 									parentOptions = append(parentOptions, name)
 								}
-								parentIdx, errSelect := runInteractiveSelect(rlInput, rlOutput, "Select Parent Agent (default: None):", parentOptions, theme)
+								parentIdx, errSelect := runInteractiveSelect(sr, sigChan, rlOutput, "Select Parent Agent (default: None):", parentOptions, theme)
 								if errSelect == nil {
 									parentName := ""
 									if parentIdx > 0 {
 										parentName = parentOptions[parentIdx]
 									}
 
-									// Dedicated Skill Select
 									skillOptions := []string{"Generic (All Active Skills)"}
 									for _, s := range mam.BaseAgent.ActiveSkills {
 										skillOptions = append(skillOptions, s.Name)
 									}
-									skillIdx, errSelect2 := runInteractiveSelect(rlInput, rlOutput, "Select Dedicated Reference Skill:", skillOptions, theme)
+									skillIdx, errSelect2 := runInteractiveSelect(sr, sigChan, rlOutput, "Select Dedicated Reference Skill:", skillOptions, theme)
 									if errSelect2 == nil {
 										skillName := ""
 										if skillIdx > 0 {
@@ -1023,14 +994,13 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 
 										errSpawn := mam.SpawnAgent(agentName, sysPrompt, parentName, skillName)
 
-										term.Restore(fd, initialState)
-										fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+										fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 										if errSpawn != nil {
 											fmt.Fprintf(rlOutput, "Error spawning agent: %v\r\n\r\nPress enter to continue...", errSpawn)
 										} else {
 											fmt.Fprintf(rlOutput, "Successfully spawned agent '%s'!\r\n\r\nPress enter to continue...", agentName)
 										}
-										_, _ = reader.ReadString('\n')
+										_, _ = sr.ReadLine(rlOutput)
 									}
 								}
 							}
@@ -1039,26 +1009,20 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 				}
 
 				fmt.Fprint(rlOutput, "\x1b[?25l")
-				_, _ = term.MakeRaw(fd)
 				continue
 			}
 
-			// Delete (D/d)
 			if char == 'd' || char == 'D' {
 				if selectedName == "base" {
-					term.Restore(fd, initialState)
-					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 					fmt.Fprint(rlOutput, "Error: Cannot delete default base agent.\r\n\r\nPress enter to continue...")
-					_, _ = bufio.NewReader(rlInput).ReadString('\n')
+					_, _ = sr.ReadLine(rlOutput)
 					fmt.Fprint(rlOutput, "\x1b[?25l")
-					_, _ = term.MakeRaw(fd)
 				} else {
-					term.Restore(fd, initialState)
-					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J") // Show cursor, clear screen
+					fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 					fmt.Fprintf(rlOutput, "Are you sure you want to delete agent '%s'? [y/N]: ", selectedName)
-					
-					reader := bufio.NewReader(rlInput)
-					confirm, errInput := reader.ReadString('\n')
+
+					confirm, errInput := sr.ReadLine(rlOutput)
 					if errInput == nil && (strings.HasPrefix(strings.ToLower(strings.TrimSpace(confirm)), "y")) {
 						errKill := mam.KillAgent(selectedName)
 						fmt.Fprint(rlOutput, "\x1b[H\x1b[2J")
@@ -1067,13 +1031,11 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 						} else {
 							fmt.Fprintf(rlOutput, "Agent '%s' terminated and deleted.\r\n\r\nPress enter to continue...", selectedName)
 						}
-						_, _ = reader.ReadString('\n')
+						_, _ = sr.ReadLine(rlOutput)
 					}
 
 					fmt.Fprint(rlOutput, "\x1b[?25l")
-					_, _ = term.MakeRaw(fd)
 
-					// Adjust selection index
 					if selectedIdx >= len(list)-1 {
 						selectedIdx = len(list) - 2
 						if selectedIdx < 0 {
@@ -1085,26 +1047,23 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 			}
 		}
 
-		// Arrow keys navigation
 		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
 			switch readBuf[2] {
-			case 'A': // Arrow Up
+			case 'A':
 				selectedIdx = (selectedIdx - 1 + len(list)) % len(list)
-			case 'B': // Arrow Down
+			case 'B':
 				selectedIdx = (selectedIdx + 1) % len(list)
 			}
 		}
 	}
 }
 
-
-// runInteractiveSelect shows a simple interactive list selection screen
-func runInteractiveSelect(rlInput io.Reader, rlOutput io.Writer, title string, items []string, theme UITheme) (int, error) {
+func runInteractiveSelect(sr *sessionReader, sigChan chan os.Signal, rlOutput io.Writer, title string, items []string, theme UITheme) (int, error) {
 	selectedIdx := 0
 
 	for {
 		var buf strings.Builder
-		buf.WriteString("\x1b[H") // move cursor to top-left
+		buf.WriteString("\x1b[H")
 
 		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		buf.WriteString(titleStyle.Render(title))
@@ -1125,16 +1084,19 @@ func runInteractiveSelect(rlInput io.Reader, rlOutput io.Writer, title string, i
 		navStyle := style.NewStyle().Foreground(theme.Border)
 		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter select · esc cancel")))
 
-		buf.WriteString("\x1b[J") // clear to end
+		buf.WriteString("\x1b[J")
 
 		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
 		_, _ = rlOutput.Write([]byte(outputStr))
 
-		var readBuf [16]byte
-		n, err := rlInput.Read(readBuf[:])
+		readBuf, resized, err := sr.ReadKeyOrResize(sigChan)
 		if err != nil {
 			return -1, err
 		}
+		if resized {
+			continue
+		}
+		n := len(readBuf)
 
 		if n == 1 {
 			char := readBuf[0]
@@ -1148,10 +1110,230 @@ func runInteractiveSelect(rlInput io.Reader, rlOutput io.Writer, title string, i
 
 		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
 			switch readBuf[2] {
-			case 'A': // Arrow Up
+			case 'A':
 				selectedIdx = (selectedIdx - 1 + len(items)) % len(items)
-			case 'B': // Arrow Down
+			case 'B':
 				selectedIdx = (selectedIdx + 1) % len(items)
+			}
+		}
+	}
+}
+
+func readInputRaw(rlInput io.Reader, rlOutput io.Writer) (string, error) {
+	fmt.Fprint(rlOutput, "\x1b[?25h")
+	defer fmt.Fprint(rlOutput, "\x1b[?25l")
+
+	var sb strings.Builder
+	var buf [1024]byte
+	for {
+		n, err := rlInput.Read(buf[:])
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			continue
+		}
+
+		for i := 0; i < n; i++ {
+			char := buf[i]
+
+			if char == 13 || char == 10 {
+				fmt.Fprint(rlOutput, "\r\n")
+				return sb.String(), nil
+			}
+
+			if char == 127 || char == 8 {
+				str := sb.String()
+				if len(str) > 0 {
+					sb.Reset()
+					sb.WriteString(str[:len(str)-1])
+					fmt.Fprint(rlOutput, "\b \b")
+				}
+				continue
+			}
+
+			if char == 3 || char == 4 {
+				return "", fmt.Errorf("cancelled")
+			}
+
+			if char >= 32 && char <= 126 {
+				sb.WriteByte(char)
+				fmt.Fprint(rlOutput, string(char))
+			}
+		}
+	}
+}
+
+type readResult struct {
+	data []byte
+	err  error
+}
+
+type sessionReader struct {
+	chanInput chan byte
+	inputChan chan readResult
+	doneChan  chan struct{}
+}
+
+func newSessionReader(rlInput io.Reader) *sessionReader {
+	sr := &sessionReader{
+		doneChan:  make(chan struct{}),
+	}
+	
+	if cr, ok := rlInput.(interface{ GetInputChan() chan byte }); ok {
+		sr.chanInput = cr.GetInputChan()
+		return sr
+	}
+
+	sr.inputChan = make(chan readResult, 100)
+	go func() {
+		var readBuf [1024]byte
+		for {
+			n, err := rlInput.Read(readBuf[:])
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, readBuf[:n])
+				select {
+				case <-sr.doneChan:
+					return
+				case sr.inputChan <- readResult{data: data, err: err}:
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return sr
+}
+
+func (sr *sessionReader) Close() {
+	if sr.doneChan != nil {
+		select {
+		case <-sr.doneChan:
+		default:
+			close(sr.doneChan)
+		}
+	}
+}
+
+func (sr *sessionReader) ReadKeyOrResize(sigChan chan os.Signal) ([]byte, bool, error) {
+	if sr.chanInput != nil {
+		select {
+		case <-sigChan:
+			return nil, true, nil
+		case b, ok := <-sr.chanInput:
+			if !ok {
+				return nil, false, io.EOF
+			}
+			buf := []byte{b}
+			if b == 27 { // Escape character, wait for arrow keys
+				for {
+					select {
+					case next, ok := <-sr.chanInput:
+						if ok {
+							buf = append(buf, next)
+						} else {
+							return buf, false, nil
+						}
+					case <-time.After(15 * time.Millisecond):
+						return buf, false, nil
+					}
+				}
+			}
+			// Drain other buffered bytes
+			for {
+				select {
+				case next, ok := <-sr.chanInput:
+					if ok {
+						buf = append(buf, next)
+					} else {
+						return buf, false, nil
+					}
+				default:
+					return buf, false, nil
+				}
+			}
+		}
+	}
+
+	select {
+	case <-sigChan:
+		return nil, true, nil
+	case res, ok := <-sr.inputChan:
+		if !ok {
+			return nil, false, io.EOF
+		}
+		return res.data, false, res.err
+	}
+}
+
+func (sr *sessionReader) ReadLine(rlOutput io.Writer) (string, error) {
+	var line strings.Builder
+	if sr.chanInput != nil {
+		for {
+			select {
+			case b, ok := <-sr.chanInput:
+				if !ok {
+					return "", fmt.Errorf("read error")
+				}
+				if b == '\r' || b == '\n' {
+					fmt.Fprint(rlOutput, "\r\n")
+					return line.String(), nil
+				}
+				if b == 127 || b == 8 {
+					if line.Len() > 0 {
+						s := line.String()
+						runes := []rune(s)
+						if len(runes) > 0 {
+							truncated := string(runes[:len(runes)-1])
+							line.Reset()
+							line.WriteString(truncated)
+							fmt.Fprint(rlOutput, "\b\x1b[K")
+						}
+					}
+					continue
+				}
+				if b == 3 || b == 4 {
+					return "", fmt.Errorf("cancelled")
+				}
+				if b >= 32 {
+					line.WriteByte(b)
+					fmt.Fprint(rlOutput, string(b))
+				}
+			}
+		}
+	}
+
+	for {
+		res, ok := <-sr.inputChan
+		if !ok || res.err != nil {
+			return "", fmt.Errorf("read error")
+		}
+		for _, b := range res.data {
+			if b == '\r' || b == '\n' {
+				fmt.Fprint(rlOutput, "\r\n")
+				return line.String(), nil
+			}
+			if b == 127 || b == 8 {
+				if line.Len() > 0 {
+					s := line.String()
+					runes := []rune(s)
+					if len(runes) > 0 {
+						truncated := string(runes[:len(runes)-1])
+						line.Reset()
+						line.WriteString(truncated)
+						fmt.Fprint(rlOutput, "\b\x1b[K")
+					}
+				}
+				continue
+			}
+			if b == 3 || b == 4 {
+				return "", fmt.Errorf("cancelled")
+			}
+			if b >= 32 {
+				line.WriteByte(b)
+				fmt.Fprint(rlOutput, string(b))
 			}
 		}
 	}

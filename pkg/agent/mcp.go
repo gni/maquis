@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +32,7 @@ type mcpClient struct {
 	nextID      int64
 	initialized bool
 	client      *http.Client
+	cancel      context.CancelFunc
 }
 
 type MCPTool struct {
@@ -57,14 +60,25 @@ func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error
 	a.McpClientsMu.Unlock()
 
 	for name, cfg := range configs {
+		mcpHTTPClient := a.HttpClient
+		if mcpHTTPClient == nil {
+			mcpHTTPClient = &http.Client{
+				Timeout: 30 * time.Second,
+			}
+		} else {
+			cCopy := *a.HttpClient
+			cCopy.Timeout = 30 * time.Second
+			mcpHTTPClient = &cCopy
+		}
+		jar, _ := cookiejar.New(nil)
+		mcpHTTPClient.Jar = jar
+
 		client := &mcpClient{
 			name:     name,
 			config:   cfg,
 			requests: make(map[int64]chan string),
 			nextID:   1,
-			client: &http.Client{
-				Timeout: 30 * time.Second,
-			},
+			client:   mcpHTTPClient,
 		}
 
 		err := client.start()
@@ -149,21 +163,29 @@ func (c *mcpClient) start() error {
 }
 
 func (c *mcpClient) startSSE() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
 
 	req, err := http.NewRequestWithContext(ctx, "GET", c.config.URL, nil)
 	if err != nil {
+		cancel()
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range c.config.Headers {
+		req.Header.Set(k, v)
+	}
 
-	resp, err := c.client.Do(req)
+	sseClient := *c.client
+	sseClient.Timeout = 0
+	resp, err := sseClient.Do(req)
 	if err != nil {
+		cancel()
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		cancel()
 		return fmt.Errorf("HTTP error %d", resp.StatusCode)
 	}
 
@@ -188,15 +210,22 @@ func (c *mcpClient) startSSE() error {
 							postURL = parsedBase.ResolveReference(parsedRel).String()
 						}
 					}
+					fmt.Fprintf(os.Stderr, "[MCP] Resolved POST endpoint: %s\n", postURL)
 					select {
 					case endpointChan <- postURL:
 					default:
 					}
 				} else {
+					fmt.Fprintf(os.Stderr, "[MCP Rx] %s\n", data)
 					c.handleMessage(data)
 				}
 				lastEvent = ""
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "SSE connection error for '%s': %v\n", c.name, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "SSE connection closed for '%s'\n", c.name)
 		}
 	}()
 
@@ -218,6 +247,9 @@ func (c *mcpClient) startSSE() error {
 }
 
 func (c *mcpClient) close() {
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.sseBody != nil {
 		c.sseBody.Close()
 	}
@@ -225,7 +257,7 @@ func (c *mcpClient) close() {
 
 func (c *mcpClient) handleMessage(data string) {
 	var msg struct {
-		ID     *int64           `json:"id"`
+		ID     json.RawMessage  `json:"id"`
 		Method string           `json:"method"`
 		Result *json.RawMessage `json:"result"`
 		Error  *json.RawMessage `json:"error"`
@@ -235,11 +267,30 @@ func (c *mcpClient) handleMessage(data string) {
 		return
 	}
 
-	if msg.ID != nil {
+	var parsedID int64
+	hasID := false
+
+	if len(msg.ID) > 0 {
+		var idInt int64
+		if err := json.Unmarshal(msg.ID, &idInt); err == nil {
+			parsedID = idInt
+			hasID = true
+		} else {
+			var idStr string
+			if err := json.Unmarshal(msg.ID, &idStr); err == nil {
+				if val, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+					parsedID = val
+					hasID = true
+				}
+			}
+		}
+	}
+
+	if hasID {
 		c.requestMu.Lock()
-		ch, exists := c.requests[*msg.ID]
+		ch, exists := c.requests[parsedID]
 		if exists {
-			delete(c.requests, *msg.ID)
+			delete(c.requests, parsedID)
 			select {
 			case ch <- data:
 			default:
@@ -273,6 +324,7 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 		c.requestMu.Unlock()
 		return "", err
 	}
+	fmt.Fprintf(os.Stderr, "[MCP Tx] %s\n", string(data))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -285,6 +337,9 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range c.config.Headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -354,11 +409,20 @@ func (c *mcpClient) handshake() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	fmt.Fprintf(os.Stderr, "[MCP Tx Notification] %s\n", string(data))
 	req, err := http.NewRequestWithContext(ctx, "POST", c.postURL, bytes.NewBuffer(data))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
+		for k, v := range c.config.Headers {
+			req.Header.Set(k, v)
+		}
 		if respDrop, errDrop := c.client.Do(req); errDrop == nil {
+			if respDrop.StatusCode != http.StatusOK && respDrop.StatusCode != http.StatusAccepted && respDrop.StatusCode != http.StatusNoContent {
+				fmt.Fprintf(os.Stderr, "[MCP] notifications/initialized returned status %d\n", respDrop.StatusCode)
+			}
 			respDrop.Body.Close()
+		} else {
+			fmt.Fprintf(os.Stderr, "[MCP] failed to send notifications/initialized: %v\n", errDrop)
 		}
 	}
 

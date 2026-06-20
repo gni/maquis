@@ -74,10 +74,16 @@ type Style struct {
 	marginRight   int
 	marginTop     int
 	marginBottom  int
+	maxWidth      int
 }
 
 func NewStyle() Style {
 	return Style{}
+}
+
+func (s Style) MaxWidth(v int) Style {
+	s.maxWidth = v
+	return s
 }
 
 func (s Style) Foreground(c color.Color) Style {
@@ -181,6 +187,26 @@ func (s Style) BorderForeground(c color.Color) Style {
 
 func (s Style) Render(args ...string) string {
 	str := strings.Join(args, " ")
+
+	if s.maxWidth > 0 {
+		contentMaxWidth := s.maxWidth
+		if s.borderType != noBorder {
+			contentMaxWidth -= 2
+		}
+		contentMaxWidth -= s.paddingLeft + s.paddingRight
+		contentMaxWidth -= s.marginLeft + s.marginRight
+		if contentMaxWidth < 10 {
+			contentMaxWidth = 10
+		}
+
+		var wrappedLines []string
+		lines := strings.Split(str, "\n")
+		for _, line := range lines {
+			wrappedLines = append(wrappedLines, wrapSingleAnsiLine(line, contentMaxWidth)...)
+		}
+		str = strings.Join(wrappedLines, "\n")
+	}
+
 	lines := strings.Split(str, "\n")
 
 	ansiStart := ""
@@ -352,4 +378,116 @@ func stripAnsi(str string) string {
 		sb.WriteByte(str[i])
 	}
 	return sb.String()
+}
+
+func wrapSingleAnsiLine(line string, limit int) []string {
+	if limit <= 0 {
+		return []string{line}
+	}
+	if line == "" {
+		return []string{""}
+	}
+
+	var lines []string
+	var curLine strings.Builder
+	curLineVisible := 0
+
+	var curWord strings.Builder
+	curWordVisible := 0
+
+	var spaces strings.Builder
+
+	flushWord := func() {
+		wordLen := curWordVisible
+		spacesLen := spaces.Len()
+
+		if wordLen == 0 {
+			if spacesLen > 0 {
+				if curLineVisible+spacesLen <= limit {
+					curLine.WriteString(spaces.String())
+					curLineVisible += spacesLen
+				} else {
+					if curLineVisible == 0 {
+						curLine.WriteString(spaces.String())
+						curLineVisible += spacesLen
+					} else {
+						lines = append(lines, curLine.String())
+						curLine.Reset()
+						curLine.WriteString(spaces.String())
+						curLineVisible = spacesLen
+					}
+				}
+				spaces.Reset()
+			}
+			return
+		}
+
+		if curLineVisible == 0 {
+			if spacesLen > 0 {
+				curLine.WriteString(spaces.String())
+				curLineVisible += spacesLen
+				spaces.Reset()
+			}
+			curLine.WriteString(curWord.String())
+			curLineVisible += wordLen
+		} else {
+			needed := spacesLen + wordLen
+			if curLineVisible+needed <= limit {
+				curLine.WriteString(spaces.String())
+				curLine.WriteString(curWord.String())
+				curLineVisible += needed
+				spaces.Reset()
+			} else {
+				lines = append(lines, curLine.String())
+				curLine.Reset()
+				curLine.WriteString(curWord.String())
+				curLineVisible = wordLen
+				spaces.Reset()
+			}
+		}
+		curWord.Reset()
+		curWordVisible = 0
+	}
+
+	i := 0
+	for i < len(line) {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if r == '\x1b' {
+			escStart := i
+			i += size
+			for i < len(line) {
+				r2, size2 := utf8.DecodeRuneInString(line[i:])
+				i += size2
+				if r2 == 'm' {
+					break
+				}
+			}
+			curWord.WriteString(line[escStart:i])
+			continue
+		}
+
+		if r == ' ' {
+			if curWordVisible > 0 {
+				flushWord()
+			}
+			spaces.WriteRune(' ')
+			i += size
+			continue
+		}
+
+		if curWordVisible >= limit {
+			flushWord()
+		}
+
+		curWord.WriteRune(r)
+		curWordVisible++
+		i += size
+	}
+
+	flushWord()
+	if curLineVisible > 0 || len(lines) == 0 {
+		lines = append(lines, curLine.String())
+	}
+
+	return lines
 }

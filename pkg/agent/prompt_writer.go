@@ -64,6 +64,18 @@ func (p *PromptPreservingWriter) SetPromptCol(col int) {
 	TerminalMu.Unlock()
 }
 
+func (p *PromptPreservingWriter) ForceReposition() {
+	TerminalMu.Lock()
+	p.cursorAtPrompt = true
+	scrollBottom := p.height - 5
+	if scrollBottom < 1 {
+		scrollBottom = 1
+	}
+	p.printLine = scrollBottom
+	p.printCol = 1
+	TerminalMu.Unlock()
+}
+
 func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil

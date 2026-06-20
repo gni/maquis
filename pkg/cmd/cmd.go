@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,13 +20,13 @@ import (
 )
 
 var (
-	configPath      string
-	endpoint        string
-	modelName       string
-	autoYes         bool
-	showThinking    bool
-	showTokens      bool
-	allowedToolsStr string
+	configPath          string
+	endpoint            string
+	modelName           string
+	autoYes             bool
+	showThinking        bool
+	showTokens          bool
+	allowedToolsStr     string
 	sessionIDFlag       string
 	maxStepsFlag        int
 	resumeSession       bool
@@ -96,12 +97,19 @@ var rootCmd = &cobra.Command{
 			tlsConfig = nil
 		}
 
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
 		transport := &http.Transport{
+			DialContext:           dialer.DialContext,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		}
+		
 		if tlsConfig != nil {
 			transport.TLSClientConfig = tlsConfig
 		}
@@ -113,7 +121,7 @@ var rootCmd = &cobra.Command{
 
 		// Instantiate Agent context
 		a := agent.NewAgent(cfg, configPath, httpClient)
-		a.UI = &ui.AgentUIImpl{}
+		a.UI = ui.NewAgentUI(cfg, theme)
 
 		// Load reference skills
 		a.ActiveSkills, err = agent.LoadSkills(cfg.SkillsDir)
@@ -296,8 +304,6 @@ var sessionClearCmd = &cobra.Command{
 		fmt.Println("All saved conversation sessions cleared from disk.")
 	},
 }
-
-
 
 func Execute() error {
 	return rootCmd.Execute()

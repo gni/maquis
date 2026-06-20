@@ -215,8 +215,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
 
-
-
 		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
 		tickerDone := make(chan struct{})
@@ -309,8 +307,15 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		if err := <-streamErrChan; err != nil {
 			if ctx.Err() == nil {
-				errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-				fmt.Fprintf(ncw, "\n%s %v\n", errStyle.Render("Error during generation:"), err)
+				if isNonInteractive {
+					errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
+					fmt.Fprintf(ncw, "\n%s %v\n", errStyle.Render("Error during generation:"), err)
+				} else {
+					*messages = append(*messages, db.Message{
+						Role:    "error",
+						Content: err.Error(),
+					})
+				}
 			}
 			return
 		}
@@ -330,7 +335,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
-		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold * float64(a.Config.ContextWindowLimit)) {
+		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
 			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
 		}
 
@@ -404,25 +409,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			tc     db.ToolCall
 		}
 
-		collapse := a.Config.CollapseResults
 		firstTitleLine := sr.GetToolTitleLineNumber(0)
 		wasStreamed := firstTitleLine != -1
-
-		if wasStreamed && !collapse {
-			linesToClear := ncw.count - firstTitleLine
-			if linesToClear > 0 {
-				var clearCmd strings.Builder
-				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-				for i := 0; i < linesToClear; i++ {
-					clearCmd.WriteString("\x1b[K\x1b[1B")
-				}
-				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-				fmt.Fprint(ncw, clearCmd.String())
-				ncw.count = firstTitleLine
-				ncw.col = 0
-			}
-			wasStreamed = false
-		}
 
 		var startLine int
 		if wasStreamed {
@@ -720,4 +708,3 @@ func printPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string
 	dashes := strings.Repeat("─", dashesCount)
 	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
 }
-

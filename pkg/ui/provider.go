@@ -453,7 +453,7 @@ func RunInteractiveProviderConfig(
 		buf.WriteString("\n")
 
 		underlineStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(underlineStyle.Render("          ────────────────────"))
+		buf.WriteString(underlineStyle.Render("           ────────────────────"))
 		buf.WriteString("\n\n")
 
 		if len(filtered) == 0 {
@@ -582,51 +582,6 @@ func RunInteractiveProviderConfig(
 				if len(filtered) > 0 {
 					selectedIdx = (selectedIdx + 1) % len(filtered)
 				}
-			}
-		}
-	}
-}
-
-func readInputRaw(rlInput io.Reader, rlOutput io.Writer) (string, error) {
-	fmt.Fprint(rlOutput, "\x1b[?25h")
-	defer fmt.Fprint(rlOutput, "\x1b[?25l")
-
-	var sb strings.Builder
-	var buf [1024]byte
-	for {
-		n, err := rlInput.Read(buf[:])
-		if err != nil {
-			return "", err
-		}
-		if n == 0 {
-			continue
-		}
-
-		for i := 0; i < n; i++ {
-			char := buf[i]
-
-			if char == 13 || char == 10 {
-				fmt.Fprint(rlOutput, "\r\n")
-				return sb.String(), nil
-			}
-
-			if char == 127 || char == 8 {
-				str := sb.String()
-				if len(str) > 0 {
-					sb.Reset()
-					sb.WriteString(str[:len(str)-1])
-					fmt.Fprint(rlOutput, "\b \b")
-				}
-				continue
-			}
-
-			if char == 3 || char == 4 {
-				return "", fmt.Errorf("cancelled")
-			}
-
-			if char >= 32 && char <= 126 {
-				sb.WriteByte(char)
-				fmt.Fprint(rlOutput, string(char))
 			}
 		}
 	}

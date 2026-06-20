@@ -2,7 +2,6 @@ package db
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -18,7 +17,7 @@ var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 func validateSessionID(sessionID string) error {
 	if !sessionIDRegex.MatchString(sessionID) {
-		return fmt.Errorf("security violation: invalid session ID format")
+		return fmt.Errorf("invalid session ID format")
 	}
 	return nil
 }
@@ -138,9 +137,10 @@ func LoadMessages(sessionID string) ([]Message, error) {
 		if len(line) == 0 {
 			continue
 		}
+
 		var record JSONLRecord
 		if err := json.Unmarshal(line, &record); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+			continue
 		}
 
 		if record.Message.Role == "user" && record.Message.Content == "" {
@@ -401,13 +401,9 @@ func GetUserHistory() ([]string, error) {
 			scanner := bufio.NewScanner(f)
 			if scanner.Scan() {
 				lineBytes := scanner.Bytes()
-				if len(lineBytes) >= 33 && bytes.HasPrefix(lineBytes, []byte(`{"timestamp":"`)) {
-					startTime = string(lineBytes[14:33])
-				} else {
-					var record JSONLRecord
-					if json.Unmarshal(lineBytes, &record) == nil {
-						startTime = record.Timestamp
-					}
+				var record JSONLRecord
+				if json.Unmarshal(lineBytes, &record) == nil {
+					startTime = record.Timestamp
 				}
 			}
 			f.Close()
@@ -444,10 +440,6 @@ func GetUserHistory() ([]string, error) {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			lineBytes := scanner.Bytes()
-			if !bytes.Contains(lineBytes, []byte(`"role":"user"`)) {
-				continue
-			}
-
 			var record JSONLRecord
 			if err := json.Unmarshal(lineBytes, &record); err != nil {
 				continue

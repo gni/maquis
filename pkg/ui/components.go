@@ -159,11 +159,13 @@ func RenderHelp(w io.Writer, theme UITheme) {
 }
 
 func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
+	termW, _ := getTerminalSize()
 	borderStyle := style.NewStyle().
 		Border(style.RoundedBorder()).
 		BorderForeground(theme.Border).
 		Padding(1, 2).
-		Margin(0, 0)
+		Margin(0, 0).
+		MaxWidth(termW)
 
 	titleStyle := style.NewStyle().
 		Foreground(theme.Primary).
@@ -237,11 +239,9 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 
 	var sb strings.Builder
 
-	// We separate "simple" arguments (e.g., path, limit) from "block" arguments (e.g., content, command, edits)
 	var simpleLines []string
 	var blockLines []string
 
-	// Order keys: put 'path' first if it exists
 	keys := make([]string, 0, len(m))
 	if _, ok := m["path"]; ok {
 		keys = append(keys, "path")
@@ -280,12 +280,10 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 				highlightedStr = strVal
 			}
 
-			// Pretty format multi-line text
 			var blockSb strings.Builder
 			blockSb.WriteString(fmt.Sprintf("%s:\n", keyStyle.Render(k)))
 			lines := strings.Split(highlightedStr, "\n")
 			for i, line := range lines {
-				// Don't print empty trailing line if it's the last one
 				if line == "" && i == len(lines)-1 {
 					continue
 				}
@@ -294,7 +292,6 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 			blockLines = append(blockLines, strings.TrimSuffix(blockSb.String(), "\n"))
 
 		case "edits", "updates":
-			// Parse edits/updates list
 			edits, ok := v.([]interface{})
 			if !ok {
 				continue
@@ -326,7 +323,6 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 			blockLines = append(blockLines, strings.TrimSuffix(blockSb.String(), "\n"))
 
 		default:
-			// Normal inline key value
 			valStr := fmt.Sprintf("%v", v)
 			simpleLines = append(simpleLines, fmt.Sprintf("%s: %s", keyStyle.Render(k), valStyle.Render(valStr)))
 		}
@@ -355,6 +351,7 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 	fmt.Fprintln(w, titleStyle.Render(fmt.Sprintf("tool call: %s", toolName)))
 	fmt.Fprint(w, formattedArgs)
 }
+
 func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
 	var symbol string
 	if toolName == "write" {
@@ -386,93 +383,74 @@ func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON stri
 }
 
 func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, newlineCount int) {
-	if newlineCount >= 0 {
-		_, height := getTerminalSize()
-		if newlineCount < height-1 {
-			var finalDot string
-			if toolName == "write" {
-				if !isError {
-					finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
-				} else {
-					finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
-				}
-			} else {
-				if !isError {
-					finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
-				} else {
-					finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("▸")
-				}
-			}
-
-			// Extract path or command/pattern from argsJSON if possible
-			pathVal := ""
-			var argsMap map[string]interface{}
-			if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
-				if p, ok := argsMap["path"].(string); ok && p != "" {
-					pathVal = p
-				} else if c, ok := argsMap["command"].(string); ok && c != "" {
-					pathVal = c
-				} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
-					pathVal = pat
-				} else if name, ok := argsMap["name"].(string); ok && name != "" {
-					pathVal = name
-				} else if id, ok := argsMap["id"].(string); ok && id != "" {
-					pathVal = id
-				} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
-					pathVal = pr
-				}
-			}
-
-			finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
-
-			// Update the tool title in-place in a single Write call to avoid breaking the cursor restoring writer
-			fmt.Fprintf(w, "\x1b7\x1b[%dA\x1b[1G\x1b[0m%s\x1b[K\x1b8", newlineCount, finalTitle)
+	var finalDot string
+	if toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
+		if !isError {
+			finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
+		} else {
+			finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
+		}
+	} else {
+		if !isError {
+			finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("✔")
+		} else {
+			finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("✖")
 		}
 	}
+
+	pathVal := ""
+	var argsMap map[string]interface{}
+	if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
+		if p, ok := argsMap["path"].(string); ok && p != "" {
+			pathVal = p
+		} else if absPath, ok := argsMap["AbsolutePath"].(string); ok && absPath != "" {
+			pathVal = absPath
+		} else if targetFile, ok := argsMap["TargetFile"].(string); ok && targetFile != "" {
+			pathVal = targetFile
+		} else if searchPath, ok := argsMap["SearchPath"].(string); ok && searchPath != "" {
+			pathVal = searchPath
+		} else if dirPath, ok := argsMap["DirectoryPath"].(string); ok && dirPath != "" {
+			pathVal = dirPath
+		} else if c, ok := argsMap["command"].(string); ok && c != "" {
+			pathVal = c
+		} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
+			pathVal = pat
+		} else if name, ok := argsMap["name"].(string); ok && name != "" {
+			pathVal = name
+		} else if id, ok := argsMap["id"].(string); ok && id != "" {
+			pathVal = id
+		} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
+			pathVal = pr
+		}
+	}
+
+	finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
 
 	if newlineCount == -2 {
-		var finalDot string
-		if toolName == "write" {
-			if !isError {
-				finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
-			} else {
-				finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
-			}
-		} else {
-			if !isError {
-				finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
-			} else {
-				finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("▸")
-			}
-		}
-
-		pathVal := ""
-		var argsMap map[string]interface{}
-		if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
-			if p, ok := argsMap["path"].(string); ok && p != "" {
-				pathVal = p
-			} else if c, ok := argsMap["command"].(string); ok && c != "" {
-				pathVal = c
-			} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
-				pathVal = pat
-			} else if name, ok := argsMap["name"].(string); ok && name != "" {
-				pathVal = name
-			} else if id, ok := argsMap["id"].(string); ok && id != "" {
-				pathVal = id
-			} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
-				pathVal = pr
-			}
-		}
-
-		finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
 		fmt.Fprintln(w, finalTitle)
+	} else if newlineCount >= 0 {
+		if newlineCount > 0 {
+			// Move cursor up to the header line
+			fmt.Fprintf(w, "\x1b[%dA\r", newlineCount)
+		} else {
+			fmt.Fprint(w, "\r")
+		}
+		// Clear line and print final header
+		fmt.Fprint(w, "\x1b[2K")
+		fmt.Fprint(w, finalTitle)
+
+		if newlineCount > 0 {
+			// Move cursor back down to the current line
+			fmt.Fprintf(w, "\r\x1b[%dB", newlineCount)
+		} else {
+			fmt.Fprint(w, "\r\n")
+		}
 	}
 
-	if collapse && !isError {
-		return
+	if newlineCount >= 0 || newlineCount == -2 {
+		fmt.Fprintln(w)
 	}
 
-	fmt.Fprintln(w) // Print a leading blank line to separate from the tool call or previous elements
 	borderColor := theme.Success
 	title := "tool output"
 	if isError {
@@ -502,31 +480,54 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	if !isError && (toolName == "read" || toolName == "write" || isJSON) {
+	isCodeTool := toolName == "read" || toolName == "write" ||
+		strings.Contains(toolName, "read") ||
+		strings.Contains(toolName, "write") ||
+		strings.Contains(toolName, "view") ||
+		strings.Contains(toolName, "edit") ||
+		strings.Contains(toolName, "content")
+
+	if !isError && (isCodeTool || isJSON) {
 		lang := "plaintext"
 		if isJSON {
 			lang = "json"
 		} else {
 			var args struct {
-				Path         string `json:"path"`
-				Content      string `json:"content"`
-				WriteContent string `json:"write_content"`
+				Path               string `json:"path"`
+				AbsolutePath       string `json:"AbsolutePath"`
+				TargetFile         string `json:"TargetFile"`
+				Content            string `json:"content"`
+				WriteContent       string `json:"write_content"`
+				CodeContent        string `json:"CodeContent"`
+				ReplacementContent string `json:"ReplacementContent"`
 			}
 			if argsJSON != "" {
 				_ = json.Unmarshal([]byte(argsJSON), &args)
-				if args.Content == "" && args.WriteContent != "" {
-					args.Content = args.WriteContent
+				filePath := args.Path
+				if filePath == "" {
+					filePath = args.AbsolutePath
 				}
-				if args.Path != "" {
-					ext := filepath.Ext(args.Path)
+				if filePath == "" {
+					filePath = args.TargetFile
+				}
+				if filePath != "" {
+					ext := filepath.Ext(filePath)
 					if len(ext) > 1 {
 						lang = ext[1:]
 					}
 				}
-			}
 
-			if toolName == "write" && args.Content != "" {
-				body = args.Content
+				if strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
+					if args.CodeContent != "" {
+						body = args.CodeContent
+					} else if args.ReplacementContent != "" {
+						body = args.ReplacementContent
+					} else if args.Content != "" {
+						body = args.Content
+					} else if args.WriteContent != "" {
+						body = args.WriteContent
+					}
+				}
 			}
 		}
 
@@ -571,6 +572,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 			printLine(line)
 		}
 	}
+	fmt.Fprintln(w)
 }
 
 func wrapText(text string, limit int) []string {
@@ -621,10 +623,8 @@ func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UIT
 		Padding(0, 1).
 		Margin(1, 0)
 
-	// Determine available width
 	termW, _ := getTerminalSize()
 
-	// 4 columns reserved for border & padding
 	availWidth := termW - 4
 	if availWidth < 20 {
 		availWidth = 20
@@ -661,6 +661,7 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 	pathStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
 
+	var innerTitle string
 	if path != "" {
 		relPath := path
 		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill"
@@ -675,9 +676,24 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 		if (toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__")) && len(relPath) > 60 {
 			relPath = relPath[:57] + "..."
 		}
-		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
+		innerTitle = fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
+	} else {
+		innerTitle = fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
 	}
-	return fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
+
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	width, _ := getTerminalSize()
+	if width <= 0 {
+		width = 80
+	}
+	targetWidth := width - 2
+	innerLen := utf8.RuneCountInString(stripAnsi(innerTitle))
+	dashesCount := targetWidth - 5 - innerLen
+	if dashesCount < 3 {
+		dashesCount = 3
+	}
+	dashes := strings.Repeat("─", dashesCount)
+	return fmt.Sprintf("%s%s %s", borderStyle.Render("─── "), innerTitle, borderStyle.Render(dashes))
 }
 
 func PrintPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
@@ -698,7 +714,7 @@ func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEf
 
 	width, _ := getTerminalSize()
 	statusLen := utf8.RuneCountInString(stripAnsi(statusPart))
-	prefixLen := 11 // visual column length of "─── prompt " is always 11 columns
+	prefixLen := 11
 
 	dashesCount := width - prefixLen - statusLen - 2
 	if dashesCount < 3 {
@@ -733,28 +749,30 @@ func getWriterHeight(w io.Writer) int {
 func DrawStaticStatsLine(w io.Writer, theme UITheme, spinnerFrame string, statsText string) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
+	DrawStaticStatsLineLocked(w, theme, spinnerFrame, statsText)
+}
 
+func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, statsText string) {
 	height := getWriterHeight(w)
 	if height <= 0 {
 		_, h := getTerminalSize()
 		height = h
 	}
 
-	stateMu.Lock()
+	getUI().StateMu.Lock()
 	if spinnerFrame == "" {
 		if statsText != "" {
-			lastStatsText = statsText
+			getUI().LastStatsText = statsText
 		}
 	}
 	textToDraw := statsText
 	if textToDraw == "" && spinnerFrame == "" {
-		textToDraw = lastStatsText
+		textToDraw = getUI().LastStatsText
 	}
-	stateMu.Unlock()
+	getUI().StateMu.Unlock()
 
 	var buf bytes.Buffer
-	// Move cursor to height-4-pasteLinesOffset absolutely, clear line
-	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-4-pasteLinesOffset)
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-4-getUI().PasteLinesOffset)
 
 	if spinnerFrame != "" {
 		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
@@ -767,20 +785,27 @@ func DrawStaticStatsLine(w io.Writer, theme UITheme, spinnerFrame string, statsT
 		fmt.Fprint(&buf, textToDraw)
 	}
 
-	// Restore cursor
 	fmt.Fprint(&buf, "\x1b8")
-
 	_, _ = w.Write(buf.Bytes())
 }
 
 func DrawStaticPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
-	DrawStaticPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, "")
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	DrawStaticPromptSeparatorLocked(w, showThinking, reasoningEffort, theme)
+}
+
+func DrawStaticPromptSeparatorLocked(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
+	DrawStaticPromptSeparatorWithSpinnerLocked(w, showThinking, reasoningEffort, theme, "")
 }
 
 func DrawStaticPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
+	DrawStaticPromptSeparatorWithSpinnerLocked(w, showThinking, reasoningEffort, theme, spinnerFrame)
+}
 
+func DrawStaticPromptSeparatorWithSpinnerLocked(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	height := getWriterHeight(w)
 	if height <= 0 {
 		_, h := getTerminalSize()
@@ -788,8 +813,7 @@ func DrawStaticPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reason
 	}
 
 	var buf bytes.Buffer
-	// Save cursor, move cursor to height-3-pasteLinesOffset absolutely, clear line, print separator, restore cursor
-	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3-pasteLinesOffset)
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-3-getUI().PasteLinesOffset)
 	PrintPromptSeparatorWithSpinner(&buf, showThinking, reasoningEffort, theme, spinnerFrame)
 	fmt.Fprint(&buf, "\x1b8")
 
@@ -801,7 +825,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 
 	var lastRole string
-	for _, msg := range messages {
+	for i, msg := range messages {
 		if msg.Role == "system" {
 			continue
 		}
@@ -832,15 +856,19 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 				}
 			}
 
-			if lastRole != "" {
+			if lastRole != "" && lastRole != "tool" {
 				fmt.Fprintln(w)
 			}
-			fmt.Fprintln(w, borderStyle.Render("─── prompt ───────────────────────────────────────────────"))
+			termW, _ := getTerminalSize()
+			dashesCount := termW - 12
+			if dashesCount < 5 {
+				dashesCount = 5
+			}
+			separator := "─── prompt " + strings.Repeat("─", dashesCount)
+			fmt.Fprintln(w, borderStyle.Render(separator))
 			fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), msg.Content)
 		} else if msg.Role == "assistant" {
-			if lastRole == "tool" {
-				fmt.Fprintln(w)
-			}
+
 			hasPrintedAnything := false
 			if msg.ReasoningContent != "" && cfg.ShowThinking {
 				dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
@@ -863,40 +891,76 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 
 			if len(msg.ToolCalls) > 0 {
 				for _, tc := range msg.ToolCalls {
-					if hasPrintedAnything {
-						fmt.Fprintln(w)
-					}
-					var path string
-					var argsMap map[string]interface{}
-					if json.Unmarshal([]byte(tc.Function.Arguments), &argsMap) == nil {
-						if p, ok := argsMap["path"].(string); ok {
-							path = p
-						} else if c, ok := argsMap["command"].(string); ok {
-							path = c
+					hasResponse := false
+					for j := i + 1; j < len(messages); j++ {
+						if messages[j].Role == "tool" && messages[j].ToolCallID == tc.ID {
+							hasResponse = true
+							break
 						}
 					}
-					isPathTool := tc.Function.Name == "read" || tc.Function.Name == "write" || tc.Function.Name == "edit" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find" || tc.Function.Name == "bash"
-					var symbol string
-					if tc.Function.Name == "write" {
-						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
-					} else {
-						symbol = style.NewStyle().Foreground(theme.Success).Bold(true).Render("▸")
+
+					if !hasResponse {
+						if hasPrintedAnything {
+							fmt.Fprintln(w)
+						}
+						var path string
+						var argsMap map[string]interface{}
+						if json.Unmarshal([]byte(tc.Function.Arguments), &argsMap) == nil {
+							if p, ok := argsMap["path"].(string); ok {
+								path = p
+							} else if absPath, ok := argsMap["AbsolutePath"].(string); ok {
+								path = absPath
+							} else if targetFile, ok := argsMap["TargetFile"].(string); ok {
+								path = targetFile
+							} else if searchPath, ok := argsMap["SearchPath"].(string); ok {
+								path = searchPath
+							} else if dirPath, ok := argsMap["DirectoryPath"].(string); ok {
+								path = dirPath
+							} else if c, ok := argsMap["command"].(string); ok {
+								path = c
+							} else if pat, ok := argsMap["pattern"].(string); ok {
+								path = pat
+							} else if name, ok := argsMap["name"].(string); ok {
+								path = name
+							} else if id, ok := argsMap["id"].(string); ok {
+								path = id
+							} else if pr, ok := argsMap["prompt"].(string); ok {
+								path = pr
+							}
+						}
+						isPathTool := strings.Contains(tc.Function.Name, "read") ||
+							strings.Contains(tc.Function.Name, "write") ||
+							strings.Contains(tc.Function.Name, "edit") ||
+							strings.Contains(tc.Function.Name, "view") ||
+							strings.Contains(tc.Function.Name, "content") ||
+							tc.Function.Name == "ls" ||
+							tc.Function.Name == "grep" ||
+							tc.Function.Name == "find" ||
+							tc.Function.Name == "bash" ||
+							tc.Function.Name == "spawn_subagent" ||
+							strings.HasPrefix(tc.Function.Name, "subagent__")
+						var symbol string
+						if tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace") {
+							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+						} else {
+							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+						}
+						var title string
+						if isPathTool && path != "" {
+							title = FormatToolTitle(symbol, tc.Function.Name, path, theme)
+						} else {
+							title = FormatToolTitle(symbol, tc.Function.Name, "", theme)
+						}
+						fmt.Fprintln(w, title)
+						hasPrintedAnything = true
 					}
-					var title string
-					if isPathTool && path != "" {
-						title = FormatToolTitle(symbol, tc.Function.Name, path, theme)
-					} else {
-						title = FormatToolTitle(symbol, tc.Function.Name, "", theme)
-					}
-					fmt.Fprintln(w, title)
-					hasPrintedAnything = true
 				}
 			}
 		} else if msg.Role == "tool" {
 			var toolName string
 			var argsJSON string
-			for i := len(messages) - 1; i >= 0; i-- {
-				m := messages[i]
+			for j := i - 1; j >= 0; j-- {
+				m := messages[j]
 				if m.Role == "assistant" {
 					for _, tc := range m.ToolCalls {
 						if tc.ID == msg.ToolCallID {
@@ -913,18 +977,40 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			if toolName == "" {
 				toolName = msg.Name
 			}
-			RenderToolOutput(w, msg.Content, false, cfg.CollapseResults, theme, toolName, argsJSON, -1)
+			
+			isError := strings.HasPrefix(msg.Content, "Error:") || strings.HasPrefix(msg.Content, "error:") || strings.Contains(msg.Content, "command failed:")
+			RenderToolOutput(w, msg.Content, isError, cfg.CollapseResults, theme, toolName, argsJSON, -2)
+		} else if msg.Role == "error" {
+			if lastRole != "" && lastRole != "tool" {
+				fmt.Fprintln(w)
+			}
+			termW, _ := getTerminalSize()
+			errStyle := style.NewStyle().
+				Border(style.RoundedBorder()).
+				BorderForeground(theme.Error).
+				Padding(1, 2).
+				Margin(0, 0).
+				MaxWidth(termW)
+			
+			titleStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
+			bodyStyle := style.NewStyle().Foreground(theme.Text)
+			
+			content := fmt.Sprintf("%s\n\n%s", titleStyle.Render("error during generation:"), bodyStyle.Render(msg.Content))
+			fmt.Fprint(w, errStyle.Render(content))
+			fmt.Fprintln(w)
 		}
 		lastRole = msg.Role
 	}
 }
 
 func RenderProviders(w io.Writer, cfg *config.Config, theme UITheme) {
+	termW, _ := getTerminalSize()
 	borderStyle := style.NewStyle().
 		Border(style.RoundedBorder()).
 		BorderForeground(theme.Border).
 		Padding(1, 2).
-		Margin(0, 0)
+		Margin(0, 0).
+		MaxWidth(termW)
 
 	titleStyle := style.NewStyle().
 		Foreground(theme.Primary).
@@ -980,3 +1066,52 @@ func RenderProviders(w io.Writer, cfg *config.Config, theme UITheme) {
 	fmt.Fprintln(w, borderStyle.Render(sb.String()))
 }
 
+func RenderMCPServers(w io.Writer, cfg *config.Config, theme UITheme) {
+	termW, _ := getTerminalSize()
+	borderStyle := style.NewStyle().
+		Border(style.RoundedBorder()).
+		BorderForeground(theme.Border).
+		Padding(1, 2).
+		Margin(0, 0).
+		MaxWidth(termW)
+
+	titleStyle := style.NewStyle().
+		Foreground(theme.Primary).
+		Bold(true)
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("configured mcp servers") + "\n\n")
+
+	if cfg.MCPServers == nil || len(cfg.MCPServers) == 0 {
+		sb.WriteString(style.NewStyle().Foreground(theme.Border).Italic(true).Render("  (no mcp servers configured)") + "\n")
+	} else {
+		var keys []string
+		for k := range cfg.MCPServers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, name := range keys {
+			srv := cfg.MCPServers[name]
+			var headerParts []string
+			for hk, hv := range srv.Headers {
+				headerParts = append(headerParts, fmt.Sprintf("%s: %s", hk, hv))
+			}
+			sort.Strings(headerParts)
+			headersDisplay := "none"
+			if len(headerParts) > 0 {
+				headersDisplay = strings.Join(headerParts, ", ")
+			}
+
+			sb.WriteString(fmt.Sprintf("  %-12s : URL: %s | Headers: %s\n",
+				style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(name),
+				srv.URL,
+				headersDisplay,
+			))
+		}
+	}
+
+	sb.WriteString("\ntip: manage mcp servers via REPL: /mcp list/add/remove or interactive setup: /mcp")
+
+	fmt.Fprintln(w, borderStyle.Render(sb.String()))
+}

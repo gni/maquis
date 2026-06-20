@@ -25,6 +25,7 @@ import (
 	"maquis/pkg/ui/style"
 	"golang.org/x/term"
 )
+
 func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (string, int, bool) {
 	if key != '\t' {
 		return line, pos, false
@@ -74,7 +75,6 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 		}
 	}
 
-	// Sub-argument autocomplete logic
 	if len(matches) == 0 {
 		if strings.HasPrefix(prefixToPos, "/config ") {
 			isSet := strings.HasPrefix(prefixToPos, "/config set ")
@@ -308,6 +308,20 @@ type keyInterceptorReader struct {
 	inputChan        chan byte
 	injectChan       chan byte
 	typeAheadBuffer  []byte
+	isAtMainPrompt   bool
+}
+
+func (ki *keyInterceptorReader) Drain() {
+	if ki.inputChan == nil {
+		return
+	}
+	for {
+		select {
+		case <-ki.inputChan:
+		default:
+			return
+		}
+	}
 }
 
 func (ki *keyInterceptorReader) redrawTypeAhead() {
@@ -327,12 +341,11 @@ func (ki *keyInterceptorReader) redrawTypeAhead() {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 
-	stateMu.Lock()
+	getUI().StateMu.Lock()
 	typeAheadCopy := string(ki.typeAheadBuffer)
-	stateMu.Unlock()
+	getUI().StateMu.Unlock()
 
-	// Save cursor, move cursor to height-2-pasteLinesOffset, clear line, print prompt prefix + type-ahead buffer, restore cursor
-	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-pasteLinesOffset, promptStr, typeAheadCopy)
+	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-getUI().PasteLinesOffset, promptStr, typeAheadCopy)
 }
 
 func (ki *keyInterceptorReader) printCancelMessage() {
@@ -340,7 +353,6 @@ func (ki *keyInterceptorReader) printCancelMessage() {
 }
 
 func (ki *keyInterceptorReader) handleCtrlO() {
-	activeTheme := GetConfiguredTheme(ki.agent.Config)
 	runningTaskId := ki.agent.GetLastRunningTaskId()
 	if runningTaskId != "" {
 		ki.agent.ToggleStreaming(runningTaskId, ki.w)
@@ -348,15 +360,13 @@ func (ki *keyInterceptorReader) handleCtrlO() {
 		ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 		_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 		SetCollapseStatus(ki.agent.Config.CollapseResults)
-		stateMu.Lock()
-		isGenerating := state.IsGenerating
-		cancelFunc := ActiveCancelFunc
-		inApproval := inApprovalPrompt
-		stateMu.Unlock()
-		if !isGenerating && (cancelFunc == nil || inApproval) {
-			redrawScreen(ki.w, ki.agent, ki, ki.rl)
-		} else {
-			DrawStatusBar(ki.w, activeTheme)
+		
+		redrawScreen(ki.w, ki.agent, ki, ki.rl)
+
+		if ki.agent.CurrentWriter != nil {
+			if fr, ok := ki.agent.CurrentWriter.(interface{ ForceReposition() }); ok {
+				fr.ForceReposition()
+			}
 		}
 	}
 }
@@ -470,22 +480,17 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	activeTheme := GetConfiguredTheme(ki.agent.Config)
 	cw := crnlWriter{w: os.Stderr}
 
-	// Reset lastH to 0 so DrawStatusBar doesn't perform clamped clear on old height
-	lastH = 0
+	getUI().LastH = 0
 
-	// 1. Reset scrolling region to whole screen and clear screen
-	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[2J")
+	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[J")
 
-	// Buffer everything that goes into the scroll region (rows 1..height-4)
 	var buf bytes.Buffer
 	cwBuf := crnlWriter{w: &buf}
 
-	// 2. Render startup errors if any
 	if len(ki.agent.McpStartErrors) > 0 {
 		RenderMCPStartupErrors(cwBuf, ki.agent.McpStartErrors, activeTheme)
 	}
 
-	// 3. Render banner and history
 	PrintBanner(cwBuf, ki.agent)
 	activeMessages := []db.Message{}
 	if ki.messages != nil {
@@ -500,9 +505,8 @@ func (ki *keyInterceptorReader) redrawLayout() {
 		PrintSessionHistory(cwBuf, activeMessages, activeTheme, ki.agent.Config)
 	}
 
-	// Calculate terminal size
 	_, height := getTerminalSize()
-	scrollBottom := height - 4 - pasteLinesOffset
+	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -510,26 +514,27 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	content := buf.String()
 	linesCount := strings.Count(content, "\n")
 
-	// If content is shorter than the scroll region, print padding newlines first
-	// to push history down snugly right above the prompt separator
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
 		fmt.Fprint(cw, strings.Repeat("\n", padding))
 	}
 
-	// Print the buffered content
 	fmt.Fprint(cw, content)
 
-	// 4. Draw prompt separator
+	// Ensure the cursor scrolls/moves down past the scrolling region bottom
+	// to align the last line of content at scrollBottom and prevent overlap with the status area.
+	extraNewlines := height - scrollBottom
+	if extraNewlines > 0 {
+		fmt.Fprint(cw, strings.Repeat("\n", extraNewlines))
+	}
+
 	DrawStaticPromptSeparator(cw, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 
-	// 4b. Draw the last stats line
-	stateMu.Lock()
-	savedStats := lastStatsText
-	stateMu.Unlock()
+	getUI().StateMu.Lock()
+	savedStats := getUI().LastStatsText
+	getUI().StateMu.Unlock()
 	DrawStaticStatsLine(cw, activeTheme, "", savedStats)
 
-	// 5. Update status bar metrics and redraw status bar
 	activeTasks := 0
 	for _, t := range ki.agent.ListTasks() {
 		if t.Status == "running" {
@@ -552,8 +557,11 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	UpdateStatus(ki.agent.Config.Model, pTok, cTok, 0, ki.agent.Config.ContextWindowLimit, false, 0, activeTasks, ki.agent.Config.ShowTokens)
 	DrawStatusBar(cw, activeTheme)
 
-	// Position cursor at prompt line for term.Terminal to draw the prompt
-	fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-pasteLinesOffset)
+	fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+}
+
+func (ki *keyInterceptorReader) GetInputChan() chan byte {
+	return ki.inputChan
 }
 
 func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
@@ -588,7 +596,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		p[0] = b
 		n = 1
 
-		// Read any additional bytes. If we saw an Escape char, wait up to 15ms for the next byte to ensure we don't split Escape sequences.
 		for n < len(p) {
 			hasEscape := false
 			for i := 0; i < n; i++ {
@@ -640,7 +647,6 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		var pasteBytes []byte
 		pasteBytes = append(pasteBytes, p[:n]...)
 
-		// Read any remaining paste bytes from inputChan with a 10ms idle timeout
 		if ki.inputChan != nil {
 			timer := time.NewTimer(10 * time.Millisecond)
 			defer timer.Stop()
@@ -683,7 +689,7 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		ki.pastedText = string(normalized)
 
 		if ki.w != nil {
-			pasteLinesOffset = bytes.Count(normalized, []byte("\n"))
+			getUI().PasteLinesOffset = bytes.Count(normalized, []byte("\n"))
 			ki.redrawLayout()
 
 			cw := crnlWriter{w: ki.w}
@@ -697,8 +703,16 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	for i := 0; i < n; i++ {
 		b := p[i]
 		if b == 3 { // Ctrl+C
-			ki.ctrlCInterrupted = true
-			p[writeIdx] = '\n'
+			if ki.isAtMainPrompt {
+				ki.ctrlCInterrupted = true
+				p[writeIdx] = '\n'
+				writeIdx++
+			} else {
+				p[writeIdx] = b
+				writeIdx++
+			}
+		} else if b == 4 { // Ctrl+D
+			p[writeIdx] = b
 			writeIdx++
 		} else if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
 			activeTheme := GetConfiguredTheme(ki.agent.Config)
@@ -724,9 +738,7 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 				DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 			} else if b == 15 { // Ctrl+O
-				ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
-				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-				redrawScreen(ki.w, ki.agent, ki, ki.rl)
+				ki.handleCtrlO()
 			}
 		} else {
 			p[writeIdx] = b
@@ -767,12 +779,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	SetScrollRegionOffset(3)
 	InitStatusBar(os.Stderr)
 	defer ShutdownStatusBar(os.Stderr)
-	defer fmt.Fprint(os.Stderr, "\x1b[?25h") // Ensure cursor is restored to visible when exiting
+	defer fmt.Fprint(os.Stderr, "\x1b[?25h")
 
 	_, height := getTerminalSize()
 	ppWriter := agent.NewPromptPreservingWriter(os.Stderr, height)
 
-	// Print MCP startup errors if any
 	if len(a.McpStartErrors) > 0 {
 		RenderMCPStartupErrors(ppWriter, a.McpStartErrors, theme)
 	}
@@ -798,11 +809,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		inputChan:  make(chan byte, 1000),
 		injectChan: make(chan byte, 100),
 	}
-	activeInputReader = kiReader
-	defer func() { activeInputReader = nil }()
+	getUI().ActiveInputReader = kiReader
+	defer func() { getUI().ActiveInputReader = nil }()
 
 	rawChan := make(chan byte, 1000)
-	// Start input reader goroutine
 	go func() {
 		buf := make([]byte, 1024)
 		for {
@@ -812,7 +822,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					close(rawChan)
 					return
 				}
-				// Sleep and retry for EAGAIN/EWOULDBLOCK errors when fd is in non-blocking mode
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
@@ -822,7 +831,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}()
 
-	// Start processing input goroutine
 	go func() {
 		for {
 			b, ok := <-rawChan
@@ -831,39 +839,36 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				return
 			}
 
-			stateMu.Lock()
-			cancelFunc := ActiveCancelFunc
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			cancelFunc := getUI().ActiveCancelFunc
+			getUI().StateMu.Unlock()
 
 			if cancelFunc != nil {
-				stateMu.Lock()
-				inApproval := inApprovalPrompt
-				stateMu.Unlock()
+				getUI().StateMu.Lock()
+				inApproval := getUI().InApprovalPrompt
+				getUI().StateMu.Unlock()
 
 				if inApproval {
-					if b == 3 { // Ctrl+C
+					if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
 						cancelFunc()
 						kiReader.printCancelMessage()
-						stateMu.Lock()
+						getUI().StateMu.Lock()
 						kiReader.typeAheadBuffer = nil
-						stateMu.Unlock()
+						getUI().StateMu.Unlock()
 						kiReader.inputChan <- b
 						continue
 					}
 					if b == 27 { // Escape
-						// Check if it's a standalone Escape or an escape sequence
 						select {
 						case next := <-rawChan:
-							// Escape sequence. Push both to inputChan.
 							kiReader.inputChan <- b
 							kiReader.inputChan <- next
 						case <-time.After(50 * time.Millisecond):
-							// Standalone Escape. Cancel!
 							cancelFunc()
 							kiReader.printCancelMessage()
-							stateMu.Lock()
+							getUI().StateMu.Lock()
 							kiReader.typeAheadBuffer = nil
-							stateMu.Unlock()
+							getUI().StateMu.Unlock()
 							kiReader.inputChan <- b
 						}
 						continue
@@ -880,34 +885,29 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 						kiReader.handleCtrlR()
 						continue
 					}
-					// Directly forward keys (like y, n, a, etc.) to the approval reader
 					kiReader.inputChan <- b
 					continue
 				}
 
-				// Agent is running! Intercept hotkeys.
-				if b == 3 { // Ctrl+C
+				if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
 					cancelFunc()
 					kiReader.printCancelMessage()
-					stateMu.Lock()
+					getUI().StateMu.Lock()
 					kiReader.typeAheadBuffer = nil
-					stateMu.Unlock()
+					getUI().StateMu.Unlock()
 					continue
 				}
 				if b == 27 { // Escape
-					// Check if it's a standalone Escape or an escape sequence
 					select {
 					case next := <-rawChan:
-						// Escape sequence. Push both to inputChan.
 						kiReader.inputChan <- b
 						kiReader.inputChan <- next
 					case <-time.After(50 * time.Millisecond):
-						// Standalone Escape. Cancel!
 						cancelFunc()
 						kiReader.printCancelMessage()
-						stateMu.Lock()
+						getUI().StateMu.Lock()
 						kiReader.typeAheadBuffer = nil
-						stateMu.Unlock()
+						getUI().StateMu.Unlock()
 					}
 					continue
 				}
@@ -924,9 +924,8 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					continue
 				}
 
-				// Handle Backspace
 				if b == 127 || b == 8 {
-					stateMu.Lock()
+					getUI().StateMu.Lock()
 					if len(kiReader.typeAheadBuffer) > 0 {
 						r, size := utf8.DecodeLastRune(kiReader.typeAheadBuffer)
 						if r != utf8.RuneError || size > 0 {
@@ -935,33 +934,29 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 							kiReader.typeAheadBuffer = kiReader.typeAheadBuffer[:len(kiReader.typeAheadBuffer)-1]
 						}
 					}
-					stateMu.Unlock()
+					getUI().StateMu.Unlock()
 					kiReader.redrawTypeAhead()
 					kiReader.inputChan <- b
 					continue
 				}
 
-				// Handle Enter
 				if b == 10 || b == 13 {
-					stateMu.Lock()
+					getUI().StateMu.Lock()
 					kiReader.typeAheadBuffer = nil
-					stateMu.Unlock()
+					getUI().StateMu.Unlock()
 					kiReader.inputChan <- b
 					continue
 				}
 
-				// For any other printable/valid characters, append to typeAheadBuffer and redraw
 				if b >= 32 || b == '\t' {
-					stateMu.Lock()
+					getUI().StateMu.Lock()
 					kiReader.typeAheadBuffer = append(kiReader.typeAheadBuffer, b)
-					stateMu.Unlock()
+					getUI().StateMu.Unlock()
 					kiReader.redrawTypeAhead()
 				}
 
-				// Push to inputChan for type-ahead
 				kiReader.inputChan <- b
 			} else {
-				// Agent is not running. Just forward to inputChan.
 				kiReader.inputChan <- b
 			}
 		}
@@ -971,7 +966,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	kiReader.rl = rl
 	rl.History = hist
 
-	// Set initial terminal size
 	if w, h, err := term.GetSize(fd); err == nil {
 		rl.SetSize(w, h)
 	}
@@ -981,13 +975,12 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	SetCollapseStatus(a.Config.CollapseResults)
 	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
 	DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-	stateMu.Lock()
-	savedStats := lastStatsText
-	stateMu.Unlock()
+	getUI().StateMu.Lock()
+	savedStats := getUI().LastStatsText
+	getUI().StateMu.Unlock()
 	DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 	DrawStatusBar(os.Stderr, theme)
 
-	// Setup SIGWINCH listener for dynamic terminal resizing with 100ms debouncing
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGWINCH)
 	go func() {
@@ -999,9 +992,13 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			debounceTimer = time.AfterFunc(100*time.Millisecond, func() {
 				if w, h, err := term.GetSize(fd); err == nil {
 					rl.SetSize(w, h)
-					select {
-					case kiReader.injectChan <- 12:
-					default:
+					getUI().StateMu.Lock()
+					idle := getUI().ActiveCancelFunc == nil
+					getUI().StateMu.Unlock()
+					if idle {
+						redrawScreen(os.Stderr, a, kiReader, rl)
+					} else {
+						handleResize(os.Stderr, a, kiReader, rl)
 					}
 				}
 			})
@@ -1025,10 +1022,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		rl.SetPrompt(promptPrefix)
 		_, height := getTerminalSize()
 		if height > 0 {
-			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2-pasteLinesOffset)
+			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
 		}
 
-		// Show cursor when waiting for input
 		fmt.Fprint(os.Stderr, "\x1b[?25h")
 		ppWriter.SetCursorHidden(false)
 
@@ -1038,32 +1034,32 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			os.Exit(1)
 		}
 
+		kiReader.isAtMainPrompt = true
 		line, err := rl.ReadLine()
+		kiReader.isAtMainPrompt = false
 		term.Restore(fd, oldState)
 
 		if kiReader.pastedText != "" {
 			line = line + kiReader.pastedText
 			kiReader.pastedText = ""
-			pasteLinesOffset = 0
+			getUI().PasteLinesOffset = 0
 			InitStatusBar(os.Stderr)
 		}
 
-		// Hide cursor immediately after reading input (keeps cursor hidden during generation)
 		fmt.Fprint(os.Stderr, "\x1b[?25l")
 		ppWriter.SetCursorHidden(true)
 
-		// Redraw prompts immediately to correct any scrolling caused by pressing Enter
 		DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-		stateMu.Lock()
-		savedStats = lastStatsText
-		stateMu.Unlock()
+		getUI().StateMu.Lock()
+		savedStats = getUI().LastStatsText
+		getUI().StateMu.Unlock()
 		DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 		DrawStatusBar(os.Stderr, theme)
 
 		if kiReader.ctrlCInterrupted {
 			kiReader.ctrlCInterrupted = false
 			kiReader.pastedText = ""
-			pasteLinesOffset = 0
+			getUI().PasteLinesOffset = 0
 			InitStatusBar(os.Stderr)
 			fmt.Fprint(os.Stderr, "^C\n")
 			activeTasks := 0
@@ -1080,12 +1076,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 			pTok, cTok := a.GetGlobalTokens(activeMessagesForTokens, allowedTools)
 			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			stateMu.Lock()
-			savedStats = lastStatsText
-			stateMu.Unlock()
-			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
-			DrawStatusBar(os.Stderr, theme)
+			redrawScreen(os.Stderr, a, kiReader, rl)
 			continue
 		}
 
@@ -1112,9 +1103,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			pTok, cTok := a.GetGlobalTokens(activeMessagesForTokens, allowedTools)
 			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
 			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			stateMu.Lock()
-			savedStats = lastStatsText
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			savedStats = getUI().LastStatsText
+			getUI().StateMu.Unlock()
 			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 			DrawStatusBar(os.Stderr, theme)
 			continue
@@ -1123,8 +1114,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		if !strings.HasPrefix(line, "/") {
 			hist.Add(line)
 		}
-
-		// Raw separator removed to prevent screen scrolling
 
 		isCmd, cmdStr := parseManualCommand(line, a.Config.DirectCommands)
 		if isCmd {
@@ -1163,6 +1152,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			err := cmd.Run()
 
 			InitStatusBar(os.Stderr)
+			kiReader.Drain()
 			DrawStatusBar(os.Stderr, theme)
 
 			output := tool.SanitizeUTF8(stdout.Bytes())
@@ -1213,6 +1203,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			cw := crnlWriter{w: os.Stderr}
 			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cw, &currentSessionID, rl.History, mam, kiReader)
 			InitStatusBar(os.Stderr)
+			kiReader.Drain()
 
 			if handled && !quit {
 				currActiveAgent := ""
@@ -1244,24 +1235,22 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				break
 			}
 			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			stateMu.Lock()
-			savedStats = lastStatsText
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			savedStats = getUI().LastStatsText
+			getUI().StateMu.Unlock()
 			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 			DrawStatusBar(os.Stderr, theme)
 			continue
 		}
 
 		if mam.ActiveAgent != nil {
-			// Redraw status bar and static prompt separator before starting subagent execution
 			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			stateMu.Lock()
-			savedStats = lastStatsText
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			savedStats = getUI().LastStatsText
+			getUI().StateMu.Unlock()
 			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 			DrawStatusBar(os.Stderr, theme)
 
-			// Print the prompt separator and user prompt inside the scroll region so they scroll up
 			borderStyle := style.NewStyle().Foreground(theme.Border)
 			statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 			thinkingText := "off"
@@ -1286,15 +1275,14 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
 			fmt.Fprintln(ppWriter, divider)
 
-			stateMu.Lock()
-			ActiveCancelFunc = mam.ActiveAgent.CancelActiveTurn
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = mam.ActiveAgent.CancelActiveTurn
+			getUI().StateMu.Unlock()
 
 			err := mam.SendMessage(mam.ActiveAgent.Name, line)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
 			} else {
-				// Block and wait for subagent response in cooked mode
 				select {
 				case <-mam.ActiveAgent.Context.Done():
 					fmt.Fprintln(os.Stderr, "Agent context cancelled.")
@@ -1303,15 +1291,16 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				fmt.Fprint(ppWriter, "\n\n")
 			}
 
-			stateMu.Lock()
-			ActiveCancelFunc = nil
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = nil
+			getUI().StateMu.Unlock()
+			kiReader.Drain()
 		} else {
 			ctx, cancel := context.WithCancel(context.Background())
-			stateMu.Lock()
-			ActiveCancelFunc = cancel
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = cancel
 			kiReader.typeAheadBuffer = nil
-			stateMu.Unlock()
+			getUI().StateMu.Unlock()
 
 			restore, err := setNonCanonical(fd)
 
@@ -1321,9 +1310,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				restore()
 			}
 			cancel()
-			stateMu.Lock()
-			ActiveCancelFunc = nil
-			stateMu.Unlock()
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = nil
+			getUI().StateMu.Unlock()
+			kiReader.Drain()
 		}
 		activeTasks := 0
 		for _, t := range a.ListTasks() {
@@ -1339,12 +1329,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 		pTok, cTok := a.GetGlobalTokens(activeMessagesForTokens, allowedTools)
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-		DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-		stateMu.Lock()
-		savedStats = lastStatsText
-		stateMu.Unlock()
-		DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
-		DrawStatusBar(os.Stderr, theme)
+		redrawScreen(os.Stderr, a, kiReader, rl)
 	}
 
 	ShutdownStatusBar(os.Stderr)
@@ -1392,6 +1377,9 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 }
 
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
 	SetCollapseStatus(a.Config.CollapseResults)
 	activeTheme := GetConfiguredTheme(a.Config)
 	promptPrefix := "> "
@@ -1407,22 +1395,17 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 
 	cw := crnlWriter{w: w}
 
-	// Reset lastH to 0 so DrawStatusBar doesn't perform clamped clear on old height
-	lastH = 0
+	getUI().LastH = 0
 
-	// 1. Reset scrolling region to whole screen and clear screen
-	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[2J")
+	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[J")
 
-	// Buffer everything that goes into the scroll region (rows 1..height-4)
 	var buf bytes.Buffer
 	cwBuf := crnlWriter{w: &buf}
 
-	// 2. Render startup errors if any
 	if len(a.McpStartErrors) > 0 {
 		RenderMCPStartupErrors(cwBuf, a.McpStartErrors, activeTheme)
 	}
 
-	// 3. Render banner and history
 	PrintBanner(cwBuf, a)
 	activeMessages := []db.Message{}
 	if kiReader.messages != nil {
@@ -1434,22 +1417,12 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		kiReader.mam.ActiveAgent.HistoryMu.RUnlock()
 	}
 
-	// DEBUG LOG
-	{
-		var logLines []string
-		for idx, msg := range activeMessages {
-			logLines = append(logLines, fmt.Sprintf("[%d] Role: %s, Name: %s, ToolCallID: %s, ContentLen: %d", idx, msg.Role, msg.Name, msg.ToolCallID, len(msg.Content)))
-		}
-		_ = os.WriteFile("/workspace/maquis/debug_messages.txt", []byte(strings.Join(logLines, "\n")), 0644)
-	}
-
 	if len(activeMessages) > 0 {
 		PrintSessionHistory(cwBuf, activeMessages, activeTheme, a.Config)
 	}
 
-	// Calculate terminal size
 	_, height := getTerminalSize()
-	scrollBottom := height - 4 - pasteLinesOffset
+	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -1457,26 +1430,27 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	content := buf.String()
 	linesCount := strings.Count(content, "\n")
 
-	// If content is shorter than the scroll region, print padding newlines first
-	// to push history down snugly right above the prompt separator
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
 		fmt.Fprint(cw, strings.Repeat("\n", padding))
 	}
 
-	// Print the buffered content
 	fmt.Fprint(cw, content)
 
-	// 4. Draw prompt separator
-	DrawStaticPromptSeparator(cw, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
+	// Ensure the cursor scrolls/moves down past the scrolling region bottom
+	// to align the last line of content at scrollBottom and prevent overlap with the status area.
+	extraNewlines := height - scrollBottom
+	if extraNewlines > 0 {
+		fmt.Fprint(cw, strings.Repeat("\n", extraNewlines))
+	}
 
-	// 4b. Draw the last stats line
-	stateMu.Lock()
-	savedStats := lastStatsText
-	stateMu.Unlock()
-	DrawStaticStatsLine(cw, activeTheme, "", savedStats)
+	DrawStaticPromptSeparatorLocked(cw, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
 
-	// 5. Update status bar metrics and redraw status bar
+	getUI().StateMu.Lock()
+	savedStats := getUI().LastStatsText
+	getUI().StateMu.Unlock()
+	DrawStaticStatsLineLocked(cw, activeTheme, "", savedStats)
+
 	activeTasks := 0
 	for _, t := range a.ListTasks() {
 		if t.Status == "running" {
@@ -1497,17 +1471,16 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	pTok, cTok = a.GetGlobalTokens(activeMessagesForTokens, nil)
 
 	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-	DrawStatusBar(cw, activeTheme)
+	DrawStatusBarLocked(cw, activeTheme)
 
-	// 6. Draw input line and place cursor
-	stateMu.Lock()
-	inApproval := inApprovalPrompt
-	stateMu.Unlock()
+	getUI().StateMu.Lock()
+	inApproval := getUI().InApprovalPrompt
+	getUI().StateMu.Unlock()
 	if inApproval {
 		promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
 		fmt.Fprint(cw, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
 	} else {
-		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-pasteLinesOffset)
+		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
 		fmt.Fprint(cw, promptStr)
 		inputLine := kiReader.currentInputLine
 		posOffset := len(inputLine)
@@ -1517,7 +1490,7 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 			posOffset = pos
 		}
 		fmt.Fprint(cw, inputLine)
-		fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-pasteLinesOffset, 1+len(promptPrefix)+posOffset)
+		fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-getUI().PasteLinesOffset, 1+len(promptPrefix)+posOffset)
 	}
 }
 
@@ -1563,4 +1536,63 @@ func getTerminalLine(rl *term.Terminal) (string, int) {
 		return string(runes), pos
 	}
 	return "", 0
+}
+
+func handleResize(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
+	width, height := getTerminalSize()
+	if height <= 3 {
+		return
+	}
+
+	if rl != nil {
+		rl.SetSize(width, height)
+	}
+
+	activeTheme := GetConfiguredTheme(a.Config)
+	cw := crnlWriter{w: w}
+
+	DrawStatusBarLocked(cw, activeTheme)
+	DrawStaticPromptSeparatorLocked(cw, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
+
+	getUI().StateMu.Lock()
+	savedStats := getUI().LastStatsText
+	getUI().StateMu.Unlock()
+	DrawStaticStatsLineLocked(cw, activeTheme, "", savedStats)
+
+	promptPrefix := "> "
+	if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
+		promptPrefix = fmt.Sprintf("[%s]> ", kiReader.mam.ActiveAgent.Name)
+	}
+	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
+	promptStr := promptStyle.Render(promptPrefix)
+
+	getUI().StateMu.Lock()
+	inApproval := getUI().InApprovalPrompt
+	getUI().StateMu.Unlock()
+
+	if inApproval {
+		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+		fmt.Fprint(cw, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
+	} else {
+		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+		fmt.Fprint(cw, promptStr)
+		inputLine := kiReader.currentInputLine
+		posOffset := len(inputLine)
+		if rl != nil {
+			line, pos := getTerminalLine(rl)
+			inputLine = line
+			posOffset = pos
+		}
+		fmt.Fprint(cw, inputLine)
+		fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-getUI().PasteLinesOffset, 1+len(promptPrefix)+posOffset)
+	}
+
+	if a.CurrentWriter != nil {
+		if fr, ok := a.CurrentWriter.(interface{ ForceReposition() }); ok {
+			fr.ForceReposition()
+		}
+	}
 }

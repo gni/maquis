@@ -10,7 +10,8 @@ import (
 )
 
 type MCPServerConfig struct {
-	URL string            `json:"url,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type Config struct {

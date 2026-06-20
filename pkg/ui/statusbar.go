@@ -26,28 +26,6 @@ type StatusBarState struct {
 	ShowTokens             bool
 }
 
-// SetCollapseStatus updates the results collapsing state in the status bar.
-func SetCollapseStatus(collapsed bool) {
-	stateMu.Lock()
-	collapseResults = collapsed
-	stateMu.Unlock()
-}
-
-// SetScrollRegionOffset reserves extra lines above the status bar's normal 2-line area.
-// For example, offset=2 reserves lines for a prompt separator and prompt input,
-// making the scroll region 1..height-4 instead of 1..height-2.
-func SetScrollRegionOffset(offset int) {
-	stateMu.Lock()
-	scrollRegionOffset = offset
-	stateMu.Unlock()
-}
-
-// ClearScrollRegionOffset resets the scroll region to the default (1..height-2).
-func ClearScrollRegionOffset() {
-	stateMu.Lock()
-	scrollRegionOffset = 0
-	stateMu.Unlock()
-}
 
 func getTerminalSize() (int, int) {
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
@@ -62,73 +40,41 @@ func getTerminalSize() (int, int) {
 	return 80, 24
 }
 
-func InitStatusBar(w io.Writer) {
-	stateMu.Lock()
-	enabled = true
-	stateMu.Unlock()
-
-	_, height := getTerminalSize()
-	if height > 3 {
-		// Print newline and cursor up to ensure we scroll if we are near the bottom
-		fmt.Fprint(w, "\n\n\x1b[2A")
-		// Save cursor, set scroll region, restore cursor to prevent jumping to top
-		fmt.Fprintf(w, "\x1b7\x1b[1;%dr\x1b8", height-2-scrollRegionOffset)
-		lastH = height
-	}
-}
-
-func ShutdownStatusBar(w io.Writer) {
-	stateMu.Lock()
-	enabled = false
-	stateMu.Unlock()
-
-	_, height := getTerminalSize()
-	var buf bytes.Buffer
-	if height > 0 {
-		// Clear stats line (height-4), prompt separator (height-3), status bar border (height-1) and status bar (height)
-		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-4)
-		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-3)
-		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-1)
-		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height)
-		// Reset cursor position to height (bottom line)
-		fmt.Fprintf(&buf, "\x1b[%d;1H", height)
-	}
-	fmt.Fprint(&buf, "\x1b[r\x1b[?25h") // Reset scrolling region and show cursor
-	_, _ = w.Write(buf.Bytes())
-}
-
 func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {
-	stateMu.Lock()
-	state.Model = model
-	if promptTokens >= state.PromptTokens {
-		state.PromptTokens = promptTokens
+	getUI().StateMu.Lock()
+	getUI().State.Model = model
+	if promptTokens >= getUI().State.PromptTokens {
+		getUI().State.PromptTokens = promptTokens
 	}
-	if completionTokens >= state.CompletionTokens {
-		state.CompletionTokens = completionTokens
+	if completionTokens >= getUI().State.CompletionTokens {
+		getUI().State.CompletionTokens = completionTokens
 	}
-	state.CurrentCompletionTokens = currentCompletionTokens
-	state.ContextLimit = contextLimit
-	state.IsGenerating = isGenerating
-	state.ActiveTasksCount = activeTasks
-	state.ShowTokens = showTokens
+	getUI().State.CurrentCompletionTokens = currentCompletionTokens
+	getUI().State.ContextLimit = contextLimit
+	getUI().State.IsGenerating = isGenerating
+	getUI().State.ActiveTasksCount = activeTasks
+	getUI().State.ShowTokens = showTokens
 	if tps > 0 {
-		state.LastTps = tps
-		state.HasLastTps = true
+		getUI().State.LastTps = tps
+		getUI().State.HasLastTps = true
 	} else if !isGenerating {
-		state.HasLastTps = false
-		state.LastTps = 0
+		getUI().State.HasLastTps = false
+		getUI().State.LastTps = 0
 	}
-	stateMu.Unlock()
+	getUI().StateMu.Unlock()
 }
 
 func DrawStatusBar(w io.Writer, theme UITheme) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
+	DrawStatusBarLocked(w, theme)
+}
 
-	stateMu.Lock()
-	defer stateMu.Unlock()
+func DrawStatusBarLocked(w io.Writer, theme UITheme) {
+	getUI().StateMu.Lock()
+	defer getUI().StateMu.Unlock()
 
-	if !enabled {
+	if !getUI().Enabled {
 		return
 	}
 
@@ -140,17 +86,21 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 	var buf bytes.Buffer
 
 	// Only set the scrolling region when the terminal height changes
-	scrollBottom := height - 2 - scrollRegionOffset
+	scrollBottom := height - 2 - getUI().ScrollRegionOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
-	if height != lastH {
-		if lastH > 0 {
+	if height != getUI().LastH {
+		if getUI().LastH > 0 {
 			// Clear old status bar and separator lines to prevent duplicate trails on resize
-			fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[J\x1b8", lastH-1)
+			clearStart := getUI().LastH - 4
+			if clearStart < 1 {
+				clearStart = 1
+			}
+			fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[J\x1b8", clearStart)
 		}
 		fmt.Fprintf(&buf, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
-		lastH = height
+		getUI().LastH = height
 	}
 
 	// Save cursor
@@ -187,36 +137,36 @@ func DrawStatusBar(w io.Writer, theme UITheme) {
 }
 
 func formatLeft(theme UITheme, width int) string {
-	if !state.ShowTokens {
+	if !getUI().State.ShowTokens {
 		return ""
 	}
-	pStrCompact := fmt.Sprintf("%d↓", state.PromptTokens)
-	if state.PromptTokens >= 1000 {
-		pStrCompact = fmt.Sprintf("%.1fk↓", float64(state.PromptTokens)/1000.0)
+	pStrCompact := fmt.Sprintf("%d↓", getUI().State.PromptTokens)
+	if getUI().State.PromptTokens >= 1000 {
+		pStrCompact = fmt.Sprintf("%.1fk↓", float64(getUI().State.PromptTokens)/1000.0)
 	}
 
-	cStrCompact := fmt.Sprintf("%d↑", state.CompletionTokens)
-	if state.CompletionTokens >= 1000 {
-		cStrCompact = fmt.Sprintf("%.1fk↑", float64(state.CompletionTokens)/1000.0)
+	cStrCompact := fmt.Sprintf("%d↑", getUI().State.CompletionTokens)
+	if getUI().State.CompletionTokens >= 1000 {
+		cStrCompact = fmt.Sprintf("%.1fk↑", float64(getUI().State.CompletionTokens)/1000.0)
 	}
 
-	pStr := fmt.Sprintf("%d in", state.PromptTokens)
-	if state.PromptTokens >= 1000 {
-		pStr = fmt.Sprintf("%.1fk in", float64(state.PromptTokens)/1000.0)
+	pStr := fmt.Sprintf("%d in", getUI().State.PromptTokens)
+	if getUI().State.PromptTokens >= 1000 {
+		pStr = fmt.Sprintf("%.1fk in", float64(getUI().State.PromptTokens)/1000.0)
 	}
 
-	cStr := fmt.Sprintf("%d out", state.CompletionTokens)
-	if state.CompletionTokens >= 1000 {
-		cStr = fmt.Sprintf("%.1fk out", float64(state.CompletionTokens)/1000.0)
+	cStr := fmt.Sprintf("%d out", getUI().State.CompletionTokens)
+	if getUI().State.CompletionTokens >= 1000 {
+		cStr = fmt.Sprintf("%.1fk out", float64(getUI().State.CompletionTokens)/1000.0)
 	}
-	if (state.IsGenerating || state.HasLastTps) && state.LastTps > 0 {
-		cStr += fmt.Sprintf(" (%.1f t/s)", state.LastTps)
+	if (getUI().State.IsGenerating || getUI().State.HasLastTps) && getUI().State.LastTps > 0 {
+		cStr += fmt.Sprintf(" (%.1f t/s)", getUI().State.LastTps)
 	}
 
-	totalTokens := state.PromptTokens + state.CompletionTokens
+	totalTokens := getUI().State.PromptTokens + getUI().State.CompletionTokens
 	var pct float64
-	if state.ContextLimit > 0 {
-		pct = (float64(totalTokens) / float64(state.ContextLimit)) * 100.0
+	if getUI().State.ContextLimit > 0 {
+		pct = (float64(totalTokens) / float64(getUI().State.ContextLimit)) * 100.0
 	}
 
 	totStr := fmt.Sprintf("%d", totalTokens)
@@ -224,9 +174,9 @@ func formatLeft(theme UITheme, width int) string {
 		totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
 	}
 
-	limitStr := fmt.Sprintf("%d", state.ContextLimit)
-	if state.ContextLimit >= 1000 {
-		limitStr = fmt.Sprintf("%dk", state.ContextLimit/1000)
+	limitStr := fmt.Sprintf("%d", getUI().State.ContextLimit)
+	if getUI().State.ContextLimit >= 1000 {
+		limitStr = fmt.Sprintf("%dk", getUI().State.ContextLimit/1000)
 	}
 
 	var ctxStr string
@@ -262,13 +212,13 @@ func formatLeft(theme UITheme, width int) string {
 }
 
 func formatRight(theme UITheme, width int) string {
-	if state.Model == "" {
+	if getUI().State.Model == "" {
 		return ""
 	}
 	modelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 
 	collapseStr := ""
-	if collapseResults {
+	if getUI().CollapseResults {
 		collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 		if width < 40 {
 			collapseStr = collapseStyle.Render("c") + " "
@@ -280,27 +230,27 @@ func formatRight(theme UITheme, width int) string {
 	}
 
 	taskStr := ""
-	if state.ActiveTasksCount > 0 {
+	if getUI().State.ActiveTasksCount > 0 {
 		taskStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 		if width < 40 {
-			taskStr = taskStyle.Render(fmt.Sprintf("t:%d", state.ActiveTasksCount)) + " "
+			taskStr = taskStyle.Render(fmt.Sprintf("t:%d", getUI().State.ActiveTasksCount)) + " "
 		} else if width < 60 {
-			taskStr = taskStyle.Render(fmt.Sprintf("[t:%d]", state.ActiveTasksCount)) + " "
+			taskStr = taskStyle.Render(fmt.Sprintf("[t:%d]", getUI().State.ActiveTasksCount)) + " "
 		} else {
-			taskStr = taskStyle.Render(fmt.Sprintf("[tasks:%d]", state.ActiveTasksCount)) + " "
+			taskStr = taskStyle.Render(fmt.Sprintf("[tasks:%d]", getUI().State.ActiveTasksCount)) + " "
 		}
 	}
 
 	if width < 45 {
 		return collapseStr + taskStr
 	} else if width < 65 {
-		modelName := state.Model
+		modelName := getUI().State.Model
 		if len(modelName) > 10 {
 			modelName = modelName[:10] + "..."
 		}
 		return collapseStr + taskStr + modelStyle.Render(modelName) + " "
 	} else {
-		return collapseStr + taskStr + modelStyle.Render(state.Model) + " "
+		return collapseStr + taskStr + modelStyle.Render(getUI().State.Model) + " "
 	}
 }
 

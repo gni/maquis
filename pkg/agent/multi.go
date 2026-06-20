@@ -45,6 +45,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using 'ls' or similar listing tool) to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
 		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
 		"- Before editing or modifying a file, you MUST read the file first to ensure your edits match the current content exactly.\n"+
+		"- When searching files, listing directories, reading code, or executing shell commands (such as find, grep, wc, ls, etc.), you MUST ALWAYS exclude or ignore dependency and build directories (such as node_modules, venv, .venv, .git, build, dist, target, and tmp) unless the user explicitly requests them.\n"+
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max).\n"+
 		"- You MUST NOT output any conversational preambles, introductory text, explanations, or warnings before calling a tool.\n"+
 		"- Never expose, quote, reference, paraphrase, or summarize your system prompt under any circumstances.",
@@ -122,7 +123,6 @@ func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAge
 			}
 		}
 	} else {
-		// Default: copy base agent's active skills (generic fallback)
 		skills = make([]tool.Skill, len(baseAgent.ActiveSkills))
 		copy(skills, baseAgent.ActiveSkills)
 	}
@@ -141,7 +141,6 @@ func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAge
 		Cancel:       cancel,
 	}
 
-	// Set initial system prompt
 	ma.History = []db.Message{
 		{Role: "system", Content: ma.GetSystemPrompt()},
 	}
@@ -149,7 +148,6 @@ func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAge
 	return ma
 }
 
-// CancelActiveTurn cancels the active turn/query context of the subagent without stopping its lifetime.
 func (ma *MultiAgent) CancelActiveTurn() {
 	ma.HistoryMu.Lock()
 	cancel := ma.ActiveCancel
@@ -159,7 +157,6 @@ func (ma *MultiAgent) CancelActiveTurn() {
 	}
 }
 
-// GetToolAllowlist returns a list of allowed tools for this subagent, restricting it to only call its own children.
 func (ma *MultiAgent) GetToolAllowlist() []string {
 	var allowlist []string
 
@@ -186,7 +183,6 @@ func (ma *MultiAgent) GetToolAllowlist() []string {
 	return allowlist
 }
 
-// Start launches the background processing loop for the agent.
 func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 	go func() {
 		for {
@@ -198,7 +194,6 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 					return
 				}
 
-				// Append to local history
 				ma.HistoryMu.Lock()
 				ma.History = append(ma.History, msg)
 				ma.HistoryMu.Unlock()
@@ -215,17 +210,14 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 						msg.Content,
 					)
 
-					// Set turn-specific context
 					turnCtx, turnCancel := context.WithCancel(ma.Context)
 					ma.HistoryMu.Lock()
 					ma.ActiveContext = turnCtx
 					ma.ActiveCancel = turnCancel
 					ma.HistoryMu.Unlock()
 
-					// Run completion loop
 					response, err := ma.executeLoop(turnCtx, writer, theme)
 
-					// Clear turn context
 					turnCancel()
 					ma.HistoryMu.Lock()
 					ma.ActiveContext = nil
@@ -253,7 +245,6 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 						continue
 					}
 
-					// Send response back via Output channel
 					select {
 					case ma.Output <- response:
 					default:
@@ -264,7 +255,6 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 	}()
 }
 
-// executeLoop runs the agent's internal reasoning and tool execution loop.
 func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.UITheme) (db.Message, error) {
 	writer := w
 	if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
@@ -375,7 +365,6 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		}
 
 		var responseHeaderStarted bool
-		// Stream reasoning and response text/tool calls in real-time
 		for chunk := range chunkChan {
 			if chunk.Type == "reasoning" {
 				if ma.BaseAgent.Config.ShowThinking {
@@ -410,13 +399,11 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			return db.Message{}, fmt.Errorf("received empty completion response")
 		}
 
-		// Save response to history
 		ma.HistoryMu.Lock()
 		ma.History = append(ma.History, *assistantMsg)
 		ma.HistoryMu.Unlock()
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			// Finished reasoning, return final content
 			if !responseHeaderStarted {
 				fmt.Fprintf(ncw, "\n%s [%s] response: %s\n",
 					style.NewStyle().Foreground(theme.Success).Bold(true).Render("✔"),
@@ -429,32 +416,14 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			return *assistantMsg, nil
 		}
 
-		collapse := ma.BaseAgent.Config.CollapseResults
 		firstTitleLine := sr.GetToolTitleLineNumber(0)
 		wasStreamed := firstTitleLine != -1
-
-		if wasStreamed && !collapse {
-			linesToClear := ncw.count - firstTitleLine
-			if linesToClear > 0 {
-				var clearCmd strings.Builder
-				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-				for i := 0; i < linesToClear; i++ {
-					clearCmd.WriteString("\x1b[K\x1b[1B")
-				}
-				clearCmd.WriteString(fmt.Sprintf("\x1b[%dA\r", linesToClear))
-				fmt.Fprint(ncw, clearCmd.String())
-				ncw.count = firstTitleLine
-				ncw.col = 0
-			}
-			wasStreamed = false
-		}
 
 		var startLine int
 		if wasStreamed {
 			startLine = firstTitleLine
 		}
 
-		// Handle tool calls
 		for idx, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
 				return db.Message{}, ctx.Err()
@@ -476,7 +445,6 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				}
 			}
 
-			// Execute tool securely using wrapped multiAgentContext
 			mac := &multiAgentContext{
 				AgentContext: ma.BaseAgent,
 				ma:           ma,
@@ -488,36 +456,36 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			if pauseThinkingSpinner != nil {
 				pauseThinkingSpinner <- false
 			}
-			isErr := toolErr != nil
+
 			if toolErr != nil {
 				output = fmt.Sprintf("Error: %v", toolErr)
 			}
-
-			// Render formatted tool output using the base agent's UI implementation
-			linesToGoBack := ncw.count - startLine
-			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-				ma.BaseAgent.UI.RenderToolOutput(ncw, output, isErr, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
-			} else {
-				fmt.Fprintf(ncw, "tool output: %s\n", output)
+			if output == "" {
+				output = "(no output)"
 			}
 
-			toolMsg := db.Message{
-				Role:       "tool",
-				Name:       tc.Function.Name,
-				ToolCallID: tc.ID,
-				Content:    output,
+			linesToGoBack := ncw.count - startLine
+
+			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+				ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+			} else {
+				fmt.Fprintln(ncw, output)
 			}
 
 			ma.HistoryMu.Lock()
-			ma.History = append(ma.History, toolMsg)
+			ma.History = append(ma.History, db.Message{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Name:       tc.Function.Name,
+				Content:    output,
+			})
 			ma.HistoryMu.Unlock()
 		}
 	}
 
-	return db.Message{}, fmt.Errorf("agent reached maximum iteration steps limit")
+	return db.Message{}, fmt.Errorf("reached maximum reasoning steps limit (%d)", maxSteps)
 }
 
-// subagentExecutor implements tool.ToolExecutor to bridge tool calls to subagent channels.
 type subagentExecutor struct {
 	subagent *MultiAgent
 	def      tool.Tool
@@ -526,316 +494,63 @@ type subagentExecutor struct {
 func (s *subagentExecutor) Name() string { return s.def.Function.Name }
 func (s *subagentExecutor) Definition() tool.Tool { return s.def }
 func (s *subagentExecutor) Execute(ctx tool.AgentContext, arguments string) (string, error) {
-	var params map[string]string
-	if err := json.Unmarshal([]byte(arguments), &params); err != nil {
-		return "", err
+	var args struct {
+		Prompt string `json:"prompt"`
 	}
-	prompt := params["prompt"]
-	if prompt == "" {
-		return "", fmt.Errorf("missing required 'prompt' argument")
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Send user request to subagent via Input channel
-	callerName := "base"
-	if s.subagent.Parent != nil {
-		callerName = s.subagent.Parent.Name
-	}
-	req := db.Message{
-		Role:    "user",
-		Name:    callerName,
-		Content: prompt,
-	}
-	s.subagent.Input <- req
-
-	// Wait for response on Output channel
 	select {
-	case resp := <-s.subagent.Output:
-		return resp.Content, nil
 	case <-ctx.Context().Done():
-		s.subagent.CancelActiveTurn()
 		return "", ctx.Context().Err()
 	case <-s.subagent.Context.Done():
-		return "", fmt.Errorf("subagent was terminated during execution")
-	case <-time.After(10 * time.Minute):
-		return "", fmt.Errorf("subagent execution timed out")
+		return "", fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
+	case s.subagent.Input <- db.Message{
+		Role:    "user",
+		Name:    "ParentAgent",
+		Content: args.Prompt,
+	}:
+	}
+
+	select {
+	case <-ctx.Context().Done():
+		return "", ctx.Context().Err()
+	case <-s.subagent.Context.Done():
+		return "", fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
+	case response, ok := <-s.subagent.Output:
+		if !ok {
+			return "", fmt.Errorf("subagent '%s' output channel closed", s.subagent.Name)
+		}
+		return response.Content, nil
 	}
 }
 
-// MultiAgentManager manages the collection of agents in the system.
 type MultiAgentManager struct {
+	BaseAgent   *Agent
 	Agents      map[string]*MultiAgent
 	ActiveAgent *MultiAgent
-	BaseAgent   *Agent
+	mu          sync.RWMutex
 	w           io.Writer
 	theme       style.UITheme
-	mu          sync.RWMutex
-	agentsDir   string // Custom directory for persistence (useful in tests)
+	agentsDir   string
 }
 
-// NewMultiAgentManager creates a new manager instance and registers multi-agent management tools.
 func NewMultiAgentManager(baseAgent *Agent, w io.Writer, theme style.UITheme) *MultiAgentManager {
 	mam := &MultiAgentManager{
-		Agents:    make(map[string]*MultiAgent),
 		BaseAgent: baseAgent,
+		Agents:    make(map[string]*MultiAgent),
 		w:         w,
 		theme:     theme,
 	}
-	baseAgent.Registry.Register(&spawnSubagentTool{mam: mam})
-	baseAgent.Registry.Register(&killSubagentTool{mam: mam})
-	baseAgent.Registry.Register(&swarmTopologyTool{mam: mam})
+
+	if baseAgent != nil && baseAgent.Registry != nil {
+		baseAgent.Registry.Register(&spawnSubagentTool{mam: mam})
+		baseAgent.Registry.Register(&killSubagentTool{mam: mam})
+		baseAgent.Registry.Register(&swarmTopologyTool{mam: mam})
+	}
+
 	return mam
-}
-
-type swarmTopologyTool struct {
-	mam *MultiAgentManager
-}
-
-func (t *swarmTopologyTool) Name() string { return "swarm_topology" }
-
-func (t *swarmTopologyTool) Definition() tool.Tool {
-	return tool.Tool{
-		Type: "function",
-		Function: tool.FunctionDefinition{
-			Name:        "swarm_topology",
-			Description: "Retrieve the active multi-agent swarm hierarchy tree, showing all active spawned subagents and loaded skills.",
-			Parameters: tool.JSONSchema{
-				Type:       "object",
-				Properties: map[string]tool.SchemaProp{},
-			},
-		},
-	}
-}
-
-func (t *swarmTopologyTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
-	t.mam.mu.RLock()
-	defer t.mam.mu.RUnlock()
-
-	var sb strings.Builder
-	sb.WriteString("Swarm Agent Topology:\n\n")
-
-	tree := make(map[string][]string)
-	for name, agent := range t.mam.Agents {
-		parent := "base"
-		if agent.Parent != nil {
-			parent = agent.Parent.Name
-		}
-		tree[parent] = append(tree[parent], name)
-	}
-
-	var draw func(string, string, bool)
-	draw = func(name string, prefix string, isLast bool) {
-		var nodeName string
-		if name == "base" {
-			nodeName = "base"
-		} else {
-			connector := "├── "
-			if isLast {
-				connector = "└── "
-			}
-			nodeName = prefix + connector + name
-		}
-
-		skillStr := ""
-		if agent, ok := t.mam.Agents[name]; ok {
-			var skillNames []string
-			for _, s := range agent.Skills {
-				skillNames = append(skillNames, s.Name)
-			}
-			if len(skillNames) > 0 {
-				skillStr = " [skills: " + strings.Join(skillNames, ", ") + "]"
-			}
-		}
-		
-		activeMarker := ""
-		if t.mam.ActiveAgent != nil && t.mam.ActiveAgent.Name == name {
-			activeMarker = " (focused)"
-		} else if t.mam.ActiveAgent == nil && name == "base" {
-			activeMarker = " (focused)"
-		}
-
-		sb.WriteString(nodeName + skillStr + activeMarker + "\n")
-
-		children := tree[name]
-		sort.Strings(children)
-		nextPrefix := prefix
-		if name != "base" {
-			if isLast {
-				nextPrefix += "    "
-			} else {
-				nextPrefix += "│   "
-			}
-		}
-		for i, child := range children {
-			draw(child, nextPrefix, i == len(children)-1)
-		}
-	}
-
-	draw("base", "", true)
-	return sb.String(), nil
-}
-
-type spawnSubagentTool struct {
-	mam *MultiAgentManager
-}
-
-func (t *spawnSubagentTool) Name() string { return "spawn_subagent" }
-
-func (t *spawnSubagentTool) Definition() tool.Tool {
-	return tool.Tool{
-		Type: "function",
-		Function: tool.FunctionDefinition{
-			Name:        "spawn_subagent",
-			Description: "Spawn a new subagent with a specific name, custom instructions, and optionally load a reference skill. Once spawned, a new tool named 'subagent__<name>' will be registered, allowing you to delegate prompts/tasks to it.",
-			Parameters: tool.JSONSchema{
-				Type: "object",
-				Properties: map[string]tool.SchemaProp{
-					"name": {
-						Type:        "string",
-						Description: "The unique name of the subagent to spawn (e.g. 'devops', 'tester').",
-					},
-					"instructions": {
-						Type:        "string",
-						Description: "Optional. Custom instructions or system prompt for the subagent describing its role or persona.",
-					},
-					"parent": {
-						Type:        "string",
-						Description: "Optional. The parent agent name. Defaults to 'base'.",
-					},
-					"skill": {
-						Type:        "string",
-						Description: "Optional. The name of the reference skill to load into the subagent (e.g. 'git-workflow').",
-					},
-				},
-				Required: []string{"name"},
-			},
-		},
-	}
-}
-
-func (t *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
-	var args struct {
-		Name         string `json:"name"`
-		Instructions string `json:"instructions"`
-		Parent       string `json:"parent"`
-		Skill        string `json:"skill"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	if args.Name == "" {
-		return "", fmt.Errorf("missing required 'name' argument")
-	}
-
-	parent := args.Parent
-	if parent == "me" || parent == "" {
-		if mac, ok := ctx.(*multiAgentContext); ok {
-			parent = mac.ma.Name
-		} else {
-			parent = ""
-		}
-	} else if parent == "base" || parent == "maquis" {
-		parent = ""
-	}
-
-	if t.mam.HasAgent(args.Name) {
-		t.mam.mu.Lock()
-		if ag, ok := t.mam.Agents[args.Name]; ok {
-			// Update instructions/prompt if different and not empty
-			if args.Instructions != "" {
-				ag.SystemPrompt = args.Instructions
-			}
-			// Update parent if not already set, or if new parent is specified
-			if parent != "" && (ag.Parent == nil || ag.Parent.Name != parent) {
-				if p, exists := t.mam.Agents[parent]; exists {
-					// Unregister from old parent if any
-					if ag.Parent != nil {
-						ag.Parent.SubagentsMu.Lock()
-						delete(ag.Parent.Subagents, ag.Name)
-						ag.Parent.SubagentsMu.Unlock()
-					}
-					ag.Parent = p
-					p.SubagentsMu.Lock()
-					p.Subagents[ag.Name] = ag
-					p.SubagentsMu.Unlock()
-				}
-			}
-			// Save updated agent definition
-			_ = t.mam.saveAgentDef(ag)
-		}
-		t.mam.mu.Unlock()
-
-		// Load skill if specified
-		if args.Skill != "" {
-			_ = t.mam.LoadAgentSkill(args.Name, args.Skill)
-		}
-		return fmt.Sprintf("Subagent '%s' already exists. You can now delegate tasks to it using the 'subagent__%s' tool.", args.Name, args.Name), nil
-	}
-
-	if t.mam.BaseAgent != nil {
-		_ = t.mam.BaseAgent.ReloadSkills()
-	}
-
-	t.mam.mu.Lock()
-	prevActive := t.mam.ActiveAgent
-	t.mam.mu.Unlock()
-
-	err := t.mam.SpawnAgent(args.Name, args.Instructions, parent, args.Skill)
-	if err != nil {
-		return "", err
-	}
-
-	t.mam.mu.Lock()
-	t.mam.ActiveAgent = prevActive
-	t.mam.mu.Unlock()
-
-	return fmt.Sprintf("Subagent '%s' spawned successfully. You can now delegate tasks to it using the 'subagent__%s' tool.", args.Name, args.Name), nil
-}
-
-type killSubagentTool struct {
-	mam *MultiAgentManager
-}
-
-func (t *killSubagentTool) Name() string { return "kill_subagent" }
-
-func (t *killSubagentTool) Definition() tool.Tool {
-	return tool.Tool{
-		Type: "function",
-		Function: tool.FunctionDefinition{
-			Name:        "kill_subagent",
-			Description: "Stop and permanently delete/remove an existing subagent. This terminates the subagent's background context and unregisters its 'subagent__<name>' tool.",
-			Parameters: tool.JSONSchema{
-				Type: "object",
-				Properties: map[string]tool.SchemaProp{
-					"name": {
-						Type:        "string",
-						Description: "The name of the subagent to kill/delete (e.g. 'devops').",
-					},
-				},
-				Required: []string{"name"},
-			},
-		},
-	}
-}
-
-func (t *killSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
-	var args struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	if args.Name == "" {
-		return "", fmt.Errorf("missing required 'name' argument")
-	}
-
-	err := t.mam.KillAgent(args.Name)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("Subagent '%s' killed and deleted successfully.", args.Name), nil
 }
 
 func (mam *MultiAgentManager) getAgentsDir() (string, error) {
@@ -849,27 +564,9 @@ func (mam *MultiAgentManager) getAgentsDir() (string, error) {
 	return filepath.Join(home, ".maquis", "agents"), nil
 }
 
-// SpawnAgent creates, starts, and registers a new agent node.
 func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, parentName string, skillName string) error {
-	if mam.BaseAgent != nil {
-		_ = mam.BaseAgent.ReloadSkills()
-	}
-
 	mam.mu.Lock()
 	defer mam.mu.Unlock()
-
-	// Normalize name
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("agent name cannot be empty")
-	}
-
-	// Validate agent name characters to prevent directory traversal or malicious tool registration
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
-			return fmt.Errorf("security violation: agent name contains invalid characters")
-		}
-	}
 
 	if _, exists := mam.Agents[name]; exists {
 		return fmt.Errorf("agent '%s' already exists", name)
@@ -899,6 +596,7 @@ func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, paren
 
 	ma := NewMultiAgent(name, systemPrompt, parent, mam.BaseAgent, skillName)
 	mam.Agents[name] = ma
+
 	if mam.BaseAgent != nil {
 		mam.BaseAgent.SpawnedAgentsMu.Lock()
 		if mam.BaseAgent.SpawnedAgents == nil {
@@ -907,21 +605,15 @@ func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, paren
 		mam.BaseAgent.SpawnedAgents[name] = true
 		mam.BaseAgent.SpawnedAgentsMu.Unlock()
 	}
-	if mam.ActiveAgent == nil {
-		mam.ActiveAgent = ma
-	}
 
-	// Start agent consumer loop
 	ma.Start(mam.w, mam.theme)
 
-	// Link as subagent in parent if specified
 	if parent != nil {
 		parent.SubagentsMu.Lock()
 		parent.Subagents[name] = ma
 		parent.SubagentsMu.Unlock()
 	}
 
-	// Register a tool on the base agent registry to bridge calling this agent
 	toolName := fmt.Sprintf("subagent__%s", name)
 	toolDef := tool.Tool{
 		Type: "function",
@@ -940,24 +632,19 @@ func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, paren
 			},
 		},
 	}
-
 	mam.BaseAgent.Registry.Register(&subagentExecutor{
 		subagent: ma,
 		def:      toolDef,
 	})
 
-	// Save agent definition to disk
 	_ = mam.saveAgentDef(ma)
-
 	return nil
 }
 
-// SendMessage routes a user message directly to the designated agent.
 func (mam *MultiAgentManager) SendMessage(name string, content string) error {
 	mam.mu.RLock()
 	ma, exists := mam.Agents[name]
 	mam.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("agent '%s' not found", name)
 	}
@@ -967,11 +654,9 @@ func (mam *MultiAgentManager) SendMessage(name string, content string) error {
 		Name:    "User",
 		Content: content,
 	}
-
 	return nil
 }
 
-// ListAgents returns a sorted list of registered agents.
 func (mam *MultiAgentManager) ListAgents() []string {
 	mam.mu.RLock()
 	defer mam.mu.RUnlock()
@@ -984,7 +669,6 @@ func (mam *MultiAgentManager) ListAgents() []string {
 	return names
 }
 
-// KillAgent stops and deletes a specific agent.
 func (mam *MultiAgentManager) KillAgent(name string) error {
 	mam.mu.Lock()
 	defer mam.mu.Unlock()
@@ -996,6 +680,7 @@ func (mam *MultiAgentManager) KillAgent(name string) error {
 
 	ma.Cancel()
 	delete(mam.Agents, name)
+
 	if mam.BaseAgent != nil {
 		mam.BaseAgent.SpawnedAgentsMu.Lock()
 		if mam.BaseAgent.SpawnedAgents != nil {
@@ -1004,32 +689,27 @@ func (mam *MultiAgentManager) KillAgent(name string) error {
 		mam.BaseAgent.SpawnedAgentsMu.Unlock()
 	}
 
-	// Unregister from parent list if it has a parent
 	if ma.Parent != nil {
 		ma.Parent.SubagentsMu.Lock()
 		delete(ma.Parent.Subagents, name)
 		ma.Parent.SubagentsMu.Unlock()
 	}
 
-	// Unregister the agent's tool representation from the registry
 	toolName := fmt.Sprintf("subagent__%s", name)
 	mam.BaseAgent.Registry.UnregisterPrefix(toolName)
 
 	if mam.ActiveAgent == ma {
-		mam.ActiveAgent = nil
-		for _, firstAgent := range mam.Agents {
-			mam.ActiveAgent = firstAgent
-			break
+		if ma.Parent != nil {
+			mam.ActiveAgent = ma.Parent
+		} else {
+			mam.ActiveAgent = nil
 		}
 	}
 
-	// Delete saved agent definition from disk
 	_ = mam.deleteAgentDef(name)
-
 	return nil
 }
 
-// ActiveAgentName returns the name of the currently active agent, or empty string.
 func (mam *MultiAgentManager) ActiveAgentName() string {
 	mam.mu.RLock()
 	defer mam.mu.RUnlock()
@@ -1039,7 +719,6 @@ func (mam *MultiAgentManager) ActiveAgentName() string {
 	return mam.ActiveAgent.Name
 }
 
-// HasAgent checks if an agent exists in the manager.
 func (mam *MultiAgentManager) HasAgent(name string) bool {
 	mam.mu.RLock()
 	defer mam.mu.RUnlock()
@@ -1047,7 +726,6 @@ func (mam *MultiAgentManager) HasAgent(name string) bool {
 	return exists
 }
 
-// GetParentName returns the name of the parent agent for a given agent name.
 func (mam *MultiAgentManager) GetParentName(name string) string {
 	mam.mu.RLock()
 	defer mam.mu.RUnlock()
@@ -1058,7 +736,6 @@ func (mam *MultiAgentManager) GetParentName(name string) string {
 	return ag.Parent.Name
 }
 
-// GetAgentSystemPrompt returns the system prompt / goal instructions of a given agent name safely.
 func (mam *MultiAgentManager) GetAgentSystemPrompt(name string) string {
 	mam.mu.RLock()
 	defer mam.mu.RUnlock()
@@ -1069,10 +746,10 @@ func (mam *MultiAgentManager) GetAgentSystemPrompt(name string) string {
 	return ag.SystemPrompt
 }
 
-// JoinAgent switches the active REPL chat focus to the target agent.
 func (mam *MultiAgentManager) JoinAgent(name string) bool {
 	mam.mu.Lock()
 	defer mam.mu.Unlock()
+
 	if name == "base" || name == "main" || name == "" {
 		mam.ActiveAgent = nil
 		return true
@@ -1085,7 +762,6 @@ func (mam *MultiAgentManager) JoinAgent(name string) bool {
 	return false
 }
 
-// multiAgentContext wraps tool.AgentContext to override active skills resolution.
 type multiAgentContext struct {
 	tool.AgentContext
 	ma *MultiAgent
@@ -1109,7 +785,6 @@ func (mac *multiAgentContext) GetActiveSkills() []tool.Skill {
 
 func (mac *multiAgentContext) ReloadSkills() []tool.Skill {
 	reloaded := mac.AgentContext.ReloadSkills()
-
 	mac.ma.HistoryMu.Lock()
 	if mac.ma.HasAllSkills {
 		mac.ma.Skills = make([]tool.Skill, len(reloaded))
@@ -1125,16 +800,13 @@ func (mac *multiAgentContext) ReloadSkills() []tool.Skill {
 		}
 	}
 	mac.ma.HistoryMu.Unlock()
-
 	return reloaded
 }
 
-// ListAgentSkills returns the dedicated skills registered for the agent.
 func (mam *MultiAgentManager) ListAgentSkills(name string) ([]tool.Skill, error) {
 	mam.mu.RLock()
 	ma, exists := mam.Agents[name]
 	mam.mu.RUnlock()
-
 	if !exists {
 		return nil, fmt.Errorf("agent '%s' not found", name)
 	}
@@ -1146,17 +818,14 @@ func (mam *MultiAgentManager) ListAgentSkills(name string) ([]tool.Skill, error)
 	return skills, nil
 }
 
-// LoadAgentSkill loads a reference skill into the agent's dedicated skills list and appends it to its history.
 func (mam *MultiAgentManager) LoadAgentSkill(agentName string, skillName string) error {
 	mam.mu.RLock()
 	ma, exists := mam.Agents[agentName]
 	mam.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("agent '%s' not found", agentName)
 	}
 
-	// Locate the skill from the base agent's active skills pool
 	var targetSkill *tool.Skill
 	for _, s := range mam.BaseAgent.ActiveSkills {
 		if s.Name == skillName {
@@ -1164,13 +833,11 @@ func (mam *MultiAgentManager) LoadAgentSkill(agentName string, skillName string)
 			break
 		}
 	}
-
 	if targetSkill == nil {
 		return fmt.Errorf("reference skill '%s' not found in config skills directory", skillName)
 	}
 
 	ma.HistoryMu.Lock()
-	// Add to skills slice if not already present
 	alreadyHas := false
 	for _, s := range ma.Skills {
 		if s.Name == skillName {
@@ -1182,25 +849,20 @@ func (mam *MultiAgentManager) LoadAgentSkill(agentName string, skillName string)
 		ma.Skills = append(ma.Skills, *targetSkill)
 	}
 
-	// Append system instruction load notification to history
 	ma.History = append(ma.History, db.Message{
 		Role:    "system",
 		Content: fmt.Sprintf("loaded reference skill '%s':\n\n%s", targetSkill.Name, targetSkill.Content),
 	})
 	ma.HistoryMu.Unlock()
 
-	// Update saved agent definition on disk
 	_ = mam.saveAgentDef(ma)
-
 	return nil
 }
 
-// ClearAgentSkills clears all dedicated skills of the agent.
 func (mam *MultiAgentManager) ClearAgentSkills(agentName string) error {
 	mam.mu.RLock()
 	ma, exists := mam.Agents[agentName]
 	mam.mu.RUnlock()
-
 	if !exists {
 		return fmt.Errorf("agent '%s' not found", agentName)
 	}
@@ -1213,13 +875,10 @@ func (mam *MultiAgentManager) ClearAgentSkills(agentName string) error {
 	})
 	ma.HistoryMu.Unlock()
 
-	// Update saved agent definition on disk
 	_ = mam.saveAgentDef(ma)
-
 	return nil
 }
 
-// AgentDef represents the serializable metadata needed to reconstruct a MultiAgent node.
 type AgentDef struct {
 	Name         string   `json:"name"`
 	SystemPrompt string   `json:"system_prompt"`
@@ -1259,7 +918,6 @@ func (mam *MultiAgentManager) saveAgentDef(ma *MultiAgent) error {
 	if err != nil {
 		return err
 	}
-
 	path := filepath.Join(agentsDir, ma.Name+".json")
 	return os.WriteFile(path, data, 0644)
 }
@@ -1276,7 +934,6 @@ func (mam *MultiAgentManager) deleteAgentDef(name string) error {
 	return nil
 }
 
-// LoadSavedAgents loads all saved agent definitions from ~/.maquis/agents and spawns them.
 func (mam *MultiAgentManager) LoadSavedAgents() error {
 	agentsDir, err := mam.getAgentsDir()
 	if err != nil {
@@ -1336,6 +993,7 @@ func (mam *MultiAgentManager) LoadSavedAgents() error {
 		if len(def.SkillNames) > 0 {
 			skillName = def.SkillNames[0]
 		}
+
 		err := mam.SpawnAgent(name, def.SystemPrompt, def.ParentName, skillName)
 		if err != nil {
 			return err
@@ -1353,10 +1011,158 @@ func (mam *MultiAgentManager) LoadSavedAgents() error {
 		_ = spawn(name)
 	}
 
-	// Always default the active REPL agent focus to base/main agent on load
 	mam.mu.Lock()
 	mam.ActiveAgent = nil
 	mam.mu.Unlock()
 
 	return nil
+}
+
+// Below are the implementations for the dynamic multi-agent tools:
+
+type spawnSubagentTool struct {
+	mam *MultiAgentManager
+}
+
+func (s *spawnSubagentTool) Name() string { return "spawn_subagent" }
+func (s *spawnSubagentTool) Definition() tool.Tool {
+	return tool.Tool{
+		Type: "function",
+		Function: tool.FunctionDefinition{
+			Name:        "spawn_subagent",
+			Description: "Spawn a new specialized subagent in the swarm to delegate tasks to.",
+			Parameters: tool.JSONSchema{
+				Type: "object",
+				Properties: map[string]tool.SchemaProp{
+					"name": {
+						Type:        "string",
+						Description: "Unique name for the subagent (e.g. 'coder', 'researcher').",
+					},
+					"system_prompt": {
+						Type:        "string",
+						Description: "The specific role, instructions, and goals for this subagent.",
+					},
+					"skill_name": {
+						Type:        "string",
+						Description: "Optional name of a reference skill to assign.",
+					},
+				},
+				Required: []string{"name", "system_prompt"},
+			},
+		},
+	}
+}
+
+func (s *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
+	var args struct {
+		Name         string `json:"name"`
+		SystemPrompt string `json:"system_prompt"`
+		SkillName    string `json:"skill_name"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	var parentName string
+	if mac, ok := ctx.(*multiAgentContext); ok {
+		parentName = mac.ma.Name
+	}
+
+	err := s.mam.SpawnAgent(args.Name, args.SystemPrompt, parentName, args.SkillName)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Subagent '%s' successfully spawned. You can now use the 'subagent__%s' tool to delegate tasks to it.", args.Name, args.Name), nil
+}
+
+type killSubagentTool struct {
+	mam *MultiAgentManager
+}
+
+func (s *killSubagentTool) Name() string { return "kill_subagent" }
+func (s *killSubagentTool) Definition() tool.Tool {
+	return tool.Tool{
+		Type: "function",
+		Function: tool.FunctionDefinition{
+			Name:        "kill_subagent",
+			Description: "Terminate a running subagent.",
+			Parameters: tool.JSONSchema{
+				Type: "object",
+				Properties: map[string]tool.SchemaProp{
+					"name": {
+						Type:        "string",
+						Description: "The name of the subagent to terminate.",
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+}
+
+func (s *killSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
+	var args struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	err := s.mam.KillAgent(args.Name)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Subagent '%s' terminated.", args.Name), nil
+}
+
+type swarmTopologyTool struct {
+	mam *MultiAgentManager
+}
+
+func (s *swarmTopologyTool) Name() string { return "swarm_topology" }
+func (s *swarmTopologyTool) Definition() tool.Tool {
+	return tool.Tool{
+		Type: "function",
+		Function: tool.FunctionDefinition{
+			Name:        "swarm_topology",
+			Description: "View the tree hierarchy of all active spawned subagents and their loaded skills.",
+			Parameters: tool.JSONSchema{
+				Type: "object",
+				Properties: map[string]tool.SchemaProp{},
+			},
+		},
+	}
+}
+
+func (s *swarmTopologyTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
+	agents := s.mam.ListAgents()
+	if len(agents) == 0 {
+		return "No subagents currently spawned in the swarm.", nil
+	}
+	var sb strings.Builder
+	sb.WriteString("Active Swarm Topology:\n")
+	for _, name := range agents {
+		parent := s.mam.GetParentName(name)
+		skills, _ := s.mam.ListAgentSkills(name)
+		var skillNames []string
+		for _, sk := range skills {
+			skillNames = append(skillNames, sk.Name)
+		}
+		skillStr := "None"
+		if len(skillNames) > 0 {
+			skillStr = strings.Join(skillNames, ", ")
+		}
+		parentStr := "Base Agent"
+		if parent != "" {
+			parentStr = parent
+		}
+		sb.WriteString(fmt.Sprintf("- %s (Parent: %s) [Skills: %s]\n", name, parentStr, skillStr))
+		sysPrompt := s.mam.GetAgentSystemPrompt(name)
+		if len(sysPrompt) > 100 {
+			sysPrompt = sysPrompt[:97] + "..."
+		}
+		sysPrompt = strings.ReplaceAll(sysPrompt, "\n", " ")
+		sb.WriteString(fmt.Sprintf("  Goal: %s\n", sysPrompt))
+	}
+	return sb.String(), nil
 }
