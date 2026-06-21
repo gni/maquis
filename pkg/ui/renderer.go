@@ -60,7 +60,7 @@ func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
 }
 
 func clearScrollRegionLines(ppw *PromptPreservingWriter, startLine int, w io.Writer) {
-	scrollBottom := ppw.Height() - 5
+	scrollBottom := ppw.Height() - 6
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -291,6 +291,12 @@ func (sr *StreamRenderer) flushLocked() {
 func (sr *StreamRenderer) printNormalLine(line string) {
 	trimmed := strings.TrimSpace(line)
 	
+	// 0. Handle delimiter: make a space instead of "----"
+	if trimmed == "----" {
+		fmt.Fprint(sr.w, " ")
+		return
+	}
+
 	// 1. Handle headers: e.g. "# Header", "## Header", etc.
 	if strings.HasPrefix(trimmed, "#") {
 		hashes := 0

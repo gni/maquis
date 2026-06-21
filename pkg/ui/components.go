@@ -699,12 +699,9 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		fmt.Fprintln(w, renderedLine)
 	}
 
-	if collapse && len(lines) > 8 {
-		for i := 0; i < 8; i++ {
-			printLine(lines[i])
-		}
-		collapsedCount := len(lines) - 8
-		collapsedMsg := fmt.Sprintf("  ... [%d lines collapsed. Press Ctrl+O or type /expand to view full output] ...", collapsedCount)
+	if collapse && len(lines) > 0 {
+		collapsedCount := len(lines)
+		collapsedMsg := fmt.Sprintf("  ... [%d lines collapsed. Press Ctrl+O or type /expand to view output] ...", collapsedCount)
 		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Border).Italic(true).Render(collapsedMsg))
 	} else {
 		for _, line := range lines {
@@ -959,6 +956,37 @@ func DrawStaticPromptSeparatorWithSpinnerLocked(w io.Writer, showThinking bool, 
 	_, _ = w.Write(buf.Bytes())
 }
 
+func renderMarkdownContent(w io.Writer, content string, theme UITheme) {
+	lines := strings.Split(content, "\n")
+	sr := &StreamRenderer{
+		theme: theme,
+		w:     w,
+	}
+	for i, line := range lines {
+		if sr.inCodeBlock {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") {
+				sr.inCodeBlock = false
+			} else {
+				fmt.Fprint(w, style.NewStyle().Foreground(theme.Highlight).Render(line))
+				if i < len(lines)-1 {
+					fmt.Fprintln(w)
+				}
+			}
+		} else {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") {
+				sr.inCodeBlock = true
+			} else {
+				sr.printNormalLine(line)
+				if i < len(lines)-1 {
+					fmt.Fprintln(w)
+				}
+			}
+		}
+	}
+}
+
 func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg *config.Config) {
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
@@ -1039,6 +1067,8 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			fmt.Fprintln(w, borderStyle.Render(separator))
 			fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), msg.Content)
 		} else if msg.Role == "assistant" {
+			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
+			fmt.Fprintln(w, divider)
 
 			hasPrintedAnything := false
 			if msg.ReasoningContent != "" && cfg.ShowThinking {
@@ -1056,7 +1086,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 				if hasPrintedAnything {
 					fmt.Fprintln(w)
 				}
-				fmt.Fprintln(w, msg.Content)
+				renderMarkdownContent(w, msg.Content, theme)
 				hasPrintedAnything = true
 			}
 

@@ -506,7 +506,7 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	}
 
 	_, height := getTerminalSize()
-	scrollBottom := height - 5 - getUI().PasteLinesOffset
+	scrollBottom := height - 6 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -776,7 +776,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}
 
-	SetScrollRegionOffset(3)
+	SetScrollRegionOffset(4)
 	InitStatusBar(os.Stderr)
 	defer ShutdownStatusBar(os.Stderr)
 	defer fmt.Fprint(os.Stderr, "\x1b[?25h")
@@ -1464,7 +1464,7 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	}
 
 	_, height := getTerminalSize()
-	scrollBottom := height - 5 - getUI().PasteLinesOffset
+	scrollBottom := height - 6 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}

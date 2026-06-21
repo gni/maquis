@@ -11,11 +11,12 @@ import (
 
 // PromptPreservingWriter wraps an io.Writer (typically os.Stderr) and ensures
 // that all streamed output is confined to the terminal's scrolling region
-// (rows 1 through height-4). After every write, the cursor is repositioned
+// (rows 1 through height-5). After every write, the cursor is repositioned
 // back to the prompt input line (height-2, column 3) so it blinks stably
 // at the "> " prompt — even while tokens are streaming above it.
 //
-// The bottom 5 lines of the terminal are reserved:
+// The bottom 6 lines of the terminal are reserved:
+//   - height-5: blank line space
 //   - height-4: stats line content
 //   - height-3: ─── prompt ──────────────────────────────[reasoning:low]
 //   - height-2: > (input line, cursor blinks here)
@@ -34,7 +35,7 @@ type PromptPreservingWriter struct {
 }
 
 func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
-	scrollBottom := height - 5
+	scrollBottom := height - 6
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -65,7 +66,7 @@ func (p *PromptPreservingWriter) SetPromptCol(col int) {
 func (p *PromptPreservingWriter) ForceReposition() {
 	TerminalMu.Lock()
 	p.cursorAtPrompt = true
-	scrollBottom := p.height - 5
+	scrollBottom := p.height - 6
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -83,22 +84,20 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	defer TerminalMu.Unlock()
 
 	// Update height dynamically to handle terminal resizes robustly
-	if fd := int(os.Stderr.Fd()); term.IsTerminal(fd) {
-		if _, h, err := term.GetSize(fd); err == nil && h > 0 {
-			if h != p.height {
-				diff := h - p.height
-				p.height = h
-				p.printLine += diff
-				scrollBottom := h - 5
-				if scrollBottom < 1 {
-					scrollBottom = 1
-				}
-				if p.printLine > scrollBottom {
-					p.printLine = scrollBottom
-				}
-				if p.printLine < 1 {
-					p.printLine = 1
-				}
+	if h := getRealTerminalHeight(); h > 0 {
+		if h != p.height {
+			diff := h - p.height
+			p.height = h
+			p.printLine += diff
+			scrollBottom := h - 6
+			if scrollBottom < 1 {
+				scrollBottom = 1
+			}
+			if p.printLine > scrollBottom {
+				p.printLine = scrollBottom
+			}
+			if p.printLine < 1 {
+				p.printLine = 1
 			}
 		}
 	}
@@ -107,7 +106,7 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 	p.cursorAtPrompt = false
 
-	// Write the actual content. The terminal's scrolling region (set to 1..height-5)
+	// Write the actual content. The terminal's scrolling region (set to 1..height-6)
 	// ensures that newlines here only scroll within that region.
 	n, err := p.inner.Write(data)
 
@@ -128,7 +127,7 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 // On carriage return, printCol resets to 1 without scrolling.
 func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	s := string(data)
-	scrollBottom := p.height - 5
+	scrollBottom := p.height - 6
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -181,11 +180,9 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	}
 
 	// Clamp printCol based on terminal width to handle auto-wrap correctly
-	width := 80
-	if fd := int(os.Stderr.Fd()); term.IsTerminal(fd) {
-		if w, _, err := term.GetSize(fd); err == nil && w > 0 {
-			width = w
-		}
+	width := getRealTerminalWidth()
+	if width <= 0 {
+		width = 80
 	}
 	if p.printCol > width {
 		p.printCol = ((p.printCol - 1) % width) + 1
@@ -233,6 +230,32 @@ func (p *PromptPreservingWriter) SetPrintCol(col int) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 	p.printCol = col
+}
+
+func getRealTerminalHeight() int {
+	if _, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
+		return h
+	}
+	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
+		return h
+	}
+	if _, h, err := term.GetSize(int(os.Stderr.Fd())); err == nil && h > 0 {
+		return h
+	}
+	return 0
+}
+
+func getRealTerminalWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdin.Fd())); err == nil && w > 0 {
+		return w
+	}
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	if w, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 0
 }
 
 

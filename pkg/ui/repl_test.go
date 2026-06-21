@@ -631,6 +631,14 @@ func TestInlineMarkdownRendering(t *testing.T) {
 	if !strings.Contains(got, "┃") || !strings.Contains(got, "Quote line") {
 		t.Errorf("expected blockquote rendering with border line, got %q", got)
 	}
+
+	// Test 6: Normal Line rendering (delimiter ----)
+	buf.Reset()
+	sr.printNormalLine("----")
+	got = buf.String()
+	if got != " " {
+		t.Errorf("expected space for delimiter ----, got %q", got)
+	}
 }
 
 func TestStreamRendererRealTimeStreaming(t *testing.T) {
@@ -711,6 +719,61 @@ func TestStreamRendererRealTimeStreaming(t *testing.T) {
 	}
 	if !strings.Contains(cleanNewLineOutput, "world") {
 		t.Errorf("expected output to contain 'world', but got %q", cleanNewLineOutput)
+	}
+}
+
+func TestPrintSessionHistoryMarkdown(t *testing.T) {
+	theme := UITheme{
+		Primary:   style.Color("#ff0000"),
+		Secondary: style.Color("#00ff00"),
+		Highlight: style.Color("#0000ff"),
+		Border:    style.Color("#555555"),
+	}
+	cfg := &config.Config{ShowThinking: true}
+
+	messages := []db.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "this is **bold** text and `code`"},
+	}
+
+	var buf bytes.Buffer
+	PrintSessionHistory(&buf, messages, theme, cfg)
+
+	output := buf.String()
+
+	// Helper to strip all ANSI codes
+	stripAllAnsi := func(s string) string {
+		var sb strings.Builder
+		inEscape := false
+		for i := 0; i < len(s); i++ {
+			if s[i] == '\x1b' {
+				inEscape = true
+				continue
+			}
+			if inEscape {
+				if (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') {
+					inEscape = false
+				}
+				continue
+			}
+			sb.WriteByte(s[i])
+		}
+		return sb.String()
+	}
+
+	cleanOutput := stripAllAnsi(output)
+
+	if strings.Contains(cleanOutput, "**") {
+		t.Errorf("expected markdown stars to be stripped from history output, got %q", cleanOutput)
+	}
+	if strings.Contains(cleanOutput, "`") {
+		t.Errorf("expected markdown backticks to be stripped from history output, got %q", cleanOutput)
+	}
+	if !strings.Contains(cleanOutput, "bold") {
+		t.Errorf("expected output to contain 'bold', got %q", cleanOutput)
+	}
+	if !strings.Contains(cleanOutput, "code") {
+		t.Errorf("expected output to contain 'code', got %q", cleanOutput)
 	}
 }
 

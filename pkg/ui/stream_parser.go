@@ -342,3 +342,7 @@ func (n *newlineCounterWriter) Write(p []byte) (int, error) {
 func (n *newlineCounterWriter) GetCount() int {
 	return n.count
 }
+
+func (n *newlineCounterWriter) Unwrap() io.Writer {
+	return n.Writer
+}
