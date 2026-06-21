@@ -2,8 +2,9 @@ package ui
 
 import (
 	"io"
+	"sync"
 
-	"maquis/pkg/agent"
+	"maquis/pkg/ui/style"
 )
 
 // ActiveUI holds a global reference to the currently active TUI instance.
@@ -20,7 +21,7 @@ func getUI() *AgentUIImpl {
 }
 
 // TerminalMu protects terminal output operations.
-var TerminalMu = &agent.TerminalMu
+var TerminalMu sync.Mutex
 
 // IsInteractive indicates if the interactive REPL session is currently running.
 var IsInteractive bool
@@ -53,4 +54,8 @@ func InitStatusBar(w io.Writer) {
 // ShutdownStatusBar cleans up the status bar.
 func ShutdownStatusBar(w io.Writer) {
 	getUI().ShutdownStatusBar(w)
+}
+
+func stripAnsi(str string) string {
+	return style.StripAnsi(str)
 }

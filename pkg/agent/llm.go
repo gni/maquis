@@ -48,6 +48,8 @@ type ChatCompletionRequest struct {
 	ThinkingBudgetTokens int                 `json:"thinking_budget_tokens,omitempty"`
 	ReasoningControl     bool                `json:"reasoning_control,omitempty"`
 	ChatTemplateKwargs   *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+	MaxCompletionTokens  int                 `json:"max_completion_tokens,omitempty"`
+	MaxTokens            int                 `json:"max_tokens,omitempty"`
 }
 
 type ChatCompletionResponseChunk struct {
@@ -78,6 +80,7 @@ func (a *Agent) CheckThinkingSupport() bool {
 	if err != nil {
 		return false
 	}
+	req.Header.Set("maquis", "v1.0.0")
 	if a.Config.ApiKey != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
 	}
@@ -143,7 +146,9 @@ func (a *Agent) StreamChatCompletions(
 		StreamOptions: &StreamOptions{
 			IncludeUsage: true,
 		},
-		ReasoningEffort: a.Config.ReasoningEffort,
+		ReasoningEffort:     a.Config.ReasoningEffort,
+		MaxCompletionTokens: a.Config.MaxCompletionTokens,
+		MaxTokens:           a.Config.MaxCompletionTokens,
 	}
 
 	if a.ThinkingSupported {
@@ -192,6 +197,7 @@ func (a *Agent) StreamChatCompletions(
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("maquis", "v1.0.0")
 
 		if a.Config.ApiKey != "" {
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))

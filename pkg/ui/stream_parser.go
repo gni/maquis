@@ -96,6 +96,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					} else if p.isPath {
 						p.path += unescaped
+						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(unescaped))
 					} else if p.isOldText {
 						// Suppress raw oldText from stream output
 					} else if p.isNewText {
@@ -126,6 +127,10 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.pathPrinted = true
 							p.updateStreamTitleWithPath(w, theme)
 						}
+						fmt.Fprintln(pw)
+					}
+					if p.isContent {
+						fmt.Fprintln(pw)
 					}
 					p.inValue = false
 					p.isContent = false
@@ -144,6 +149,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					} else if p.isPath {
 						p.path += charStr
+						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(charStr))
 					} else if p.isOldText {
 						// Suppress raw oldText from stream output
 					} else if p.isNewText {
@@ -169,14 +175,42 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.outputBuf.Reset()
 						}
 					}
+					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
 				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "bash") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
 					p.isPath = true
+					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
 				} else if p.currentKey == "oldText" {
 					p.isOldText = true
 				} else if p.currentKey == "newText" {
-					p.isNewText = true
+					if p.streamWrites {
+						p.isContent = true
+						p.guessedLang = ""
+						if !p.titlePrinted {
+							p.printStreamTitle(w, theme)
+							if p.outputBuf.Len() > 0 {
+								fmt.Fprint(w, p.outputBuf.String())
+								p.outputBuf.Reset()
+							}
+						}
+						fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
+					} else {
+						p.isNewText = true
+					}
 				} else if p.currentKey == "write_content" || p.currentKey == "content" {
-					p.isOldText = true
+					if p.streamWrites {
+						p.isContent = true
+						p.guessedLang = ""
+						if !p.titlePrinted {
+							p.printStreamTitle(w, theme)
+							if p.outputBuf.Len() > 0 {
+								fmt.Fprint(w, p.outputBuf.String())
+								p.outputBuf.Reset()
+							}
+						}
+						fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
+					} else {
+						p.isOldText = true
+					}
 				}
 			} else if char == '}' || char == ']' {
 				p.inValue = false

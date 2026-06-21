@@ -33,6 +33,7 @@ var (
 	reasoningEffortFlag string
 	contextLimitFlag    int
 	directCommandsFlag  bool
+	maxCompletionTokensFlag int
 )
 
 var rootCmd = &cobra.Command{
@@ -79,6 +80,9 @@ var rootCmd = &cobra.Command{
 		}
 		if cmd.Flags().Changed("direct") {
 			cfg.DirectCommands = directCommandsFlag
+		}
+		if maxCompletionTokensFlag != 0 {
+			cfg.MaxCompletionTokens = maxCompletionTokensFlag
 		}
 
 		theme := ui.GetConfiguredTheme(cfg)
@@ -344,6 +348,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&reasoningEffortFlag, "reasoning", "", "Override LLM reasoning effort (e.g. low, medium, high)")
 	rootCmd.PersistentFlags().IntVar(&maxStepsFlag, "steps", 0, "Override maximum reasoning steps limit (e.g. 30)")
 	rootCmd.PersistentFlags().IntVar(&contextLimitFlag, "context-limit", 0, "Override context window limit (default: 128000)")
+	rootCmd.PersistentFlags().IntVar(&maxCompletionTokensFlag, "max-completion-tokens", 0, "Override maximum completion/output tokens limit (default: 16384)")
 	rootCmd.PersistentFlags().BoolVar(&directCommandsFlag, "direct", false, "Enable direct execution of local shell commands (default: true in config)")
 
 	configCmd.AddCommand(configShowCmd, configEditCmd)

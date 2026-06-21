@@ -118,8 +118,8 @@ func (ui *AgentUIImpl) DrawPromptSeparator(w io.Writer, showThinking bool, reaso
 	DrawStaticPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, spinnerFrame)
 }
 
-func (ui *AgentUIImpl) NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool) agent.StreamRenderer {
-	return NewStreamRenderer(w, theme, showThinking, streamWrites)
+func (ui *AgentUIImpl) NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool, agentName string) agent.StreamRenderer {
+	return NewStreamRenderer(w, theme, showThinking, streamWrites, agentName)
 }
 
 func (ui *AgentUIImpl) UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {

@@ -29,6 +29,13 @@ func GetCurrentSpinnerFrame() string {
 	return currentSpinnerFrame
 }
 
+func unwrapWriter(w io.Writer) io.Writer {
+	if uw, ok := w.(interface{ Unwrap() io.Writer }); ok {
+		return unwrapWriter(uw.Unwrap())
+	}
+	return w
+}
+
 func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Message, prompt string, allowlist []string, theme style.UITheme, isNonInteractive bool, sessionID string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -44,13 +51,13 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	}()
 
 	writerToUse := w
+	rawW := unwrapWriter(writerToUse)
 	a.CurrentWriter = writerToUse
 	a.CurrentContext = ctx
 	defer func() {
 		a.CurrentWriter = nil
 		a.CurrentContext = nil
 	}()
-	var height int
 	var pauseThinkingSpinner chan bool
 	if !isNonInteractive && a.UI != nil {
 		stopThinkingSpinner := make(chan struct{})
@@ -76,7 +83,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 						spinnerFrameMu.Lock()
 						currentSpinnerFrame = ""
 						spinnerFrameMu.Unlock()
-						a.UI.DrawStatsLine(w, theme, "", "")
+						a.UI.DrawStatsLine(rawW, theme, "", "")
 					}
 				case <-ticker.C:
 					if paused {
@@ -88,7 +95,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					currentSpinnerFrame = frame
 					spinnerFrameMu.Unlock()
 					elapsed := time.Since(startTime).Seconds()
-					a.UI.DrawStatsLine(w, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
+					a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
 				}
 			}
 		}()
@@ -100,35 +107,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			currentSpinnerFrame = ""
 			spinnerFrameMu.Unlock()
 			if a.UI != nil {
-				a.UI.DrawStatsLine(w, theme, "", "")
+				a.UI.DrawStatsLine(rawW, theme, "", "")
 			}
 		}()
-
-		fd := int(os.Stderr.Fd())
-		if term.IsTerminal(fd) {
-			if _, h, err := term.GetSize(fd); err == nil && h > 0 {
-				height = h
-				writerToUse = newPromptPreservingWriter(w, height)
-				a.CurrentWriter = writerToUse
-			}
-		}
-
-		if height > 0 {
-			promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-			fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K%s\x1b[%d;3H", height-2, promptStyle.Render("> "), height-2)
-		}
-
-		// 2. Redraw status bar and static prompt separator
-		a.UI.DrawStatusBar(w, theme)
-		a.UI.DrawPromptSeparator(w, a.Config.ShowThinking, a.Config.ReasoningEffort, theme, "")
-
-		// 3. Print the prompt separator and user prompt inside the scroll region so they scroll up
-		printPromptSeparator(writerToUse, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		fmt.Fprintf(writerToUse, "%s%s\n", promptStyle.Render("> "), prompt)
-
-		divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
-		fmt.Fprintln(writerToUse, divider)
 	}
 
 	var totalCompletionTokens int
@@ -210,7 +191,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		ncw := &newlineCounterWriter{Writer: writerToUse}
 		var sr StreamRenderer
 		if a.UI != nil {
-			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking, a.Config.StreamWrites)
+			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking, a.Config.StreamWrites, "maquis")
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
@@ -230,7 +211,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 						}
 					}
 					a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-					a.UI.DrawStatusBar(w, theme)
+					a.UI.DrawStatusBar(rawW, theme)
 				}
 			})
 		}
@@ -244,7 +225,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 			}
 			a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, true, 0, activeTasks, a.Config.ShowTokens)
-			a.UI.DrawStatusBar(w, theme)
+			a.UI.DrawStatusBar(rawW, theme)
 		}
 
 		var reasoningChars int
@@ -295,7 +276,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 							}
 						}
 						a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps, activeTasks, a.Config.ShowTokens)
-						a.UI.DrawStatusBar(w, theme)
+						a.UI.DrawStatusBar(rawW, theme)
 					}
 					lastDraw = now
 				}
@@ -368,9 +349,10 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 						}
 					}
 					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks, a.Config.ShowTokens)
-					a.UI.DrawStatusBar(w, theme)
+					a.UI.DrawStatusBar(rawW, theme)
 				}
 			}
+			_, height := getTerminalSize()
 			if height > 0 {
 				var statsText string
 				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
@@ -378,7 +360,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				} else {
 					statsText = timeStyled
 				}
-				a.UI.DrawStatsLine(w, theme, "", statsText)
+				a.UI.DrawStatsLine(rawW, theme, "", statsText)
 			} else {
 				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
 					fmt.Fprintf(writerToUse, "%s%s%s\n", cStyled, dotStyled, timeStyled)
@@ -398,7 +380,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					}
 				}
 				a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks, a.Config.ShowTokens)
-				a.UI.DrawStatusBar(w, theme)
+				a.UI.DrawStatusBar(rawW, theme)
 			}
 		}
 
@@ -413,9 +395,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		wasStreamed := firstTitleLine != -1
 
 		var startLine int
-		if wasStreamed {
-			startLine = firstTitleLine
-		}
 
 		for idx, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
@@ -424,6 +403,64 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 			if wasStreamed {
 				startLine = sr.GetToolTitleLineNumber(idx)
+				nextTitleLine := ncw.count
+				if idx < len(assistantMsg.ToolCalls)-1 {
+					nextTitleLine = sr.GetToolTitleLineNumber(idx + 1)
+				}
+				linesToClear := nextTitleLine - startLine
+				if linesToClear > 0 {
+					type promptWriter interface {
+						Unwrap() io.Writer
+						GetPrintLine() int
+						SetPrintLine(int)
+						SetPrintCol(int)
+					}
+					var pp promptWriter
+					curr := writerToUse
+					for {
+						if p, ok := curr.(promptWriter); ok {
+							pp = p
+							break
+						}
+						if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
+							curr = unwrapper.Unwrap()
+						} else {
+							break
+						}
+					}
+					if pp != nil {
+						physicalStart := pp.GetPrintLine() - (ncw.count - startLine)
+						physicalEnd := physicalStart + linesToClear - 1
+						if physicalStart < 1 {
+							physicalStart = 1
+						}
+						if physicalEnd > pp.GetPrintLine() {
+							physicalEnd = pp.GetPrintLine()
+						}
+						for line := physicalStart; line <= physicalEnd; line++ {
+							fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H\x1b[2K", line)
+						}
+						fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H", physicalStart)
+						pp.SetPrintLine(physicalStart)
+						pp.SetPrintCol(1)
+					}
+					ncw.count = startLine
+					ncw.col = 0
+				}
+
+				// Render the executing tool header over the cleared space
+				countBefore := ncw.count
+				if a.UI != nil {
+					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
+				} else {
+					fmt.Fprintf(ncw, "tool call: %s %s\n", tc.Function.Name, tc.Function.Arguments)
+				}
+				countAfter := ncw.count
+				shift := (countAfter - countBefore) - linesToClear
+				if shift != 0 && sr != nil {
+					sr.ShiftToolTitleLineNumbers(idx+1, shift)
+				}
+
 			} else {
 				startLine = ncw.count
 				// Render the tool header
@@ -504,7 +541,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 									}
 									frame := frames[i%len(frames)]
 									i++
-									a.UI.DrawStatsLine(w, theme, frame, fmt.Sprintf("executing %s...", tc.Function.Name))
+									a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("executing %s...", tc.Function.Name))
 								}
 							}
 						}()
@@ -516,7 +553,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					if a.UI != nil && !isSubagent {
 						close(stopSpinner)
 						<-spinnerDone
-						a.UI.DrawStatsLine(w, theme, "", "")
+						a.UI.DrawStatsLine(rawW, theme, "", "")
 					}
 				}
 
@@ -532,6 +569,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 
 				// Render the tool output
+				countBefore := ncw.count
 				if !isSubagent {
 					linesToGoBack := ncw.count - startLine
 					if a.UI != nil {
@@ -539,6 +577,11 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					} else {
 						fmt.Fprintln(ncw, toolOutput)
 					}
+				}
+				countAfter := ncw.count
+				diff := countAfter - countBefore
+				if diff > 0 && wasStreamed && sr != nil {
+					sr.ShiftToolTitleLineNumbers(idx+1, diff)
 				}
 
 				// Update agent state
@@ -567,11 +610,17 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				a.lastToolOutput = toolOutput
 				a.lastToolIsError = true
 
+				countBefore := ncw.count
 				linesToGoBack := ncw.count - startLine
 				if a.UI != nil {
 					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
 				} else {
 					fmt.Fprintln(ncw, toolOutput)
+				}
+				countAfter := ncw.count
+				diff := countAfter - countBefore
+				if diff > 0 && wasStreamed && sr != nil {
+					sr.ShiftToolTitleLineNumbers(idx+1, diff)
 				}
 
 				*messages = append(*messages, db.Message{
@@ -668,6 +717,7 @@ func (f *fallbackStreamRenderer) HasOutput() bool                               
 func (f *fallbackStreamRenderer) StartToolCall(toolName string, toolCallIndex int) {}
 func (f *fallbackStreamRenderer) WriteToolCall(content string)                     {}
 func (f *fallbackStreamRenderer) GetToolTitleLineNumber(index int) int             { return -1 }
+func (f *fallbackStreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {}
 
 func isReadOnly(toolName string) bool {
 	return toolName == "read" || toolName == "ls" || toolName == "grep" || toolName == "find" || toolName == "task_status"
@@ -684,27 +734,4 @@ func getTerminalSize() (int, int) {
 		return w, h
 	}
 	return 80, 24
-}
-
-func printPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme) {
-	borderStyle := style.NewStyle().Foreground(theme.Border)
-	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-
-	thinkingText := "off"
-	if showThinking {
-		thinkingText = reasoningEffort
-	}
-	statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
-
-	prefix := "─── prompt "
-	width, _ := getTerminalSize()
-	statusLen := len(stripAnsiSeqs(statusPart))
-	prefixLen := len(prefix)
-
-	dashesCount := width - prefixLen - statusLen - 2
-	if dashesCount < 3 {
-		dashesCount = 3
-	}
-	dashes := strings.Repeat("─", dashesCount)
-	fmt.Fprintf(w, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
 }

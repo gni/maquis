@@ -339,6 +339,23 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			},
 		},
 		{
+			id:          "max_completion_tokens",
+			name:        "max completion tokens",
+			value:       func() string { return fmt.Sprintf("%d", cloned.MaxCompletionTokens) },
+			description: "Maximum token limit for output/completion generations",
+			onEdit: func(newVal string) error {
+				if newVal == "" {
+					return nil
+				}
+				tokens, err := strconv.Atoi(newVal)
+				if err != nil || tokens <= 0 {
+					return fmt.Errorf("must be a positive integer")
+				}
+				cloned.MaxCompletionTokens = tokens
+				return nil
+			},
+		},
+		{
 			id:          "max_reasoning_steps",
 			name:        "max reasoning steps",
 			value:       func() string { return fmt.Sprintf("%d", cloned.MaxReasoningSteps) },

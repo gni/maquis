@@ -260,6 +260,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 	if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 		writer = ma.BaseAgent.CurrentWriter
 	}
+	rawW := unwrapWriter(writer)
 
 	maxSteps := ma.BaseAgent.Config.MaxReasoningSteps
 	if maxSteps <= 0 {
@@ -296,7 +297,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				case p := <-pauseThinkingSpinner:
 					paused = p
 					if paused {
-						ma.BaseAgent.UI.DrawStatsLine(os.Stderr, theme, "", "")
+						ma.BaseAgent.UI.DrawStatsLine(rawW, theme, "", "")
 					}
 				case <-ticker.C:
 					if paused {
@@ -318,8 +319,8 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 					ma.HistoryMu.RUnlock()
 
 					ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, pTok, cTok, 0, ma.BaseAgent.Config.ContextWindowLimit, true, 0, activeTasks, ma.BaseAgent.Config.ShowTokens)
-					ma.BaseAgent.UI.DrawStatusBar(os.Stderr, theme)
-					ma.BaseAgent.UI.DrawStatsLine(os.Stderr, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
+					ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
+					ma.BaseAgent.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
 				}
 			}
 		}()
@@ -328,7 +329,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			close(stopSpinner)
 			<-spinnerDone
 			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-				ma.BaseAgent.UI.DrawStatsLine(os.Stderr, theme, "", "")
+				ma.BaseAgent.UI.DrawStatsLine(rawW, theme, "", "")
 			}
 		}()
 	}
@@ -359,7 +360,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
 		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, ma.BaseAgent.Config.ShowThinking, ma.BaseAgent.Config.StreamWrites)
+			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, ma.BaseAgent.Config.ShowThinking, ma.BaseAgent.Config.StreamWrites, ma.Name)
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
@@ -464,12 +465,18 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				output = "(no output)"
 			}
 
+			countBefore := ncw.count
 			linesToGoBack := ncw.count - startLine
 
 			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 				ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
 			} else {
 				fmt.Fprintln(ncw, output)
+			}
+			countAfter := ncw.count
+			diff := countAfter - countBefore
+			if diff > 0 && wasStreamed && sr != nil {
+				sr.ShiftToolTitleLineNumbers(idx+1, diff)
 			}
 
 			ma.HistoryMu.Lock()

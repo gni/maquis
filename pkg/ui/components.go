@@ -127,6 +127,7 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/config", "open interactive settings editor"},
 		{"/config show", "display current settings summary"},
 		{"/config set <key> <value>", "modify settings dynamically"},
+		{"/set <key> <value>", "modify settings dynamically (alias)"},
 		{"/session <list/new/load/clear>", "manage persistent chat sessions interactively"},
 		{"/skills", "list all available reference skills"},
 		{"/skills load <name>", "explicitly load a reference skill into the context"},
@@ -197,6 +198,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %v\n"+
 			"  %-20s %v\n"+
 			"  %-20s %d tokens\n"+
+			"  %-20s %d tokens\n"+
 			"  %-20s %d\n"+
 			"  %-20s %s\n"+
 			"  %-20s %s\n"+
@@ -215,6 +217,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 		keyStyle.Render("collapse results:"), cfg.CollapseResults,
 		keyStyle.Render("show tokens:"), cfg.ShowTokens,
 		keyStyle.Render("context limit:"), cfg.ContextWindowLimit,
+		keyStyle.Render("max completion tokens:"), cfg.MaxCompletionTokens,
 		keyStyle.Render("max reasoning steps:"), cfg.MaxReasoningSteps,
 		keyStyle.Render("direct commands:"), directVal,
 		keyStyle.Render("client cert:"), valStyle.Render(cfg.CertFile),
@@ -352,31 +355,136 @@ func RenderToolCall(w io.Writer, toolName string, arguments string, theme UIThem
 	fmt.Fprint(w, formattedArgs)
 }
 
+func extractToolTarget(toolName string, argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var argsMap map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &argsMap); err != nil {
+		return ""
+	}
+
+	getString := func(key string) string {
+		if val, ok := argsMap[key]; ok {
+			if s, ok := val.(string); ok {
+				return s
+			}
+		}
+		return ""
+	}
+
+	// 1. Command execution tools (bash, run_command, exec, etc.)
+	if strings.Contains(toolName, "bash") || strings.Contains(toolName, "command") || strings.Contains(toolName, "run") || strings.Contains(toolName, "exec") {
+		if c := getString("CommandLine"); c != "" {
+			return c
+		}
+		if c := getString("command"); c != "" {
+			return c
+		}
+	}
+
+	// 2. Search / query tools (grep, grep_search, search_web, find_files, etc.)
+	if strings.Contains(toolName, "grep") || strings.Contains(toolName, "search") || strings.Contains(toolName, "find") || strings.Contains(toolName, "query") {
+		q := getString("pattern")
+		if q == "" {
+			q = getString("Query")
+		}
+		if q == "" {
+			q = getString("query")
+		}
+
+		p := getString("SearchPath")
+		if p == "" {
+			p = getString("path")
+		}
+		if p == "" {
+			p = getString("DirectoryPath")
+		}
+		if p == "" {
+			p = getString("dirPath")
+		}
+
+		if q != "" && p != "" {
+			wd, err := os.Getwd()
+			if err == nil {
+				if rel, err := filepath.Rel(wd, p); err == nil {
+					p = rel
+				}
+			}
+			return fmt.Sprintf("%s (in %s)", q, p)
+		}
+		if q != "" {
+			return q
+		}
+		if p != "" {
+			return p
+		}
+	}
+
+	// 3. File / Directory tools
+	if strings.Contains(toolName, "file") || strings.Contains(toolName, "dir") || strings.Contains(toolName, "read") || strings.Contains(toolName, "write") || strings.Contains(toolName, "edit") || strings.Contains(toolName, "replace") || toolName == "ls" || toolName == "view" {
+		if p := getString("AbsolutePath"); p != "" {
+			return p
+		}
+		if p := getString("TargetFile"); p != "" {
+			return p
+		}
+		if p := getString("SearchPath"); p != "" {
+			return p
+		}
+		if p := getString("DirectoryPath"); p != "" {
+			return p
+		}
+		if p := getString("path"); p != "" {
+			return p
+		}
+		if p := getString("target"); p != "" {
+			return p
+		}
+		if p := getString("Target"); p != "" {
+			return p
+		}
+	}
+
+	// 4. Subagents / Spawning / Prompts
+	if strings.Contains(toolName, "subagent") || strings.Contains(toolName, "spawn") || strings.Contains(toolName, "task") || strings.Contains(toolName, "ask") || strings.Contains(toolName, "permission") {
+		if p := getString("prompt"); p != "" {
+			return p
+		}
+		if p := getString("Prompt"); p != "" {
+			return p
+		}
+		if p := getString("name"); p != "" {
+			return p
+		}
+		if p := getString("id"); p != "" {
+			return p
+		}
+	}
+
+	// 5. Fallback - check all keys in priority order
+	keys := []string{
+		"CommandLine", "command", "query", "Query", "pattern", "prompt", "Prompt",
+		"AbsolutePath", "TargetFile", "SearchPath", "DirectoryPath", "path", "target", "Target", "name", "id",
+	}
+	for _, key := range keys {
+		if val := getString(key); val != "" {
+			return val
+		}
+	}
+
+	return ""
+}
+
 func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
 	var symbol string
-	if toolName == "write" {
+	if toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
 		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
 	} else {
 		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
 	}
 
-	pathVal := ""
-	var argsMap map[string]interface{}
-	if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
-		if p, ok := argsMap["path"].(string); ok && p != "" {
-			pathVal = p
-		} else if c, ok := argsMap["command"].(string); ok && c != "" {
-			pathVal = c
-		} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
-			pathVal = pat
-		} else if name, ok := argsMap["name"].(string); ok && name != "" {
-			pathVal = name
-		} else if id, ok := argsMap["id"].(string); ok && id != "" {
-			pathVal = id
-		} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
-			pathVal = pr
-		}
-	}
+	pathVal := extractToolTarget(toolName, argsJSON)
 
 	title := FormatToolTitle(symbol, toolName, pathVal, theme)
 	fmt.Fprintln(w, title)
@@ -398,56 +506,87 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	pathVal := ""
-	var argsMap map[string]interface{}
-	if argsJSON != "" && json.Unmarshal([]byte(argsJSON), &argsMap) == nil {
-		if p, ok := argsMap["path"].(string); ok && p != "" {
-			pathVal = p
-		} else if absPath, ok := argsMap["AbsolutePath"].(string); ok && absPath != "" {
-			pathVal = absPath
-		} else if targetFile, ok := argsMap["TargetFile"].(string); ok && targetFile != "" {
-			pathVal = targetFile
-		} else if searchPath, ok := argsMap["SearchPath"].(string); ok && searchPath != "" {
-			pathVal = searchPath
-		} else if dirPath, ok := argsMap["DirectoryPath"].(string); ok && dirPath != "" {
-			pathVal = dirPath
-		} else if c, ok := argsMap["command"].(string); ok && c != "" {
-			pathVal = c
-		} else if pat, ok := argsMap["pattern"].(string); ok && pat != "" {
-			pathVal = pat
-		} else if name, ok := argsMap["name"].(string); ok && name != "" {
-			pathVal = name
-		} else if id, ok := argsMap["id"].(string); ok && id != "" {
-			pathVal = id
-		} else if pr, ok := argsMap["prompt"].(string); ok && pr != "" {
-			pathVal = pr
-		}
-	}
+	pathVal := extractToolTarget(toolName, argsJSON)
 
 	finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
 
-	if newlineCount == -2 {
-		fmt.Fprintln(w, finalTitle)
-	} else if newlineCount >= 0 {
-		if newlineCount > 0 {
-			// Move cursor up to the header line
-			fmt.Fprintf(w, "\x1b[%dA\r", newlineCount)
-		} else {
-			fmt.Fprint(w, "\r")
-		}
-		// Clear line and print final header
-		fmt.Fprint(w, "\x1b[2K")
-		fmt.Fprint(w, finalTitle)
+	_, termH := getTerminalSize()
+	if termH <= 0 {
+		termH = 24
+	}
+	if newlineCount > termH-6 {
+		newlineCount = -2
+	}
 
-		if newlineCount > 0 {
-			// Move cursor back down to the current line
-			fmt.Fprintf(w, "\r\x1b[%dB", newlineCount)
+	var pp *PromptPreservingWriter
+	curr := w
+	for {
+		if p, ok := curr.(*PromptPreservingWriter); ok {
+			pp = p
+			break
+		}
+		if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
+			curr = unwrapper.Unwrap()
 		} else {
-			fmt.Fprint(w, "\r\n")
+			break
 		}
 	}
 
-	if newlineCount >= 0 || newlineCount == -2 {
+	if pp != nil {
+		if newlineCount == -2 {
+			fmt.Fprintln(w, finalTitle)
+		} else if newlineCount >= 0 {
+			if newlineCount > 0 {
+				// Move cursor to the header line on the terminal, clear and overwrite
+				fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine-newlineCount)
+				fmt.Fprint(pp.inner, finalTitle)
+
+				// Clear intermediate argument lines
+				for i := 1; i <= newlineCount; i++ {
+					fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine-newlineCount+i)
+				}
+
+				// Update pp's tracked position to the line right below the header
+				pp.printLine = pp.printLine - newlineCount + 1
+				pp.printCol = 1
+			} else {
+				fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine)
+				fmt.Fprint(pp.inner, finalTitle)
+				pp.printCol = len(stripAnsi(finalTitle)) + 1
+			}
+		}
+	} else {
+		if newlineCount == -2 {
+			fmt.Fprintln(w, finalTitle)
+		} else if newlineCount >= 0 {
+			if newlineCount > 0 {
+				// Move cursor up to the header line
+				fmt.Fprintf(w, "\x1b[%dA\r", newlineCount)
+			} else {
+				fmt.Fprint(w, "\r")
+			}
+			// Clear line and print final header
+			fmt.Fprint(w, "\x1b[2K")
+			fmt.Fprint(w, finalTitle)
+
+			if newlineCount > 0 {
+				// Move down and clear all the intermediate streamed argument/parameter lines
+				for i := 1; i <= newlineCount; i++ {
+					fmt.Fprint(w, "\n\x1b[2K")
+				}
+				// Move cursor back up to position it directly below the completed header
+				if newlineCount > 1 {
+					fmt.Fprintf(w, "\x1b[%dA\r", newlineCount-1)
+				} else {
+					fmt.Fprint(w, "\r")
+				}
+			} else {
+				fmt.Fprint(w, "\r\n")
+			}
+		}
+	}
+
+	if newlineCount <= 0 || newlineCount == -2 {
 		fmt.Fprintln(w)
 	}
 
@@ -831,6 +970,38 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 		}
 
 		if msg.Role == "user" {
+			if strings.HasPrefix(msg.Content, "[user manually executed slash command: `") {
+				firstTick := strings.Index(msg.Content, "`")
+				if firstTick != -1 {
+					rest := msg.Content[firstTick+1:]
+					secondTick := strings.Index(rest, "`")
+					if secondTick != -1 {
+						cmdStr := rest[:secondTick]
+						output := ""
+						newLineIdx := strings.Index(rest, "\n")
+						if newLineIdx != -1 {
+							output = rest[newLineIdx+1:]
+						}
+						if lastRole != "" && lastRole != "tool" {
+							fmt.Fprintln(w)
+						}
+						termW, _ := getTerminalSize()
+						dashesCount := termW - 12
+						if dashesCount < 5 {
+							dashesCount = 5
+						}
+						separator := "─── prompt " + strings.Repeat("─", dashesCount)
+						fmt.Fprintln(w, borderStyle.Render(separator))
+						fmt.Fprintf(w, "%s%s\n", promptStyle.Render("> "), cmdStr)
+						if output != "" {
+							fmt.Fprint(w, output)
+						}
+						lastRole = "user"
+						continue
+					}
+				}
+			}
+
 			if strings.HasPrefix(msg.Content, "[user manually executed local shell command: `") {
 				firstTick := strings.Index(msg.Content, "`")
 				if firstTick != -1 {
@@ -903,54 +1074,14 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						if hasPrintedAnything {
 							fmt.Fprintln(w)
 						}
-						var path string
-						var argsMap map[string]interface{}
-						if json.Unmarshal([]byte(tc.Function.Arguments), &argsMap) == nil {
-							if p, ok := argsMap["path"].(string); ok {
-								path = p
-							} else if absPath, ok := argsMap["AbsolutePath"].(string); ok {
-								path = absPath
-							} else if targetFile, ok := argsMap["TargetFile"].(string); ok {
-								path = targetFile
-							} else if searchPath, ok := argsMap["SearchPath"].(string); ok {
-								path = searchPath
-							} else if dirPath, ok := argsMap["DirectoryPath"].(string); ok {
-								path = dirPath
-							} else if c, ok := argsMap["command"].(string); ok {
-								path = c
-							} else if pat, ok := argsMap["pattern"].(string); ok {
-								path = pat
-							} else if name, ok := argsMap["name"].(string); ok {
-								path = name
-							} else if id, ok := argsMap["id"].(string); ok {
-								path = id
-							} else if pr, ok := argsMap["prompt"].(string); ok {
-								path = pr
-							}
-						}
-						isPathTool := strings.Contains(tc.Function.Name, "read") ||
-							strings.Contains(tc.Function.Name, "write") ||
-							strings.Contains(tc.Function.Name, "edit") ||
-							strings.Contains(tc.Function.Name, "view") ||
-							strings.Contains(tc.Function.Name, "content") ||
-							tc.Function.Name == "ls" ||
-							tc.Function.Name == "grep" ||
-							tc.Function.Name == "find" ||
-							tc.Function.Name == "bash" ||
-							tc.Function.Name == "spawn_subagent" ||
-							strings.HasPrefix(tc.Function.Name, "subagent__")
+						path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
 						var symbol string
 						if tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace") {
 							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
 						} else {
 							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
 						}
-						var title string
-						if isPathTool && path != "" {
-							title = FormatToolTitle(symbol, tc.Function.Name, path, theme)
-						} else {
-							title = FormatToolTitle(symbol, tc.Function.Name, "", theme)
-						}
+						title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
 						fmt.Fprintln(w, title)
 						hasPrintedAnything = true
 					}

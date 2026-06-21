@@ -28,12 +28,13 @@ type StreamRenderer interface {
 	StartToolCall(toolName string, toolCallIndex int)
 	WriteToolCall(content string)
 	GetToolTitleLineNumber(index int) int
+	ShiftToolTitleLineNumbers(startIdx int, diff int)
 }
 
 type AgentUI interface {
 	DrawStatusBar(w io.Writer, theme style.UITheme)
 	DrawPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme style.UITheme, spinnerFrame string)
-	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool) StreamRenderer
+	NewStreamRenderer(w io.Writer, theme style.UITheme, showThinking bool, streamWrites bool, agentName string) StreamRenderer
 	SetCollapseStatus(collapsed bool)
 	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool)
 	DrawStatsLine(w io.Writer, theme style.UITheme, spinnerFrame string, statsText string)

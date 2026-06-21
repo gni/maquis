@@ -126,24 +126,34 @@ func HandleSlashCommand(
 	case "/help", "/h", "/commands", "?", "/?", "help", "h":
 		RenderHelp(w, *theme)
 		return true, false
-	case "/config":
+	case "/config", "/set":
 		if len(parts) > 1 {
-			if parts[1] == "show" {
+			if cmdName == "/config" && parts[1] == "show" {
 				RenderConfig(w, a.Config, *theme)
 				return true, false
 			}
 
 			startIndex := 1
-			if parts[1] == "set" {
+			if cmdName == "/config" && parts[1] == "set" {
 				if len(parts) < 4 {
 					fmt.Fprintln(w, "usage: /config [set] <key> <value>")
 					return true, false
 				}
 				startIndex = 2
+			} else if cmdName == "/set" {
+				if len(parts) < 3 {
+					fmt.Fprintln(w, "usage: /set <key> <value>")
+					return true, false
+				}
+				startIndex = 1
 			}
 
 			if len(parts) <= startIndex {
-				fmt.Fprintln(w, "usage: /config <key> <value>")
+				if cmdName == "/set" {
+					fmt.Fprintln(w, "usage: /set <key> <value>")
+				} else {
+					fmt.Fprintln(w, "usage: /config <key> <value>")
+				}
 				return true, false
 			}
 
@@ -194,6 +204,13 @@ func HandleSlashCommand(
 					return true, false
 				}
 				a.Config.ContextWindowLimit = l
+			case "max_completion_tokens", "max_tokens", "output_tokens":
+				tokens, err := strconv.Atoi(val)
+				if err != nil || tokens <= 0 {
+					fmt.Fprintf(w, "Invalid max completion tokens value: %v\n", err)
+					return true, false
+				}
+				a.Config.MaxCompletionTokens = tokens
 			case "max_reasoning_steps", "max_steps", "steps":
 				steps, err := strconv.Atoi(val)
 				if err != nil || steps <= 0 {
@@ -453,9 +470,11 @@ func HandleSlashCommand(
 				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
 				DrawStatusBar(os.Stderr, *theme)
 			default:
+				fmt.Fprintf(w, "active session: %s\n", *currentSessionID)
 				fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 			}
 		} else {
+			fmt.Fprintf(w, "active session: %s\n", *currentSessionID)
 			fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 		}
 		return true, false

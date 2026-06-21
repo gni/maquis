@@ -232,7 +232,7 @@ func (s Style) Render(args ...string) string {
 
 	maxWidth := 0
 	for _, line := range lines {
-		w := utf8.RuneCountInString(stripAnsi(line))
+		w := utf8.RuneCountInString(StripAnsi(line))
 		if w > maxWidth {
 			maxWidth = w
 		}
@@ -241,7 +241,7 @@ func (s Style) Render(args ...string) string {
 	paddedWidth := maxWidth + s.paddingLeft + s.paddingRight
 	var formattedLines []string
 	for _, line := range lines {
-		runeCount := utf8.RuneCountInString(stripAnsi(line))
+		runeCount := utf8.RuneCountInString(StripAnsi(line))
 		padL := strings.Repeat(" ", s.paddingLeft)
 		var padR string
 		if s.bg != nil || s.borderType != noBorder {
@@ -330,7 +330,7 @@ func JoinHorizontal(pos int, strs ...string) string {
 	for _, lines := range splitStrs {
 		maxW := 0
 		for _, l := range lines {
-			w := utf8.RuneCountInString(stripAnsi(l))
+			w := utf8.RuneCountInString(StripAnsi(l))
 			if w > maxW {
 				maxW = w
 			}
@@ -347,7 +347,7 @@ func JoinHorizontal(pos int, strs ...string) string {
 			if i < len(lines) {
 				lineVal = lines[i]
 			}
-			visibleW := utf8.RuneCountInString(stripAnsi(lineVal))
+			visibleW := utf8.RuneCountInString(StripAnsi(lineVal))
 			padR := strings.Repeat(" ", w - visibleW)
 			lineParts = append(lineParts, lineVal + padR)
 		}
@@ -361,7 +361,7 @@ func JoinVertical(pos int, strs ...string) string {
 	return strings.Join(strs, "\n")
 }
 
-func stripAnsi(str string) string {
+func StripAnsi(str string) string {
 	var sb strings.Builder
 	inEscape := false
 	for i := 0; i < len(str); i++ {

@@ -11,6 +11,7 @@ import (
 
 	"maquis/pkg/agent"
 	"maquis/pkg/config"
+	"maquis/pkg/db"
 	"maquis/pkg/ui/style"
 )
 
@@ -383,4 +384,254 @@ func TestCdUpdatesWorkspaceRoot(t *testing.T) {
 		t.Errorf("expected workspace root to be updated to %q, got %q", tempDir, a.WorkspaceRoot)
 	}
 }
+
+func TestHandleSessionSlashCommand(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	messages := []db.Message{}
+	theme := &UITheme{}
+	currentSessionID := "test-session-12345"
+
+	var buf bytes.Buffer
+	handled, quit := HandleSlashCommand(
+		a,
+		"/session",
+		&messages,
+		nil,
+		theme,
+		&buf,
+		&currentSessionID,
+		nil,
+		nil,
+		nil,
+	)
+
+	if !handled {
+		t.Errorf("expected slash command /session to be handled")
+	}
+	if quit {
+		t.Errorf("expected /session not to quit the REPL")
+	}
+
+	got := buf.String()
+	expectedActive := "active session: test-session-12345"
+	expectedUsage := "usage: /session [list | new | load | branch <new_session_id> | clear]"
+
+	if !strings.Contains(got, expectedActive) {
+		t.Errorf("expected output to contain active session message: %q, got: %q", expectedActive, got)
+	}
+	if !strings.Contains(got, expectedUsage) {
+		t.Errorf("expected output to contain usage message: %q, got: %q", expectedUsage, got)
+	}
+
+	buf.Reset()
+	handled, quit = HandleSlashCommand(
+		a,
+		"/session invalid-sub-command",
+		&messages,
+		nil,
+		theme,
+		&buf,
+		&currentSessionID,
+		nil,
+		nil,
+		nil,
+	)
+
+	if !handled {
+		t.Errorf("expected slash command /session invalid-sub-command to be handled")
+	}
+	if quit {
+		t.Errorf("expected /session invalid-sub-command not to quit the REPL")
+	}
+
+	got = buf.String()
+	if !strings.Contains(got, expectedActive) {
+		t.Errorf("expected invalid subcommand output to contain active session message: %q, got: %q", expectedActive, got)
+	}
+	if !strings.Contains(got, expectedUsage) {
+		t.Errorf("expected invalid subcommand output to contain usage message: %q, got: %q", expectedUsage, got)
+	}
+}
+
+func TestJsonStreamParserStreamWrites(t *testing.T) {
+	theme := UITheme{}
+
+	t.Run("streamWrites=false", func(t *testing.T) {
+		p := &jsonStreamParser{
+			activeToolName: "write",
+			streamWrites:   false,
+		}
+		var buf bytes.Buffer
+		// Simulate streaming JSON chunk: {"write_content": "hello world"}
+		p.feed(`{"write_content": "hello world"}`, &buf, theme)
+		got := buf.String()
+		if strings.Contains(got, "hello world") {
+			t.Errorf("expected write_content to be suppressed, but got %q", got)
+		}
+	})
+
+	t.Run("streamWrites=true", func(t *testing.T) {
+		p := &jsonStreamParser{
+			activeToolName: "write",
+			streamWrites:   true,
+		}
+		var buf bytes.Buffer
+		// Simulate streaming JSON chunk: {"write_content": "hello world"}
+		p.feed(`{"write_content": "hello world"}`, &buf, theme)
+		got := buf.String()
+		if !strings.Contains(got, "hello world") {
+			t.Errorf("expected write_content to be streamed, but got %q", got)
+		}
+	})
+
+	t.Run("edit newText streamWrites=false", func(t *testing.T) {
+		p := &jsonStreamParser{
+			activeToolName: "edit",
+			streamWrites:   false,
+		}
+		var buf bytes.Buffer
+		p.feed(`{"newText": "hello world"}`, &buf, theme)
+		got := buf.String()
+		if strings.Contains(got, "hello world") {
+			t.Errorf("expected newText to be suppressed, but got %q", got)
+		}
+	})
+
+	t.Run("edit newText streamWrites=true", func(t *testing.T) {
+		p := &jsonStreamParser{
+			activeToolName: "edit",
+			streamWrites:   true,
+		}
+		var buf bytes.Buffer
+		p.feed(`{"newText": "hello world"}`, &buf, theme)
+		got := buf.String()
+		if !strings.Contains(got, "hello world") {
+			t.Errorf("expected newText to be streamed, but got %q", got)
+		}
+	})
+}
+
+func TestStreamRendererStartToolCall(t *testing.T) {
+	theme := UITheme{}
+	var buf bytes.Buffer
+	sr := NewStreamRenderer(&buf, theme, false, false, "test-agent")
+
+	sr.StartToolCall("read", 0)
+
+	gotClean := stripAnsi(buf.String())
+	if gotClean != "" {
+		t.Errorf("expected no output for suppressed tool streaming, got: %q", gotClean)
+	}
+
+	lineNum := sr.GetToolTitleLineNumber(0)
+	if lineNum != -1 {
+		t.Errorf("expected tool title line number to be -1, got: %d", lineNum)
+	}
+}
+
+func TestHandleConfigAndSetCommands(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{
+			MaxCompletionTokens: 100,
+		},
+	}
+	messages := []db.Message{}
+	theme := &UITheme{}
+	currentSessionID := "test-session-12345"
+
+	// 1. Test /config set max_completion_tokens
+	var buf bytes.Buffer
+	handled, quit := HandleSlashCommand(
+		a,
+		"/config set max_completion_tokens 8192",
+		&messages,
+		nil,
+		theme,
+		&buf,
+		&currentSessionID,
+		nil,
+		nil,
+		nil,
+	)
+
+	if !handled || quit {
+		t.Errorf("expected /config set to be handled and not quit")
+	}
+	if a.Config.MaxCompletionTokens != 8192 {
+		t.Errorf("expected MaxCompletionTokens to be 8192, got %d", a.Config.MaxCompletionTokens)
+	}
+
+	// 2. Test /set max_tokens
+	buf.Reset()
+	handled, quit = HandleSlashCommand(
+		a,
+		"/set max_tokens 4096",
+		&messages,
+		nil,
+		theme,
+		&buf,
+		&currentSessionID,
+		nil,
+		nil,
+		nil,
+	)
+
+	if !handled || quit {
+		t.Errorf("expected /set to be handled and not quit")
+	}
+	if a.Config.MaxCompletionTokens != 4096 {
+		t.Errorf("expected MaxCompletionTokens to be 4096, got %d", a.Config.MaxCompletionTokens)
+	}
+}
+
+func TestInlineMarkdownRendering(t *testing.T) {
+	theme := UITheme{
+		Primary:   style.Color("#ff0000"),
+		Secondary: style.Color("#00ff00"),
+		Highlight: style.Color("#0000ff"),
+		Border:    style.Color("#555555"),
+	}
+	var buf bytes.Buffer
+	sr := NewStreamRenderer(&buf, theme, false, false, "test")
+
+	// Test 1: Bold **text**
+	res := sr.renderInlineMarkdown("this is **bold** text")
+	if !strings.Contains(res, "bold") || strings.Contains(res, "**") {
+		t.Errorf("expected bold formatting without asterisks, got %q", res)
+	}
+
+	// Test 2: Inline code `code`
+	res = sr.renderInlineMarkdown("this is `code` block")
+	if !strings.Contains(res, "code") || strings.Contains(res, "`") {
+		t.Errorf("expected code formatting without backticks, got %q", res)
+	}
+
+	// Test 3: Normal Line rendering (header)
+	buf.Reset()
+	sr.printNormalLine("# Main Header")
+	got := buf.String()
+	if !strings.Contains(got, "Main Header") || strings.Contains(got, "#") {
+		t.Errorf("expected header rendering without hashes, got %q", got)
+	}
+
+	// Test 4: Normal Line rendering (bullet point)
+	buf.Reset()
+	sr.printNormalLine("- Bullet point")
+	got = buf.String()
+	if !strings.Contains(got, "•") || !strings.Contains(got, "Bullet point") {
+		t.Errorf("expected bullet rendering with unicode dot, got %q", got)
+	}
+
+	// Test 5: Normal Line rendering (blockquote)
+	buf.Reset()
+	sr.printNormalLine("> Quote line")
+	got = buf.String()
+	if !strings.Contains(got, "┃") || !strings.Contains(got, "Quote line") {
+		t.Errorf("expected blockquote rendering with border line, got %q", got)
+	}
+}
+
+
 

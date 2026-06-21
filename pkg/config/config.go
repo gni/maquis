@@ -43,6 +43,7 @@ type Config struct {
 	SyntaxTheme          string                     `json:"syntax_theme,omitempty"`
 	Providers            map[string]ProviderConfig  `json:"providers,omitempty"`
 	ActiveProvider       string                     `json:"active_provider,omitempty"`
+	MaxCompletionTokens  int                        `json:"max_completion_tokens,omitempty"`
 }
 
 func DefaultConfig() *Config {
@@ -83,6 +84,7 @@ func DefaultConfig() *Config {
 		SkillsDir:            skillsDir,
 		MCPServers:           make(map[string]MCPServerConfig),
 		MaxReasoningSteps:    30,
+		MaxCompletionTokens:  16384,
 		ContextWindowLimit:   128000,
 		ReasoningEffort:      "low",
 		StreamWrites:         false,
@@ -163,6 +165,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.SyntaxTheme == "" {
 		config.SyntaxTheme = "auto"
+	}
+	if config.MaxCompletionTokens == 0 {
+		config.MaxCompletionTokens = 16384
 	}
 
 	return config, nil

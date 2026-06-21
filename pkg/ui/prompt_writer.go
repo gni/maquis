@@ -1,18 +1,15 @@
-package agent
+package ui
 
 import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 
 	"golang.org/x/term"
 )
 
-var TerminalMu sync.Mutex
 
-
-// promptPreservingWriter wraps an io.Writer (typically os.Stderr) and ensures
+// PromptPreservingWriter wraps an io.Writer (typically os.Stderr) and ensures
 // that all streamed output is confined to the terminal's scrolling region
 // (rows 1 through height-4). After every write, the cursor is repositioned
 // back to the prompt input line (height-2, column 3) so it blinks stably
@@ -35,7 +32,7 @@ type PromptPreservingWriter struct {
 	cursorAtPrompt bool
 }
 
-func newPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
+func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
 	scrollBottom := height - 5
 	if scrollBottom < 1 {
 		scrollBottom = 1
@@ -105,11 +102,9 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 		}
 	}
 
-	// Only position cursor if it was moved to the prompt line
-	if p.cursorAtPrompt {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
-		p.cursorAtPrompt = false
-	}
+	// Always position cursor to the tracked print position to prevent drift or leak into other rows
+	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
+	p.cursorAtPrompt = false
 
 	// Write the actual content. The terminal's scrolling region (set to 1..height-5)
 	// ensures that newlines here only scroll within that region.
@@ -201,6 +196,32 @@ func (p *PromptPreservingWriter) Height() int {
 	return p.height
 }
 
-func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
-	return newPromptPreservingWriter(w, height)
+func (p *PromptPreservingWriter) Unwrap() io.Writer {
+	return p.inner
 }
+
+func (p *PromptPreservingWriter) GetPrintLine() int {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	return p.printLine
+}
+
+func (p *PromptPreservingWriter) GetPrintCol() int {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	return p.printCol
+}
+
+func (p *PromptPreservingWriter) SetPrintLine(line int) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	p.printLine = line
+}
+
+func (p *PromptPreservingWriter) SetPrintCol(col int) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	p.printCol = col
+}
+
+

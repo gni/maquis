@@ -782,7 +782,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	defer fmt.Fprint(os.Stderr, "\x1b[?25h")
 
 	_, height := getTerminalSize()
-	ppWriter := agent.NewPromptPreservingWriter(os.Stderr, height)
+	ppWriter := NewPromptPreservingWriter(os.Stderr, height)
 
 	if len(a.McpStartErrors) > 0 {
 		RenderMCPStartupErrors(ppWriter, a.McpStartErrors, theme)
@@ -1039,6 +1039,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		kiReader.isAtMainPrompt = false
 		term.Restore(fd, oldState)
 
+		if height > 0 {
+			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+		}
+
 		if kiReader.pastedText != "" {
 			line = line + kiReader.pastedText
 			kiReader.pastedText = ""
@@ -1199,33 +1203,51 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 			prevSessionID := currentSessionID
 
-			ShutdownStatusBar(os.Stderr)
-			cw := crnlWriter{w: os.Stderr}
-			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cw, &currentSessionID, rl.History, mam, kiReader)
-			InitStatusBar(os.Stderr)
-			kiReader.Drain()
+			isMutatingOrInteractive := isMutatingOrInteractiveSlashCommand(line)
+			if !isMutatingOrInteractive {
+				var buf bytes.Buffer
+				cwBuf := crnlWriter{w: &buf}
+				handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cwBuf, &currentSessionID, rl.History, mam, kiReader)
+				kiReader.Drain()
 
-			if handled && !quit {
-				currActiveAgent := ""
-				if mam.ActiveAgent != nil {
-					currActiveAgent = mam.ActiveAgent.Name
-				}
-				parts := strings.Fields(strings.TrimSpace(line))
-				cmdName := ""
-				if len(parts) > 0 {
-					cmdName = parts[0]
-				}
-				needsRedraw := currActiveAgent != prevActiveAgent ||
-					currentSessionID != prevSessionID ||
-					cmdName == "/collapse" || cmdName == "/expand" || cmdName == "/toggle" ||
-					cmdName == "/rewind" ||
-					(cmdName == "/config" && len(parts) == 1) ||
-					(cmdName == "/session" && (len(parts) == 1 || (len(parts) > 1 && parts[1] == "explorer"))) ||
-					(cmdName == "/agent" && len(parts) == 1)
+				if handled && !quit {
+					outputStr := tool.SanitizeUTF8(buf.Bytes())
+					contextMsg := fmt.Sprintf("[user manually executed slash command: `%s`]\n%s", strings.TrimSpace(line), outputStr)
+					messages = append(messages, db.Message{Role: "user", Content: contextMsg})
+					_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
 
-				if needsRedraw {
 					redrawScreen(os.Stderr, a, kiReader, rl)
 					continue
+				}
+			} else {
+				ShutdownStatusBar(os.Stderr)
+				cw := crnlWriter{w: os.Stderr}
+				handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cw, &currentSessionID, rl.History, mam, kiReader)
+				InitStatusBar(os.Stderr)
+				kiReader.Drain()
+
+				if handled && !quit {
+					currActiveAgent := ""
+					if mam.ActiveAgent != nil {
+						currActiveAgent = mam.ActiveAgent.Name
+					}
+					parts := strings.Fields(strings.TrimSpace(line))
+					cmdName := ""
+					if len(parts) > 0 {
+						cmdName = parts[0]
+					}
+					needsRedraw := currActiveAgent != prevActiveAgent ||
+						currentSessionID != prevSessionID ||
+						cmdName == "/collapse" || cmdName == "/expand" || cmdName == "/toggle" ||
+						cmdName == "/rewind" ||
+						(cmdName == "/config" && len(parts) == 1) ||
+						(cmdName == "/session" && (len(parts) == 1 || (len(parts) > 1 && parts[1] == "explorer"))) ||
+						(cmdName == "/agent" && len(parts) == 1)
+
+					if needsRedraw {
+						redrawScreen(os.Stderr, a, kiReader, rl)
+						continue
+					}
 				}
 			}
 		}
@@ -1243,38 +1265,33 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			continue
 		}
 
+		ppWriter.ForceReposition()
+
+		borderStyle := style.NewStyle().Foreground(theme.Border)
+		statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+		thinkingText := "off"
+		if a.Config.ShowThinking {
+			thinkingText = a.Config.ReasoningEffort
+		}
+		statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
+		prefix := "─── prompt "
+		width, _ := getTerminalSize()
+		statusLen := len(stripAnsi(statusPart))
+		prefixLen := len(prefix)
+		dashesCount := width - prefixLen - statusLen - 2
+		if dashesCount < 3 {
+			dashesCount = 3
+		}
+		dashes := strings.Repeat("─", dashesCount)
+		fmt.Fprintf(ppWriter, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
+
+		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		fmt.Fprintf(ppWriter, "%s%s\n", promptStyle.Render(promptPrefix), line)
+
+		divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
+		fmt.Fprintln(ppWriter, divider)
+
 		if mam.ActiveAgent != nil {
-			DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
-			getUI().StateMu.Lock()
-			savedStats = getUI().LastStatsText
-			getUI().StateMu.Unlock()
-			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
-			DrawStatusBar(os.Stderr, theme)
-
-			borderStyle := style.NewStyle().Foreground(theme.Border)
-			statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-			thinkingText := "off"
-			if a.Config.ShowThinking {
-				thinkingText = a.Config.ReasoningEffort
-			}
-			statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
-			prefix := "─── prompt "
-			width, _ := getTerminalSize()
-			statusLen := len(stripAnsi(statusPart))
-			prefixLen := len(prefix)
-			dashesCount := width - prefixLen - statusLen - 2
-			if dashesCount < 3 {
-				dashesCount = 3
-			}
-			dashes := strings.Repeat("─", dashesCount)
-			fmt.Fprintf(ppWriter, "%s%s\n", borderStyle.Render(prefix+dashes), statusStyle.Render(statusPart))
-
-			promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-			fmt.Fprintf(ppWriter, "%s%s\n", promptStyle.Render(promptPrefix), line)
-
-			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
-			fmt.Fprintln(ppWriter, divider)
-
 			getUI().StateMu.Lock()
 			getUI().ActiveCancelFunc = mam.ActiveAgent.CancelActiveTurn
 			getUI().StateMu.Unlock()
@@ -1304,7 +1321,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 			restore, err := setNonCanonical(fd)
 
-			a.RunAgentLoop(ctx, os.Stderr, &messages, line, allowedTools, theme, false, currentSessionID)
+			a.RunAgentLoop(ctx, ppWriter, &messages, line, allowedTools, theme, false, currentSessionID)
 
 			if err == nil && restore != nil {
 				restore()
@@ -1374,6 +1391,31 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 	}
 
 	return false, ""
+}
+
+func isMutatingOrInteractiveSlashCommand(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	parts := strings.Fields(trimmed)
+	if len(parts) == 0 {
+		return false
+	}
+	cmdName := parts[0]
+	if cmdName == "/agent" && len(parts) == 1 {
+		return true
+	}
+	if cmdName == "/config" && len(parts) == 1 {
+		return true
+	}
+	if cmdName == "/session" && len(parts) > 1 {
+		op := parts[1]
+		if op == "load" || op == "clear" || op == "new" || op == "branch" {
+			return true
+		}
+	}
+	if cmdName == "/rewind" {
+		return true
+	}
+	return false
 }
 
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {

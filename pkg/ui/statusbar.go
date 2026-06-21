@@ -254,21 +254,3 @@ func formatRight(theme UITheme, width int) string {
 	}
 }
 
-func stripAnsi(str string) string {
-	var sb strings.Builder
-	inEscape := false
-	for i := 0; i < len(str); i++ {
-		if str[i] == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if str[i] == 'm' {
-				inEscape = false
-			}
-			continue
-		}
-		sb.WriteByte(str[i])
-	}
-	return sb.String()
-}

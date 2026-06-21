@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"maquis/pkg/ui/style"
 	"github.com/alecthomas/chroma/v2/quick"
+	"golang.org/x/term"
 )
 
 type StreamRenderer struct {
@@ -37,9 +39,14 @@ type StreamRenderer struct {
 	hasWrittenThoughts   bool
 	parser               *jsonStreamParser
 	streamWrites         bool
+	agentName            string
+
+	lineStartLine        int
+	lineStartCol         int
+	hasLineStart         bool
 }
 
-func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool) *StreamRenderer {
+func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool, agentName string) *StreamRenderer {
 	return &StreamRenderer{
 		w:                    w,
 		theme:                theme,
@@ -47,6 +54,7 @@ func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrit
 		showFullThinking:     true, // Thinking is always full/expanded
 		lastEndedWithNewline: true,
 		streamWrites:         streamWrites,
+		agentName:            agentName,
 	}
 }
 
@@ -148,54 +156,11 @@ func (sr *StreamRenderer) Write(chunk string) {
 						sr.codeLanguage = "plaintext"
 					}
 				} else {
-					if strings.HasPrefix(strings.TrimSpace(line), "`") {
-						sr.printNormalLine(line + "\n")
-					} else {
-						fmt.Fprint(sr.w, "\n")
-					}
+					sr.printNormalLine(line)
+					fmt.Fprint(sr.w, "\n")
 				}
-
-				sr.lineIsHeader = false
-				sr.inBold = false
-				sr.inInlineCode = false
 			} else {
-				currentLine := sr.lineBuffer.String()
 				sr.lineBuffer.WriteRune(char)
-
-				suppressPrint := strings.HasPrefix(strings.TrimSpace(currentLine+string(char)), "`")
-
-				if !suppressPrint {
-					if char == '`' {
-						sr.inInlineCode = !sr.inInlineCode
-					}
-
-					if char == '*' && len(currentLine) > 0 && strings.HasSuffix(currentLine, "*") {
-						sr.inBold = !sr.inBold
-					}
-
-					isHeaderPrefix := true
-					bufferedStr := sr.lineBuffer.String()
-					for _, r := range bufferedStr {
-						if r != '#' && r != ' ' && r != '\t' {
-							isHeaderPrefix = false
-							break
-						}
-					}
-					if isHeaderPrefix && strings.Contains(bufferedStr, "#") {
-						sr.lineIsHeader = true
-					}
-
-					charStr := string(char)
-					if sr.lineIsHeader {
-						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Secondary).Bold(true).Render(charStr))
-					} else if sr.inInlineCode {
-						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(charStr))
-					} else if sr.inBold {
-						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Primary).Bold(true).Render(charStr))
-					} else {
-						fmt.Fprint(sr.w, charStr)
-					}
-				}
 			}
 		}
 	}
@@ -235,9 +200,7 @@ func (sr *StreamRenderer) flushLocked() {
 
 	rem := sr.lineBuffer.String()
 	if rem != "" {
-		if strings.HasPrefix(strings.TrimSpace(rem), "`") {
-			sr.printNormalLine(rem)
-		}
+		sr.printNormalLine(rem)
 		sr.lineBuffer.Reset()
 		sr.lastEndedWithNewline = strings.HasSuffix(rem, "\n")
 	}
@@ -249,22 +212,106 @@ func (sr *StreamRenderer) flushLocked() {
 }
 
 func (sr *StreamRenderer) printNormalLine(line string) {
-	styled := line
-	if strings.HasPrefix(line, "#") {
-		styled = style.NewStyle().Foreground(sr.theme.Secondary).Bold(true).Render(line)
-	} else {
-		words := strings.Split(line, " ")
-		for i, w := range words {
-			if strings.HasPrefix(w, "**") && strings.HasSuffix(w, "**") {
-				words[i] = style.NewStyle().Foreground(sr.theme.Primary).Bold(true).Render(strings.Trim(w, "*"))
-			} else if strings.HasPrefix(w, "`") && strings.HasSuffix(w, "`") {
-				words[i] = style.NewStyle().Foreground(sr.theme.Highlight).Render(strings.Trim(w, "`"))
-			}
+	trimmed := strings.TrimSpace(line)
+	
+	// 1. Handle headers: e.g. "# Header", "## Header", etc.
+	if strings.HasPrefix(trimmed, "#") {
+		hashes := 0
+		for hashes < len(trimmed) && trimmed[hashes] == '#' {
+			hashes++
 		}
-		styled = strings.Join(words, " ")
+		headerText := strings.TrimSpace(trimmed[hashes:])
+		var styled string
+		if hashes == 1 {
+			styled = style.NewStyle().Foreground(sr.theme.Secondary).Bold(true).Underline(true).Render(headerText)
+		} else {
+			styled = style.NewStyle().Foreground(sr.theme.Secondary).Bold(true).Render(headerText)
+		}
+		fmt.Fprint(sr.w, styled)
+		return
 	}
 
-	fmt.Fprint(sr.w, styled)
+	// 2. Handle blockquotes: e.g. "> text"
+	if strings.HasPrefix(trimmed, ">") {
+		quoteText := strings.TrimSpace(trimmed[1:])
+		styled := style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render("┃ " + quoteText)
+		fmt.Fprint(sr.w, styled)
+		return
+	}
+
+	// 3. Handle bullet points: e.g. "- item" or "* item"
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "• ") {
+		bulletText := trimmed[2:]
+		bulletSymbol := style.NewStyle().Foreground(sr.theme.Primary).Render("•")
+		fmt.Fprintf(sr.w, "  %s %s", bulletSymbol, sr.renderInlineMarkdown(bulletText))
+		return
+	}
+
+	// 4. Standard text line: parse inline styles (bold, code, italic)
+	fmt.Fprint(sr.w, sr.renderInlineMarkdown(line))
+}
+
+func (sr *StreamRenderer) renderInlineMarkdown(text string) string {
+	var result strings.Builder
+	runes := []rune(text)
+	n := len(runes)
+
+	for i := 0; i < n; {
+		// 1. Inline code: `code`
+		if runes[i] == '`' {
+			j := i + 1
+			for j < n && runes[j] != '`' {
+				j++
+			}
+			if j < n {
+				codeVal := string(runes[i+1 : j])
+				styled := style.NewStyle().Foreground(sr.theme.Highlight).Render(codeVal)
+				result.WriteString(styled)
+				i = j + 1
+				continue
+			}
+		}
+
+		// 2. Bold: **bold**
+		if i+1 < n && runes[i] == '*' && runes[i+1] == '*' {
+			j := i + 2
+			found := false
+			for j+1 < n {
+				if runes[j] == '*' && runes[j+1] == '*' {
+					found = true
+					break
+				}
+				j++
+			}
+			if found {
+				boldVal := string(runes[i+2 : j])
+				styled := style.NewStyle().Foreground(sr.theme.Primary).Bold(true).Render(sr.renderInlineMarkdown(boldVal))
+				result.WriteString(styled)
+				i = j + 2
+				continue
+			}
+		}
+
+		// 3. Italic: *italic*
+		if runes[i] == '*' {
+			j := i + 1
+			for j < n && runes[j] != '*' {
+				j++
+			}
+			if j < n {
+				italicVal := string(runes[i+1 : j])
+				styled := style.NewStyle().Italic(true).Render(sr.renderInlineMarkdown(italicVal))
+				result.WriteString(styled)
+				i = j + 1
+				continue
+			}
+		}
+
+		result.WriteRune(runes[i])
+		i++
+	}
+
+	return result.String()
 }
 
 func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle string) error {
@@ -291,35 +338,12 @@ func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle stri
 }
 
 func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
-	sr.mu.Lock()
-	defer sr.mu.Unlock()
-
-	if sr.parser == nil {
-		sr.parser = &jsonStreamParser{activeToolIndex: -1, streamWrites: sr.streamWrites}
-	}
-	sr.parser.streamWrites = sr.streamWrites
-	if sr.parser.activeToolIndex != toolCallIndex || sr.parser.activeToolName == "" {
-		sr.flushLocked()
-		sr.parser.needsLeadingNewline = sr.hasWrittenText
-		sr.parser.activeToolName = toolName
-		sr.parser.activeToolIndex = toolCallIndex
-		sr.parser.titlePrinted = false
-		sr.parser.path = ""
-		sr.parser.pathPrinted = false
-	} else {
-		sr.parser.activeToolName = toolName
-	}
+	// No-op: suppress streaming tool calls to avoid double rendering and scrollback pollution.
+	// Tool calls are printed cleanly and exactly once during the execution phase.
 }
 
 func (sr *StreamRenderer) WriteToolCall(content string) {
-	sr.mu.Lock()
-	defer sr.mu.Unlock()
-
-	if sr.parser == nil {
-		sr.parser = &jsonStreamParser{activeToolIndex: -1, streamWrites: sr.streamWrites}
-	}
-	sr.parser.streamWrites = sr.streamWrites
-	sr.parser.feed(content, sr.w, sr.theme)
+	// No-op: suppress streaming tool calls to avoid double rendering and scrollback pollution.
 }
 
 func (sr *StreamRenderer) GetToolTitleLineNumber(index int) int {
@@ -330,4 +354,17 @@ func (sr *StreamRenderer) GetToolTitleLineNumber(index int) int {
 		return -1
 	}
 	return sr.parser.toolTitleLineNumbers[index]
+}
+
+func (sr *StreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser != nil {
+		for i := startIdx; i < len(sr.parser.toolTitleLineNumbers); i++ {
+			if i >= 0 && i < len(sr.parser.toolTitleLineNumbers) {
+				sr.parser.toolTitleLineNumbers[i] += diff
+			}
+		}
+	}
 }
