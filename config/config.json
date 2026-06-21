@@ -9,14 +9,16 @@
   "show_full_thinking": false,
   "collapse_results": true,
   "show_tokens": true,
-  "theme": "dark",
+  "theme": "mono",
   "direct_commands": true,
   "skip_verify": false,
   "skills_dir": "skills",
-  "max_reasoning_steps": 30,
+  "max_reasoning_steps": 100,
   "context_window_limit": 128000,
   "compression_threshold": 0.8,
-  "reasoning_effort": "low",
+  "reasoning_effort": "high",
+  "stream_writes": false,
+  "syntax_theme": "dracula",
   "providers": {
     "brain": {
       "name": "brain",
@@ -27,15 +29,9 @@
     "openai": {
       "name": "openai",
       "endpoint": "https://api.openai.com",
-      "api_key": "",
       "model": "gpt-4-turbo"
-    },
-    "local": {
-      "name": "local",
-      "endpoint": "http://localhost:8080",
-      "api_key": "",
-      "model": "llama-3-instruct"
     }
   },
-  "active_provider": "brain"
+  "active_provider": "brain",
+  "max_completion_tokens": 128000
 }
