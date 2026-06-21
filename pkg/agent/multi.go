@@ -369,6 +369,13 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		for chunk := range chunkChan {
 			if chunk.Type == "reasoning" {
 				if ma.BaseAgent.Config.ShowThinking {
+					if !responseHeaderStarted {
+						fmt.Fprintf(ncw, "\n%s [%s] response: ",
+							style.NewStyle().Foreground(theme.Success).Bold(true).Render("✔"),
+							style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(ma.Name),
+						)
+						responseHeaderStarted = true
+					}
 					sr.WriteReasoning(chunk.Content)
 				}
 			} else {

@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"maquis/pkg/ui/style"
 	"github.com/alecthomas/chroma/v2/quick"
-	"golang.org/x/term"
 )
 
 type StreamRenderer struct {
@@ -43,7 +41,34 @@ type StreamRenderer struct {
 
 	lineStartLine        int
 	lineStartCol         int
+	lineStartScroll      int
 	hasLineStart         bool
+}
+
+func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
+	for w != nil {
+		if ppw, ok := w.(*PromptPreservingWriter); ok {
+			return ppw
+		}
+		if unwrapper, ok := w.(interface{ Unwrap() io.Writer }); ok {
+			w = unwrapper.Unwrap()
+		} else {
+			break
+		}
+	}
+	return nil
+}
+
+func clearScrollRegionLines(ppw *PromptPreservingWriter, startLine int, w io.Writer) {
+	scrollBottom := ppw.Height() - 5
+	if scrollBottom < 1 {
+		scrollBottom = 1
+	}
+	for l := startLine; l <= scrollBottom; l++ {
+		ppw.SetPrintLine(l)
+		ppw.SetPrintCol(1)
+		fmt.Fprint(w, "\x1b[2K")
+	}
 }
 
 func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool, agentName string) *StreamRenderer {
@@ -96,17 +121,19 @@ func (sr *StreamRenderer) EndThinking() {
 func (sr *StreamRenderer) endThinking() {
 	if sr.inThinking {
 		sr.inThinking = false
-		fmt.Fprint(sr.w, "\n")
+		if sr.reasoningText.Len() > 0 {
+			fmt.Fprint(sr.w, "\n")
 
-		elapsed := time.Since(sr.reasoningStart).Seconds()
-		iconStyle := style.NewStyle().Foreground(sr.theme.Success)
-		labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
+			elapsed := time.Since(sr.reasoningStart).Seconds()
+			iconStyle := style.NewStyle().Foreground(sr.theme.Success)
+			labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 
-		fmt.Fprintf(sr.w, "%s %s\n\n", 
-			iconStyle.Render("✔"),
-			labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
-		)
-		sr.lastEndedWithNewline = true
+			fmt.Fprintf(sr.w, "%s %s\n\n", 
+				iconStyle.Render("✔"),
+				labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
+			)
+			sr.lastEndedWithNewline = true
+		}
 	}
 }
 
@@ -150,16 +177,52 @@ func (sr *StreamRenderer) Write(chunk string) {
 
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "```") {
+					ppw := findPromptPreservingWriter(sr.w)
+					if ppw != nil && sr.hasLineStart {
+						scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
+						adjustedLine := sr.lineStartLine - scrollDelta
+						if adjustedLine < 1 {
+							adjustedLine = 1
+						}
+						clearScrollRegionLines(ppw, adjustedLine, sr.w)
+						ppw.SetPrintLine(adjustedLine)
+						ppw.SetPrintCol(sr.lineStartCol)
+					}
 					sr.inCodeBlock = true
 					sr.codeLanguage = strings.TrimPrefix(trimmed, "```")
 					if sr.codeLanguage == "" {
 						sr.codeLanguage = "plaintext"
 					}
 				} else {
-					sr.printNormalLine(line)
-					fmt.Fprint(sr.w, "\n")
+					ppw := findPromptPreservingWriter(sr.w)
+					if ppw != nil && sr.hasLineStart {
+						scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
+						adjustedLine := sr.lineStartLine - scrollDelta
+						if adjustedLine < 1 {
+							adjustedLine = 1
+						}
+						clearScrollRegionLines(ppw, adjustedLine, sr.w)
+						ppw.SetPrintLine(adjustedLine)
+						ppw.SetPrintCol(sr.lineStartCol)
+						sr.printNormalLine(line)
+						fmt.Fprint(sr.w, "\n")
+					} else {
+						sr.printNormalLine(line)
+						fmt.Fprint(sr.w, "\n")
+					}
 				}
+				sr.hasLineStart = false
 			} else {
+				ppw := findPromptPreservingWriter(sr.w)
+				if ppw != nil {
+					if !sr.hasLineStart {
+						sr.lineStartLine = ppw.GetPrintLine()
+						sr.lineStartCol = ppw.GetPrintCol()
+						sr.lineStartScroll = ppw.GetScrollCount()
+						sr.hasLineStart = true
+					}
+					fmt.Fprint(sr.w, string(char))
+				}
 				sr.lineBuffer.WriteRune(char)
 			}
 		}
@@ -200,10 +263,24 @@ func (sr *StreamRenderer) flushLocked() {
 
 	rem := sr.lineBuffer.String()
 	if rem != "" {
-		sr.printNormalLine(rem)
+		ppw := findPromptPreservingWriter(sr.w)
+		if ppw != nil && sr.hasLineStart {
+			scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
+			adjustedLine := sr.lineStartLine - scrollDelta
+			if adjustedLine < 1 {
+				adjustedLine = 1
+			}
+			clearScrollRegionLines(ppw, adjustedLine, sr.w)
+			ppw.SetPrintLine(adjustedLine)
+			ppw.SetPrintCol(sr.lineStartCol)
+			sr.printNormalLine(rem)
+		} else {
+			sr.printNormalLine(rem)
+		}
 		sr.lineBuffer.Reset()
 		sr.lastEndedWithNewline = strings.HasSuffix(rem, "\n")
 	}
+	sr.hasLineStart = false
 
 	if sr.hasWrittenText && !sr.lastEndedWithNewline {
 		fmt.Fprint(sr.w, "\n")

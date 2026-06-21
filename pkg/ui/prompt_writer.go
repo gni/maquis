@@ -30,6 +30,7 @@ type PromptPreservingWriter struct {
 	ansiState      int // 0: normal, 1: saw ESC, 2: saw ESC [, 3: saw ESC ]
 	cursorHidden   bool
 	cursorAtPrompt bool
+	scrollCount    int
 }
 
 func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
@@ -143,6 +144,8 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 					p.printCol = 1
 					if p.printLine < scrollBottom {
 						p.printLine++
+					} else {
+						p.scrollCount++
 					}
 				case '\r':
 					p.printCol = 1
@@ -188,6 +191,8 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 		p.printCol = ((p.printCol - 1) % width) + 1
 		if p.printLine < scrollBottom {
 			p.printLine++
+		} else {
+			p.scrollCount++
 		}
 	}
 }
@@ -210,6 +215,12 @@ func (p *PromptPreservingWriter) GetPrintCol() int {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 	return p.printCol
+}
+
+func (p *PromptPreservingWriter) GetScrollCount() int {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	return p.scrollCount
 }
 
 func (p *PromptPreservingWriter) SetPrintLine(line int) {

@@ -633,5 +633,86 @@ func TestInlineMarkdownRendering(t *testing.T) {
 	}
 }
 
+func TestStreamRendererRealTimeStreaming(t *testing.T) {
+	theme := UITheme{
+		Primary:   style.Color("#ff0000"),
+		Secondary: style.Color("#00ff00"),
+		Highlight: style.Color("#0000ff"),
+		Border:    style.Color("#555555"),
+	}
+
+	var buf bytes.Buffer
+	// Create a PromptPreservingWriter.
+	ppw := NewPromptPreservingWriter(&buf, 40)
+	
+	// Create StreamRenderer with ppw
+	sr := NewStreamRenderer(ppw, theme, false, false, "test")
+
+	// Write "Hello **world**" character by character
+	sr.Write("H")
+	sr.Write("e")
+	sr.Write("l")
+	sr.Write("l")
+	sr.Write("o")
+	sr.Write(" ")
+	sr.Write("*")
+	sr.Write("*")
+	sr.Write("w")
+	sr.Write("o")
+	sr.Write("r")
+	sr.Write("l")
+	sr.Write("d")
+	sr.Write("*")
+	sr.Write("*")
+
+	// Helper to strip all ANSI codes (including cursor movements)
+	stripAllAnsi := func(s string) string {
+		var sb strings.Builder
+		inEscape := false
+		for i := 0; i < len(s); i++ {
+			if s[i] == '\x1b' {
+				inEscape = true
+				continue
+			}
+			if inEscape {
+				if (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') {
+					inEscape = false
+				}
+				continue
+			}
+			sb.WriteByte(s[i])
+		}
+		return sb.String()
+	}
+
+	// Now check what was written so far. It should have the raw text printed immediately.
+	rawWritten := buf.String()
+	t.Logf("DEBUG: rawWritten=%q\n", rawWritten)
+	cleanRaw := stripAllAnsi(rawWritten)
+	if !strings.Contains(cleanRaw, "Hello **world**") {
+		t.Errorf("expected raw text to be written immediately, got %q", cleanRaw)
+	}
+
+	// Now write a newline
+	buf.Reset()
+	sr.Write("\n")
+
+	// Upon writing the newline, it should reposition the cursor to the starting line,
+	// clear the line using \x1b[2K, write the styled line (which parses **world**), and then print \n.
+	newLineOutput := buf.String()
+
+	// The output should contain \x1b[2K to clear, and then the styled version of "Hello **world**"
+	if !strings.Contains(newLineOutput, "\x1b[2K") {
+		t.Errorf("expected output to contain clear line sequence \\x1b[2K, got %q", newLineOutput)
+	}
+	cleanNewLineOutput := stripAllAnsi(newLineOutput)
+	if strings.Contains(cleanNewLineOutput, "**") {
+		t.Errorf("expected markdown styling to be applied (stars removed), but got %q", cleanNewLineOutput)
+	}
+	if !strings.Contains(cleanNewLineOutput, "world") {
+		t.Errorf("expected output to contain 'world', but got %q", cleanNewLineOutput)
+	}
+}
+
 
 
