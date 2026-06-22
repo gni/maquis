@@ -81,8 +81,8 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("cannot read: path '%s' is a directory", args.Path)
 	}
-	if info.Size() > 2*1024*1024 { // 2MB limit
-		return "", fmt.Errorf("file size (%d bytes) is too large; maximum allowed size is 2MB", info.Size())
+	if info.Size() > 500*1024 { // 500KB limit
+		return "", fmt.Errorf("file size (%d bytes) is too large; maximum allowed size is 500KB", info.Size())
 	}
 
 	data, err := os.ReadFile(safePath)
@@ -108,14 +108,36 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if offset > len(lines) {
 		return "", nil
 	}
-	end := len(lines)
-	if args.Limit > 0 {
-		end = offset + args.Limit - 1
-		if end > len(lines) {
-			end = len(lines)
-		}
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 500 // default to 500 lines to prevent token blowup
+	} else if limit > 1000 {
+		limit = 1000 // cap maximum lines per read to 1000
 	}
-	return strings.Join(lines[offset-1:end], "\n"), nil
+
+	end := offset + limit - 1
+	truncated := false
+	if end > len(lines) {
+		end = len(lines)
+	} else if end < len(lines) {
+		truncated = true
+	}
+
+	var resultLines []string
+	for i := offset - 1; i < end; i++ {
+		line := lines[i]
+		if len(line) > 1000 {
+			line = line[:1000] + " ... [line truncated: line is too long] ..."
+		}
+		resultLines = append(resultLines, line)
+	}
+
+	result := strings.Join(resultLines, "\n")
+	if truncated {
+		result += fmt.Sprintf("\n\n[File truncated. Showing lines %d-%d of %d. Use offset=%d to read the next section.]", offset, end, len(lines), end+1)
+	}
+	return result, nil
 }
 
 type writeTool struct{}
@@ -472,6 +494,7 @@ func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Contents of %s (recursive):\n", searchPath))
 	patterns := loadGitignorePatterns(ctx.GetWorkspaceRoot())
+	count := 0
 	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -489,14 +512,23 @@ func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			return nil
 		}
 
+		if count >= 500 {
+			return fmt.Errorf("limit_reached")
+		}
+
 		typeStr := "file"
 		if info.IsDir() {
 			typeStr = "dir "
 		}
 
 		sb.WriteString(fmt.Sprintf("  [%s]  %-35s  %d bytes\n", typeStr, relPath, info.Size()))
+		count++
 		return nil
 	})
+	if err != nil && err.Error() == "limit_reached" {
+		sb.WriteString("\n[Listing truncated. Too many files found (limit: 500). Use recursive: false or search a subdirectory.]\n")
+		err = nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to walk directory: %w", err)
 	}
@@ -592,12 +624,12 @@ func normalizeSpace(s string) string {
 func isIgnored(name string, isDir bool) bool {
 	if isDir {
 		low := strings.ToLower(name)
-		if low == "node_modules" || low == "venv" || low == ".venv" || low == ".git" || low == "__pycache__" || low == ".idea" || low == ".vscode" || low == "build" || low == "dist" || low == "target" || low == "tmp" || low == "temp" {
+		if low == "node_modules" || low == "venv" || low == ".venv" || low == ".git" || low == "__pycache__" || low == ".idea" || low == ".vscode" || low == "build" || low == "dist" || low == "target" || low == "tmp" || low == "temp" || low == "vendor" || low == ".yarn" || low == ".cache" {
 			return true
 		}
 	} else {
 		ext := filepath.Ext(name)
-		if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || name == ".gitignore" || name == "package-lock.json" || name == "yarn.lock" || name == "pnpm-lock.yaml" {
+		if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || name == ".gitignore" || name == "package-lock.json" || name == "yarn.lock" || name == "pnpm-lock.yaml" || name == ".DS_Store" || name == "pnpm-workspace.yaml" || ext == ".tsbuildinfo" || name == ".eslintcache" {
 			return true
 		}
 	}

@@ -160,7 +160,11 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 				if err != nil {
 					relPath = path
 				}
-				results = append(results, fmt.Sprintf("%s:%d: %s", relPath, i+1, strings.TrimSpace(line)))
+				matchedLine := strings.TrimSpace(line)
+				if len(matchedLine) > 1000 {
+					matchedLine = matchedLine[:1000] + " ... [line truncated: line is too long] ..."
+				}
+				results = append(results, fmt.Sprintf("%s:%d: %s", relPath, i+1, matchedLine))
 				if len(results) >= limit {
 					return fmt.Errorf("limit_reached")
 				}
@@ -238,6 +242,8 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	limit := args.Limit
 	if limit <= 0 {
+		limit = 500
+	} else if limit > 1000 {
 		limit = 1000
 	}
 
@@ -285,15 +291,24 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return nil
 	})
 
-	if err != nil && err.Error() != "limit_reached" {
-		return "", fmt.Errorf("find failed: %w", err)
+	limitReached := false
+	if err != nil {
+		if err.Error() == "limit_reached" {
+			limitReached = true
+		} else {
+			return "", fmt.Errorf("find failed: %w", err)
+		}
 	}
 
 	if len(results) == 0 {
 		return "No matching files found.", nil
 	}
 
-	return strings.Join(results, "\n"), nil
+	resStr := strings.Join(results, "\n")
+	if limitReached {
+		resStr += fmt.Sprintf("\n\n[Search truncated. Too many files matched the pattern (limit: %d). Use a more specific pattern.]", limit)
+	}
+	return resStr, nil
 }
 
 func globToRegexp(pattern string) (*regexp.Regexp, error) {
