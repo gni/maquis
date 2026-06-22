@@ -46,6 +46,7 @@ type AgentUI interface {
 
 type Agent struct {
 	UI             AgentUI
+	LLMProvider    LLMProvider
 	Config         *config.Config
 	ConfigPath     string
 	HttpClient     *http.Client
@@ -89,6 +90,10 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 		Config:         cfg,
 		ConfigPath:     configPath,
 		HttpClient:     httpClient,
+		LLMProvider: &OpenAICompatibleProvider{
+			Config:     cfg,
+			HttpClient: httpClient,
+		},
 		McpClients:     make(map[string]*mcpClient),
 		McpStartErrors: make(map[string]error),
 		Registry:       tool.NewToolRegistry(),

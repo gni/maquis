@@ -34,6 +34,7 @@ var (
 	contextLimitFlag    int
 	directCommandsFlag  bool
 	maxCompletionTokensFlag int
+	compactPrompt       bool
 )
 
 var rootCmd = &cobra.Command{
@@ -83,6 +84,9 @@ var rootCmd = &cobra.Command{
 		}
 		if maxCompletionTokensFlag != 0 {
 			cfg.MaxCompletionTokens = maxCompletionTokensFlag
+		}
+		if cmd.Flags().Changed("compact") {
+			cfg.CompactPrompt = compactPrompt
 		}
 
 		theme := ui.GetConfiguredTheme(cfg)
@@ -328,7 +332,6 @@ func readStdin() (string, error) {
 	}
 	return string(data), nil
 }
-
 func init() {
 	defaultConfig := "config/config.json"
 	home, err := os.UserHomeDir()
@@ -350,6 +353,7 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&contextLimitFlag, "context-limit", 0, "Override context window limit (default: 128000)")
 	rootCmd.PersistentFlags().IntVar(&maxCompletionTokensFlag, "max-completion-tokens", 0, "Override maximum completion/output tokens limit (default: 16384)")
 	rootCmd.PersistentFlags().BoolVar(&directCommandsFlag, "direct", false, "Enable direct execution of local shell commands (default: true in config)")
+	rootCmd.PersistentFlags().BoolVar(&compactPrompt, "compact", false, "Enable highly compressed system instructions for smaller models")
 
 	configCmd.AddCommand(configShowCmd, configEditCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionNewCmd, sessionClearCmd)

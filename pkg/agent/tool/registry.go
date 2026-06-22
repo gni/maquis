@@ -137,7 +137,67 @@ func (r *ToolRegistry) Execute(ctx AgentContext, name string, arguments string) 
 	if !exists {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-	return executor.Execute(ctx, arguments)
+
+	repairedArgs := repairJSON(arguments)
+	var temp interface{}
+	if err := json.Unmarshal([]byte(repairedArgs), &temp); err != nil {
+		return "", fmt.Errorf("JSON validation failed: %w.\nParameters generated: %s\nRecommendation: Please output valid JSON. Double-check closing braces, ensure internal double-quotes are escaped, and verify that newlines inside strings are escaped as '\\n'.", err, arguments)
+	}
+
+	return executor.Execute(ctx, repairedArgs)
+}
+
+func repairJSON(js string) string {
+	js = strings.TrimSpace(js)
+	if js == "" {
+		return "{}"
+	}
+
+	// 1. Fix missing closing brackets/braces
+	openBraces := strings.Count(js, "{")
+	closeBraces := strings.Count(js, "}")
+	if openBraces > closeBraces {
+		js += strings.Repeat("}", openBraces-closeBraces)
+	}
+
+	openBrackets := strings.Count(js, "[")
+	closeBrackets := strings.Count(js, "]")
+	if openBrackets > closeBrackets {
+		js += strings.Repeat("]", openBrackets-closeBrackets)
+	}
+
+	// 2. Fix unescaped newlines inside JSON string values
+	var sb strings.Builder
+	inString := false
+	inEscape := false
+	for i := 0; i < len(js); i++ {
+		c := js[i]
+		if inEscape {
+			sb.WriteByte(c)
+			inEscape = false
+			continue
+		}
+		if c == '\\' {
+			sb.WriteByte(c)
+			inEscape = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			sb.WriteByte(c)
+			continue
+		}
+		if inString && c == '\n' {
+			sb.WriteString(`\n`)
+		} else if inString && c == '\t' {
+			sb.WriteString(`\t`)
+		} else if inString && c == '\r' {
+			sb.WriteString(`\r`)
+		} else {
+			sb.WriteByte(c)
+		}
+	}
+	return sb.String()
 }
 
 func (r *ToolRegistry) GetAvailableTools(allowlist []string) []Tool {

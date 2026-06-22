@@ -31,6 +31,7 @@ type MultiAgent struct {
 	SubagentsMu  sync.RWMutex
 	BaseAgent    *Agent
 	Parent       *MultiAgent
+	Manager      *MultiAgentManager
 	Context      context.Context
 	Cancel       context.CancelFunc
 
@@ -40,9 +41,25 @@ type MultiAgent struct {
 
 // GetSystemPrompt generates the system instructions and reference guides list for the agent.
 func (ma *MultiAgent) GetSystemPrompt() string {
+	if ma.BaseAgent != nil && ma.BaseAgent.Config != nil && ma.BaseAgent.Config.CompactPrompt {
+		thinkingGuidelines := fmt.Sprintf("\n\nThinking Guidelines:\n"+
+			"- Workspace root: `%s`. Read, edit, or list files inside this workspace directory tree.\n"+
+			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
+			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
+			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
+			"- Ignore dependencies (.git, node_modules, .venv) when searching or listing.\n"+
+			"- Keep thoughts under 1 sentence.",
+			ma.BaseAgent.WorkspaceRoot)
+
+		var sb strings.Builder
+		sb.WriteString(ma.SystemPrompt + thinkingGuidelines)
+		return sb.String()
+	}
+
 	thinkingGuidelines := fmt.Sprintf("\n\nThinking/Reasoning Guidelines:\n"+
 		"- You are running in the workspace directory: `%s`. Any relative file paths you access or create must resolve relative to this directory. You must only read, edit, write, or list files inside this workspace directory tree.\n"+
 		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using 'ls' or similar listing tool) to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
+		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
 		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
 		"- Before editing or modifying a file, you MUST read the file first to ensure your edits match the current content exactly.\n"+
 		"- When searching files, listing directories, reading code, or executing shell commands (such as find, grep, wc, ls, etc.), you MUST ALWAYS exclude or ignore dependency and build directories (such as node_modules, venv, .venv, .git, build, dist, target, and tmp) unless the user explicitly requests them.\n"+
@@ -198,6 +215,14 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 				ma.History = append(ma.History, msg)
 				ma.HistoryMu.Unlock()
 
+				taskID := msg.ToolCallID
+				if taskID != "" && ma.Manager != nil {
+					ma.Manager.UpdateTaskStatus(taskID, "running", "", nil)
+					_ = ma.Manager.SaveAgentState(ma, "running")
+				} else if ma.Manager != nil {
+					_ = ma.Manager.SaveAgentState(ma, "running")
+				}
+
 				if msg.Role == "user" {
 					writer := w
 					if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
@@ -225,6 +250,13 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 					ma.HistoryMu.Unlock()
 
 					if err != nil {
+						if taskID != "" && ma.Manager != nil {
+							ma.Manager.UpdateTaskStatus(taskID, "failed", "", err)
+						}
+						if ma.Manager != nil {
+							_ = ma.Manager.SaveAgentState(ma, "failed")
+						}
+
 						if err != context.Canceled {
 							errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
 							fmt.Fprintf(writer, "\n%s [%s] error: %v\n",
@@ -243,6 +275,13 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 						default:
 						}
 						continue
+					}
+
+					if taskID != "" && ma.Manager != nil {
+						ma.Manager.UpdateTaskStatus(taskID, "completed", response.Content, nil)
+					}
+					if ma.Manager != nil {
+						_ = ma.Manager.SaveAgentState(ma, "idle")
 					}
 
 					select {
@@ -410,6 +449,9 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		ma.HistoryMu.Lock()
 		ma.History = append(ma.History, *assistantMsg)
 		ma.HistoryMu.Unlock()
+		if ma.Manager != nil {
+			_ = ma.Manager.SaveAgentState(ma, "running")
+		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
 			if !responseHeaderStarted {
@@ -466,7 +508,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 
 			if toolErr != nil {
-				output = fmt.Sprintf("Error: %v", toolErr)
+				output = FormatDefensiveError(tc.Function.Name, toolErr)
 			}
 			if output == "" {
 				output = "(no output)"
@@ -494,6 +536,9 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				Content:    output,
 			})
 			ma.HistoryMu.Unlock()
+			if ma.Manager != nil {
+				_ = ma.Manager.SaveAgentState(ma, "running")
+			}
 		}
 	}
 
@@ -515,29 +560,76 @@ func (s *subagentExecutor) Execute(ctx tool.AgentContext, arguments string) (str
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	select {
-	case <-ctx.Context().Done():
-		return "", ctx.Context().Err()
-	case <-s.subagent.Context.Done():
-		return "", fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
-	case s.subagent.Input <- db.Message{
-		Role:    "user",
-		Name:    "ParentAgent",
-		Content: args.Prompt,
-	}:
+	if s.subagent.Manager == nil {
+		return "", fmt.Errorf("subagent '%s' has no manager reference", s.subagent.Name)
 	}
+
+	taskID := fmt.Sprintf("subtask_%s", db.NewUUID()[:8])
+	s.subagent.Manager.RegisterTask(taskID, s.subagent.Name, args.Prompt)
 
 	select {
 	case <-ctx.Context().Done():
+		s.subagent.Manager.UpdateTaskStatus(taskID, "failed", "", ctx.Context().Err())
 		return "", ctx.Context().Err()
 	case <-s.subagent.Context.Done():
-		return "", fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
-	case response, ok := <-s.subagent.Output:
-		if !ok {
-			return "", fmt.Errorf("subagent '%s' output channel closed", s.subagent.Name)
-		}
-		return response.Content, nil
+		errSub := fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
+		s.subagent.Manager.UpdateTaskStatus(taskID, "failed", "", errSub)
+		return "", errSub
+	case s.subagent.Input <- db.Message{
+		Role:       "user",
+		Name:       "ParentAgent",
+		ToolCallID: taskID,
+		Content:    args.Prompt,
+	}:
 	}
+
+	timeout := 10 * time.Minute // robust default timeout
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	timeoutChan := time.After(timeout)
+
+	for {
+		select {
+		case <-ctx.Context().Done():
+			s.subagent.Manager.UpdateTaskStatus(taskID, "failed", "", ctx.Context().Err())
+			return "", ctx.Context().Err()
+		case <-s.subagent.Context.Done():
+			errSub := fmt.Errorf("subagent '%s' context cancelled", s.subagent.Name)
+			s.subagent.Manager.UpdateTaskStatus(taskID, "failed", "", errSub)
+			return "", errSub
+		case <-timeoutChan:
+			s.subagent.CancelActiveTurn()
+			errTimeout := fmt.Errorf("subagent '%s' execution timed out after %v", s.subagent.Name, timeout)
+			s.subagent.Manager.UpdateTaskStatus(taskID, "failed", "", errTimeout)
+			return "", errTimeout
+		case <-ticker.C:
+			task, err := s.subagent.Manager.GetTask(taskID)
+			if err != nil {
+				return "", err
+			}
+			if task.Status == "completed" {
+				return task.Response, nil
+			}
+			if task.Status == "failed" {
+				return "", fmt.Errorf("subagent execution failed: %s", task.Error)
+			}
+		}
+	}
+}
+
+type SubagentTask struct {
+	ID        string    `json:"id"`
+	AgentName string    `json:"agent_name"`
+	Prompt    string    `json:"prompt"`
+	Status    string    `json:"status"` // "pending", "running", "completed", "failed"
+	Response  string    `json:"response"`
+	Error     string    `json:"error"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type AgentState struct {
+	Status  string       `json:"status"` // "idle", "running", "completed", "failed"
+	History []db.Message `json:"history"`
 }
 
 type MultiAgentManager struct {
@@ -548,12 +640,15 @@ type MultiAgentManager struct {
 	w           io.Writer
 	theme       style.UITheme
 	agentsDir   string
+	Tasks       map[string]*SubagentTask
+	TasksMu     sync.RWMutex
 }
 
 func NewMultiAgentManager(baseAgent *Agent, w io.Writer, theme style.UITheme) *MultiAgentManager {
 	mam := &MultiAgentManager{
 		BaseAgent: baseAgent,
 		Agents:    make(map[string]*MultiAgent),
+		Tasks:     make(map[string]*SubagentTask),
 		w:         w,
 		theme:     theme,
 	}
@@ -565,6 +660,102 @@ func NewMultiAgentManager(baseAgent *Agent, w io.Writer, theme style.UITheme) *M
 	}
 
 	return mam
+}
+
+func (mam *MultiAgentManager) RegisterTask(id string, agentName string, prompt string) {
+	mam.TasksMu.Lock()
+	defer mam.TasksMu.Unlock()
+	if mam.Tasks == nil {
+		mam.Tasks = make(map[string]*SubagentTask)
+	}
+	mam.Tasks[id] = &SubagentTask{
+		ID:        id,
+		AgentName: agentName,
+		Prompt:    prompt,
+		Status:    "pending",
+		UpdatedAt: time.Now(),
+	}
+}
+
+func (mam *MultiAgentManager) GetTask(id string) (*SubagentTask, error) {
+	mam.TasksMu.RLock()
+	defer mam.TasksMu.RUnlock()
+	task, exists := mam.Tasks[id]
+	if !exists {
+		return nil, fmt.Errorf("task '%s' not found", id)
+	}
+	taskCopy := *task
+	return &taskCopy, nil
+}
+
+func (mam *MultiAgentManager) UpdateTaskStatus(id string, status string, response string, err error) {
+	mam.TasksMu.Lock()
+	defer mam.TasksMu.Unlock()
+	if mam.Tasks == nil {
+		return
+	}
+	task, exists := mam.Tasks[id]
+	if !exists {
+		return
+	}
+	task.Status = status
+	task.Response = response
+	if err != nil {
+		task.Error = err.Error()
+	}
+	task.UpdatedAt = time.Now()
+}
+
+func (mam *MultiAgentManager) SaveAgentState(ma *MultiAgent, status string) error {
+	agentsDir, err := mam.getAgentsDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		return err
+	}
+
+	ma.HistoryMu.RLock()
+	state := AgentState{
+		Status:  status,
+		History: ma.History,
+	}
+	ma.HistoryMu.RUnlock()
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(agentsDir, ma.Name+"_state.json")
+	return os.WriteFile(path, data, 0644)
+}
+
+func (mam *MultiAgentManager) LoadAgentState(ma *MultiAgent) error {
+	agentsDir, err := mam.getAgentsDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(agentsDir, ma.Name+"_state.json")
+	if _, err := os.Stat(path); err != nil {
+		return nil // No state file yet
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var state AgentState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+
+	ma.HistoryMu.Lock()
+	if len(state.History) > 0 {
+		ma.History = state.History
+	}
+	ma.HistoryMu.Unlock()
+	return nil
 }
 
 func (mam *MultiAgentManager) getAgentsDir() (string, error) {
@@ -609,7 +800,10 @@ func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, paren
 	}
 
 	ma := NewMultiAgent(name, systemPrompt, parent, mam.BaseAgent, skillName)
+	ma.Manager = mam
 	mam.Agents[name] = ma
+
+	_ = mam.LoadAgentState(ma)
 
 	if mam.BaseAgent != nil {
 		mam.BaseAgent.SpawnedAgentsMu.Lock()

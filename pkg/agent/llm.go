@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"maquis/pkg/agent/tool"
+	"maquis/pkg/config"
 	"maquis/pkg/db"
 )
 
@@ -71,20 +72,34 @@ type ChatCompletionResponseChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-func (a *Agent) CheckThinkingSupport() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+type LLMProvider interface {
+	StreamChatCompletions(
+		ctx context.Context,
+		messages []db.Message,
+		tools []tool.Tool,
+		chunkChan chan<- StreamChunk,
+	) (*db.Message, error)
+	CheckThinkingSupport(ctx context.Context) bool
+}
 
-	url := fmt.Sprintf("%s/props?model=%s", strings.TrimSuffix(a.Config.Endpoint, "/"), a.Config.Model)
+type OpenAICompatibleProvider struct {
+	Config                 *config.Config
+	HttpClient             *http.Client
+	ThinkingSupported      bool
+	ThinkingSupportChecked bool
+}
+
+func (p *OpenAICompatibleProvider) CheckThinkingSupport(ctx context.Context) bool {
+	url := fmt.Sprintf("%s/props?model=%s", strings.TrimSuffix(p.Config.Endpoint, "/"), p.Config.Model)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("maquis", "v1.0.0")
-	if a.Config.ApiKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
+	if p.Config.ApiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.Config.ApiKey))
 	}
-	resp, err := a.HttpClient.Do(req)
+	resp, err := p.HttpClient.Do(req)
 	if err != nil {
 		return false
 	}
@@ -92,23 +107,23 @@ func (a *Agent) CheckThinkingSupport() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func (a *Agent) StreamChatCompletions(
+func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	ctx context.Context,
 	messages []db.Message,
-	allowlist []string,
+	tools []tool.Tool,
 	chunkChan chan<- StreamChunk,
 ) (*db.Message, error) {
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(a.Config.Endpoint, "/"))
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(p.Config.Endpoint, "/"))
 
-	if !a.ThinkingSupportChecked {
-		a.ThinkingSupported = a.CheckThinkingSupport()
-		a.ThinkingSupportChecked = true
+	if !p.ThinkingSupportChecked {
+		p.ThinkingSupported = p.CheckThinkingSupport(ctx)
+		p.ThinkingSupportChecked = true
 	}
 
-	enableThinking := a.Config.ShowThinking
+	enableThinking := p.Config.ShowThinking
 	budget := -1
 	if enableThinking {
-		switch strings.ToLower(a.Config.ReasoningEffort) {
+		switch strings.ToLower(p.Config.ReasoningEffort) {
 		case "low":
 			budget = 512
 		case "medium":
@@ -137,21 +152,30 @@ func (a *Agent) StreamChatCompletions(
 		}
 	}
 
+	var finalTools []tool.Tool
+	if p.Config.CompactPrompt {
+		for _, t := range tools {
+			finalTools = append(finalTools, compressToolDefinition(t))
+		}
+	} else {
+		finalTools = tools
+	}
+
 	reqBody := ChatCompletionRequest{
-		Model:       a.Config.Model,
+		Model:       p.Config.Model,
 		Messages:    apiMessages,
-		Tools:       a.Registry.GetAvailableTools(allowlist),
-		Temperature: a.Config.Temperature,
+		Tools:       finalTools,
+		Temperature: p.Config.Temperature,
 		Stream:      true,
 		StreamOptions: &StreamOptions{
 			IncludeUsage: true,
 		},
-		ReasoningEffort:     a.Config.ReasoningEffort,
-		MaxCompletionTokens: a.Config.MaxCompletionTokens,
-		MaxTokens:           a.Config.MaxCompletionTokens,
+		ReasoningEffort:     p.Config.ReasoningEffort,
+		MaxCompletionTokens: p.Config.MaxCompletionTokens,
+		MaxTokens:           p.Config.MaxCompletionTokens,
 	}
 
-	if a.ThinkingSupported {
+	if p.ThinkingSupported {
 		reqBody.ReasoningControl = true
 		if enableThinking {
 			reqBody.ReasoningFormat = "auto"
@@ -199,14 +223,14 @@ func (a *Agent) StreamChatCompletions(
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("maquis", "v1.0.0")
 
-		if a.Config.ApiKey != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", a.Config.ApiKey))
+		if p.Config.ApiKey != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.Config.ApiKey))
 		}
 
 		var doErr error
-		resp, doErr = a.HttpClient.Do(req)
+		resp, doErr = p.HttpClient.Do(req)
 		if doErr != nil {
-			lastErr = fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", doErr, a.Config.Endpoint)
+			lastErr = fmt.Errorf("HTTP request failed: %w. Check your endpoint (%s)", doErr, p.Config.Endpoint)
 			continue
 		}
 
@@ -419,10 +443,9 @@ func (a *Agent) StreamChatCompletions(
 		}
 	}
 
+	var duration time.Duration
 	if !generationStart.IsZero() {
-		a.lastGenerationDuration = time.Since(generationStart)
-	} else {
-		a.lastGenerationDuration = 0
+		duration = time.Since(generationStart)
 	}
 
 	if promptTokens == 0 {
@@ -462,7 +485,231 @@ func (a *Agent) StreamChatCompletions(
 				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, *tc)
 			}
 		}
+	} else {
+		// Fallback parser: extract tool calls from text content if native tool calls are empty
+		fallbackCalls := ParseFallbackToolCalls(assistantMsg.Content)
+		if len(fallbackCalls) > 0 {
+			assistantMsg.ToolCalls = fallbackCalls
+		}
+	}
+
+	// Store duration in context/metadata or handle via caller setting
+	ctxVal := ctx.Value("generation_duration_callback")
+	if callback, ok := ctxVal.(func(time.Duration)); ok {
+		callback(duration)
 	}
 
 	return assistantMsg, nil
+}
+
+// Delegators on Agent struct to maintain backwards compatibility
+
+func (a *Agent) CheckThinkingSupport() bool {
+	if a.LLMProvider == nil {
+		a.LLMProvider = &OpenAICompatibleProvider{
+			Config:     a.Config,
+			HttpClient: a.HttpClient,
+		}
+	} else {
+		if oai, ok := a.LLMProvider.(*OpenAICompatibleProvider); ok {
+			oai.Config = a.Config
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.LLMProvider.CheckThinkingSupport(ctx)
+}
+
+func (a *Agent) StreamChatCompletions(
+	ctx context.Context,
+	messages []db.Message,
+	allowlist []string,
+	chunkChan chan<- StreamChunk,
+) (*db.Message, error) {
+	if a.LLMProvider == nil {
+		a.LLMProvider = &OpenAICompatibleProvider{
+			Config:     a.Config,
+			HttpClient: a.HttpClient,
+		}
+	} else {
+		if oai, ok := a.LLMProvider.(*OpenAICompatibleProvider); ok {
+			if oai.Config != a.Config || (oai.Config != nil && (oai.Config.Endpoint != a.Config.Endpoint || oai.Config.Model != a.Config.Model)) {
+				oai.ThinkingSupportChecked = false
+				oai.ThinkingSupported = false
+			}
+			oai.Config = a.Config
+		}
+	}
+
+	// Capture generation duration via context value
+	durationChan := make(chan time.Duration, 1)
+	ctxWithCallback := context.WithValue(ctx, "generation_duration_callback", func(d time.Duration) {
+		select {
+		case durationChan <- d:
+		default:
+		}
+	})
+
+	tools := a.Registry.GetAvailableTools(allowlist)
+	msg, err := a.LLMProvider.StreamChatCompletions(ctxWithCallback, messages, tools, chunkChan)
+
+	select {
+	case d := <-durationChan:
+		a.lastGenerationDuration = d
+	default:
+		a.lastGenerationDuration = 0
+	}
+
+	return msg, err
+}
+
+func compressToolDefinition(t tool.Tool) tool.Tool {
+	compressed := t
+	newProps := make(map[string]tool.SchemaProp)
+	for k, v := range t.Function.Parameters.Properties {
+		newProps[k] = v
+	}
+	compressed.Function.Parameters.Properties = newProps
+
+	switch t.Function.Name {
+	case "bash":
+		compressed.Function.Description = "Run bash command"
+		if prop, ok := compressed.Function.Parameters.Properties["command"]; ok {
+			prop.Description = "Command string"
+			compressed.Function.Parameters.Properties["command"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["background"]; ok {
+			prop.Description = "Run in background"
+			compressed.Function.Parameters.Properties["background"] = prop
+		}
+	case "read":
+		compressed.Function.Description = "Read file lines"
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "File path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["offset"]; ok {
+			prop.Description = "Start line"
+			compressed.Function.Parameters.Properties["offset"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
+			prop.Description = "Max lines"
+			compressed.Function.Parameters.Properties["limit"] = prop
+		}
+	case "write":
+		compressed.Function.Description = "Write file"
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "File path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["write_content"]; ok {
+			prop.Description = "File content"
+			compressed.Function.Parameters.Properties["write_content"] = prop
+		}
+	case "edit":
+		compressed.Function.Description = "Edit file blocks"
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "File path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["updates"]; ok {
+			prop.Description = "Replacements array"
+			if prop.Items != nil {
+				itemsCopy := *prop.Items
+				itemsProps := make(map[string]tool.SchemaProp)
+				for k, v := range itemsCopy.Properties {
+					itemsProps[k] = v
+				}
+				itemsCopy.Properties = itemsProps
+				
+				if oldTextProp, ok := itemsCopy.Properties["oldText"]; ok {
+					oldTextProp.Description = "Target content"
+					itemsCopy.Properties["oldText"] = oldTextProp
+				}
+				if newTextProp, ok := itemsCopy.Properties["newText"]; ok {
+					newTextProp.Description = "Replacement content"
+					itemsCopy.Properties["newText"] = newTextProp
+				}
+				prop.Items = &itemsCopy
+			}
+			compressed.Function.Parameters.Properties["updates"] = prop
+		}
+	case "grep":
+		compressed.Function.Description = "Search text patterns"
+		if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
+			prop.Description = "Search term"
+			compressed.Function.Parameters.Properties["pattern"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Dir/file path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["glob"]; ok {
+			prop.Description = "Glob filter"
+			compressed.Function.Parameters.Properties["glob"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["ignoreCase"]; ok {
+			prop.Description = "Ignore case"
+			compressed.Function.Parameters.Properties["ignoreCase"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["literal"]; ok {
+			prop.Description = "Match exactly"
+			compressed.Function.Parameters.Properties["literal"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
+			prop.Description = "Max matches"
+			compressed.Function.Parameters.Properties["limit"] = prop
+		}
+	case "find":
+		compressed.Function.Description = "Find files by pattern"
+		if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
+			prop.Description = "Name pattern"
+			compressed.Function.Parameters.Properties["pattern"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Start directory"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
+			prop.Description = "Max results"
+			compressed.Function.Parameters.Properties["limit"] = prop
+		}
+	case "ls":
+		compressed.Function.Description = "List directory contents"
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Directory path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+	case "load_skill":
+		compressed.Function.Description = "Load skill instructions"
+		if prop, ok := compressed.Function.Parameters.Properties["name"]; ok {
+			prop.Description = "Skill name"
+			compressed.Function.Parameters.Properties["name"] = prop
+		}
+	case "task_status":
+		compressed.Function.Description = "Check task status"
+		if prop, ok := compressed.Function.Parameters.Properties["task_id"]; ok {
+			prop.Description = "Task ID"
+			compressed.Function.Parameters.Properties["task_id"] = prop
+		}
+	case "task_kill":
+		compressed.Function.Description = "Kill task"
+		if prop, ok := compressed.Function.Parameters.Properties["task_id"]; ok {
+			prop.Description = "Task ID"
+			compressed.Function.Parameters.Properties["task_id"] = prop
+		}
+	case "git_diff":
+		compressed.Function.Description = "Get workspace git diff"
+	default:
+		if len(compressed.Function.Description) > 30 {
+			compressed.Function.Description = compressed.Function.Description[:27] + "..."
+		}
+		for k, prop := range compressed.Function.Parameters.Properties {
+			if len(prop.Description) > 20 {
+				prop.Description = prop.Description[:17] + "..."
+				compressed.Function.Parameters.Properties[k] = prop
+			}
+		}
+	}
+	return compressed
 }

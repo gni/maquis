@@ -44,6 +44,7 @@ type Config struct {
 	Providers            map[string]ProviderConfig  `json:"providers,omitempty"`
 	ActiveProvider       string                     `json:"active_provider,omitempty"`
 	MaxCompletionTokens  int                        `json:"max_completion_tokens,omitempty"`
+	CompactPrompt        bool                       `json:"compact_prompt,omitempty"`
 }
 
 func DefaultConfig() *Config {
@@ -91,6 +92,7 @@ func DefaultConfig() *Config {
 		SyntaxTheme:          "auto",
 		Providers:            make(map[string]ProviderConfig),
 		ActiveProvider:       "",
+		CompactPrompt:        false,
 	}
 }
 

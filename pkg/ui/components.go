@@ -586,9 +586,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	if newlineCount <= 0 || newlineCount == -2 {
-		fmt.Fprintln(w)
-	}
+	fmt.Fprintln(w)
 
 	borderColor := theme.Success
 	title := "tool output"

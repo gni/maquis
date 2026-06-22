@@ -171,7 +171,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		if iter > 1 {
 			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
-			fmt.Fprintln(writerToUse)
 			fmt.Fprintln(writerToUse, divider)
 		}
 
@@ -563,7 +562,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 
 				if toolErr != nil {
-					toolOutput = fmt.Sprintf("Error: %v", toolErr)
+					toolOutput = FormatDefensiveError(tc.Function.Name, toolErr)
 				}
 				if toolOutput == "" {
 					toolOutput = "(no output)"
