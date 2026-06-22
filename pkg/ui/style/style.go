@@ -121,6 +121,30 @@ func (s Style) Underline(v bool) Style {
 	return s
 }
 
+func (s Style) GetSequence() (string, string) {
+	ansiStart := ""
+	ansiEnd := ""
+	if s.bold {
+		ansiStart += "\x1b[1m"
+	}
+	if s.italic {
+		ansiStart += "\x1b[3m"
+	}
+	if s.underline {
+		ansiStart += "\x1b[4m"
+	}
+	if s.fg != nil {
+		ansiStart += fmt.Sprintf("\x1b[38;2;%d;%d;%dm", s.fg.R, s.fg.G, s.fg.B)
+	}
+	if s.bg != nil {
+		ansiStart += fmt.Sprintf("\x1b[48;2;%d;%d;%dm", s.bg.R, s.bg.G, s.bg.B)
+	}
+	if ansiStart != "" {
+		ansiEnd = "\x1b[0m"
+	}
+	return ansiStart, ansiEnd
+}
+
 func (s Style) MarginLeft(v int) Style {
 	s.marginLeft = v
 	return s

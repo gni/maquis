@@ -482,8 +482,6 @@ func (ki *keyInterceptorReader) redrawLayout() {
 
 	getUI().LastH = 0
 
-	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[J")
-
 	var buf bytes.Buffer
 	cwBuf := crnlWriter{w: &buf}
 
@@ -506,7 +504,7 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	}
 
 	_, height := getTerminalSize()
-	scrollBottom := height - 6 - getUI().PasteLinesOffset
+	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -514,26 +512,33 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	content := buf.String()
 	linesCount := strings.Count(content, "\n")
 
+	var finalBuf bytes.Buffer
+	cwFinal := crnlWriter{w: &finalBuf}
+
+	// Write clear-screen first
+	fmt.Fprint(cwFinal, "\x1b[r\x1b[H\x1b[J")
+
+	// Write padding BEFORE content to push it to the bottom
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
-		fmt.Fprint(cw, strings.Repeat("\n", padding))
+		fmt.Fprint(cwFinal, strings.Repeat("\n", padding))
 	}
 
-	fmt.Fprint(cw, content)
+	fmt.Fprint(cwFinal, content)
 
 	// Ensure the cursor scrolls/moves down past the scrolling region bottom
 	// to align the last line of content at scrollBottom and prevent overlap with the status area.
 	extraNewlines := height - scrollBottom
 	if extraNewlines > 0 {
-		fmt.Fprint(cw, strings.Repeat("\n", extraNewlines))
+		fmt.Fprint(cwFinal, strings.Repeat("\n", extraNewlines))
 	}
 
-	DrawStaticPromptSeparator(cw, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
+	DrawStaticPromptSeparator(cwFinal, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 
 	getUI().StateMu.Lock()
 	savedStats := getUI().LastStatsText
 	getUI().StateMu.Unlock()
-	DrawStaticStatsLine(cw, activeTheme, "", savedStats)
+	DrawStaticStatsLine(cwFinal, activeTheme, "", savedStats)
 
 	activeTasks := 0
 	for _, t := range ki.agent.ListTasks() {
@@ -555,9 +560,11 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	pTok, cTok = ki.agent.GetGlobalTokens(activeMessagesForTokens, nil)
 
 	UpdateStatus(ki.agent.Config.Model, pTok, cTok, 0, ki.agent.Config.ContextWindowLimit, false, 0, activeTasks, ki.agent.Config.ShowTokens)
-	DrawStatusBar(cw, activeTheme)
+	DrawStatusBar(cwFinal, activeTheme)
 
-	fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+	fmt.Fprintf(cwFinal, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+
+	_, _ = cw.Write(finalBuf.Bytes())
 }
 
 func (ki *keyInterceptorReader) GetInputChan() chan byte {
@@ -776,7 +783,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}
 
-	SetScrollRegionOffset(4)
+	SetScrollRegionOffset(3)
 	InitStatusBar(os.Stderr)
 	defer ShutdownStatusBar(os.Stderr)
 	defer fmt.Fprint(os.Stderr, "\x1b[?25h")
@@ -1435,11 +1442,7 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		rl.SetPrompt(promptPrefix)
 	}
 
-	cw := crnlWriter{w: w}
-
 	getUI().LastH = 0
-
-	fmt.Fprint(cw, "\x1b[r\x1b[H\x1b[J")
 
 	var buf bytes.Buffer
 	cwBuf := crnlWriter{w: &buf}
@@ -1464,7 +1467,7 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	}
 
 	_, height := getTerminalSize()
-	scrollBottom := height - 6 - getUI().PasteLinesOffset
+	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -1472,26 +1475,33 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	content := buf.String()
 	linesCount := strings.Count(content, "\n")
 
+	var finalBuf bytes.Buffer
+	cwFinal := crnlWriter{w: &finalBuf}
+
+	// Write clear-screen first
+	fmt.Fprint(cwFinal, "\x1b[r\x1b[H\x1b[J")
+
+	// Write padding BEFORE content to push it to the bottom
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
-		fmt.Fprint(cw, strings.Repeat("\n", padding))
+		fmt.Fprint(cwFinal, strings.Repeat("\n", padding))
 	}
 
-	fmt.Fprint(cw, content)
+	fmt.Fprint(cwFinal, content)
 
 	// Ensure the cursor scrolls/moves down past the scrolling region bottom
 	// to align the last line of content at scrollBottom and prevent overlap with the status area.
 	extraNewlines := height - scrollBottom
 	if extraNewlines > 0 {
-		fmt.Fprint(cw, strings.Repeat("\n", extraNewlines))
+		fmt.Fprint(cwFinal, strings.Repeat("\n", extraNewlines))
 	}
 
-	DrawStaticPromptSeparatorLocked(cw, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
+	DrawStaticPromptSeparatorLocked(cwFinal, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
 
 	getUI().StateMu.Lock()
 	savedStats := getUI().LastStatsText
 	getUI().StateMu.Unlock()
-	DrawStaticStatsLineLocked(cw, activeTheme, "", savedStats)
+	DrawStaticStatsLineLocked(cwFinal, activeTheme, "", savedStats)
 
 	activeTasks := 0
 	for _, t := range a.ListTasks() {
@@ -1513,17 +1523,17 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	pTok, cTok = a.GetGlobalTokens(activeMessagesForTokens, nil)
 
 	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-	DrawStatusBarLocked(cw, activeTheme)
+	DrawStatusBarLocked(cwFinal, activeTheme)
 
 	getUI().StateMu.Lock()
 	inApproval := getUI().InApprovalPrompt
 	getUI().StateMu.Unlock()
 	if inApproval {
 		promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
-		fmt.Fprint(cw, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
+		fmt.Fprint(cwFinal, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
 	} else {
-		fmt.Fprintf(cw, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
-		fmt.Fprint(cw, promptStr)
+		fmt.Fprintf(cwFinal, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+		fmt.Fprint(cwFinal, promptStr)
 		inputLine := kiReader.currentInputLine
 		posOffset := len(inputLine)
 		if rl != nil {
@@ -1531,9 +1541,11 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 			inputLine = line
 			posOffset = pos
 		}
-		fmt.Fprint(cw, inputLine)
-		fmt.Fprintf(cw, "\x1b[%d;%dH", height-2-getUI().PasteLinesOffset, 1+len(promptPrefix)+posOffset)
+		fmt.Fprint(cwFinal, inputLine)
+		fmt.Fprintf(cwFinal, "\x1b[%d;%dH", height-2-getUI().PasteLinesOffset, 1+len(promptPrefix)+posOffset)
 	}
+
+	_, _ = w.Write(finalBuf.Bytes())
 }
 
 func setNonCanonical(fd int) (func(), error) {

@@ -547,12 +547,12 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 				}
 
 				// Update pp's tracked position to the line right below the header
-				pp.printLine = pp.printLine - newlineCount + 1
-				pp.printCol = 1
+				pp.SetPrintLine(pp.printLine - newlineCount + 1)
+				pp.SetPrintCol(1)
 			} else {
 				fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine)
 				fmt.Fprint(pp.inner, finalTitle)
-				pp.printCol = len(stripAnsi(finalTitle)) + 1
+				pp.SetPrintCol(len(stripAnsi(finalTitle)) + 1)
 			}
 		}
 	} else {
@@ -1055,7 +1055,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 				}
 			}
 
-			if lastRole != "" && lastRole != "tool" {
+			if lastRole != "" {
 				fmt.Fprintln(w)
 			}
 			termW, _ := getTerminalSize()
@@ -1078,7 +1078,11 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 
 				iconStyle := style.NewStyle().Foreground(theme.Success)
 				labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-				fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+				if msg.ReasoningDuration > 0 {
+					fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
+				} else {
+					fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+				}
 				hasPrintedAnything = true
 			}
 
@@ -1087,6 +1091,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 					fmt.Fprintln(w)
 				}
 				renderMarkdownContent(w, msg.Content, theme)
+				fmt.Fprintln(w)
 				hasPrintedAnything = true
 			}
 
@@ -1142,7 +1147,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			isError := strings.HasPrefix(msg.Content, "Error:") || strings.HasPrefix(msg.Content, "error:") || strings.Contains(msg.Content, "command failed:")
 			RenderToolOutput(w, msg.Content, isError, cfg.CollapseResults, theme, toolName, argsJSON, -2)
 		} else if msg.Role == "error" {
-			if lastRole != "" && lastRole != "tool" {
+			if lastRole != "" {
 				fmt.Fprintln(w)
 			}
 			termW, _ := getTerminalSize()

@@ -43,14 +43,15 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content,omitempty"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	Name             string     `json:"name,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	PromptTokens     int        `json:"prompt_tokens,omitempty"`
-	CompletionTokens int        `json:"completion_tokens,omitempty"`
+	Role              string     `json:"role"`
+	Content           string     `json:"content,omitempty"`
+	ReasoningContent  string     `json:"reasoning_content,omitempty"`
+	ReasoningDuration float64    `json:"reasoning_duration,omitempty"`
+	ToolCalls         []ToolCall `json:"tool_calls,omitempty"`
+	Name              string     `json:"name,omitempty"`
+	ToolCallID        string     `json:"tool_call_id,omitempty"`
+	PromptTokens      int        `json:"prompt_tokens,omitempty"`
+	CompletionTokens  int        `json:"completion_tokens,omitempty"`
 }
 
 type SessionInfo struct {

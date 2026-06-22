@@ -29,6 +29,7 @@ type StreamRenderer interface {
 	WriteToolCall(content string)
 	GetToolTitleLineNumber(index int) int
 	ShiftToolTitleLineNumbers(startIdx int, diff int)
+	GetReasoningDuration() float64
 }
 
 type AgentUI interface {

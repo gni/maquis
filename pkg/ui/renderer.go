@@ -23,9 +23,11 @@ type StreamRenderer struct {
 	codeLanguage     string
 	showThinking     bool
 	showFullThinking bool
-	reasoningStart   time.Time
-	reasoningText    strings.Builder
-	spinnerFrame     int
+	reasoningStart    time.Time
+	reasoningText     strings.Builder
+	reasoningDuration float64
+	reasoningResetSequence string
+	spinnerFrame      int
 
 	// Streaming states for real-time text formatting
 	lineIsHeader bool
@@ -60,7 +62,7 @@ func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
 }
 
 func clearScrollRegionLines(ppw *PromptPreservingWriter, startLine int, w io.Writer) {
-	scrollBottom := ppw.Height() - 6
+	scrollBottom := ppw.Height() - 5
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -100,6 +102,11 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 		sr.inThinking = true
 		sr.reasoningStart = time.Now()
 		sr.reasoningText.Reset()
+
+		dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
+		startSeq, resetSeq := dimStyle.GetSequence()
+		fmt.Fprint(sr.w, startSeq)
+		sr.reasoningResetSequence = resetSeq
 	}
 
 	if len(chunk) > 0 {
@@ -107,9 +114,7 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 	}
 
 	sr.reasoningText.WriteString(chunk)
-
-	dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
-	fmt.Fprint(sr.w, dimStyle.Render(chunk))
+	fmt.Fprint(sr.w, chunk)
 }
 
 func (sr *StreamRenderer) EndThinking() {
@@ -122,9 +127,14 @@ func (sr *StreamRenderer) endThinking() {
 	if sr.inThinking {
 		sr.inThinking = false
 		if sr.reasoningText.Len() > 0 {
+			if sr.reasoningResetSequence != "" {
+				fmt.Fprint(sr.w, sr.reasoningResetSequence)
+				sr.reasoningResetSequence = ""
+			}
 			fmt.Fprint(sr.w, "\n")
 
 			elapsed := time.Since(sr.reasoningStart).Seconds()
+			sr.reasoningDuration = elapsed
 			iconStyle := style.NewStyle().Foreground(sr.theme.Success)
 			labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 
@@ -450,4 +460,10 @@ func (sr *StreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {
 			}
 		}
 	}
+}
+
+func (sr *StreamRenderer) GetReasoningDuration() float64 {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.reasoningDuration
 }

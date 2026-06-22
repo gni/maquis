@@ -15,10 +15,9 @@ import (
 // back to the prompt input line (height-2, column 3) so it blinks stably
 // at the "> " prompt — even while tokens are streaming above it.
 //
-// The bottom 6 lines of the terminal are reserved:
-//   - height-5: blank line space
+// The bottom 5 lines of the terminal are reserved:
 //   - height-4: stats line content
-//   - height-3: ─── prompt ──────────────────────────────[reasoning:low]
+//   - height-3: ─── prompt ──────────────────────────────
 //   - height-2: > (input line, cursor blinks here)
 //   - height-1: ────────────────────────────────────────── (status separator)
 //   - height:   status bar content
@@ -31,11 +30,12 @@ type PromptPreservingWriter struct {
 	ansiState      int // 0: normal, 1: saw ESC, 2: saw ESC [, 3: saw ESC ]
 	cursorHidden   bool
 	cursorAtPrompt bool
+	needsReposition bool
 	scrollCount    int
 }
 
 func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
-	scrollBottom := height - 6
+	scrollBottom := height - 5
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -48,6 +48,7 @@ func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter 
 		ansiState:      0,
 		cursorHidden:   true, // Default to true because the cursor is hidden during agent execution
 		cursorAtPrompt: true,
+		needsReposition: true,
 	}
 }
 
@@ -66,7 +67,7 @@ func (p *PromptPreservingWriter) SetPromptCol(col int) {
 func (p *PromptPreservingWriter) ForceReposition() {
 	TerminalMu.Lock()
 	p.cursorAtPrompt = true
-	scrollBottom := p.height - 6
+	scrollBottom := p.height - 5
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -89,7 +90,7 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 			diff := h - p.height
 			p.height = h
 			p.printLine += diff
-			scrollBottom := h - 6
+			scrollBottom := h - 5
 			if scrollBottom < 1 {
 				scrollBottom = 1
 			}
@@ -99,12 +100,17 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 			if p.printLine < 1 {
 				p.printLine = 1
 			}
+			if diff != 0 {
+				p.needsReposition = true
+			}
 		}
 	}
 
-	// Always position cursor to the tracked print position to prevent drift or leak into other rows
-	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
-	p.cursorAtPrompt = false
+	if p.cursorAtPrompt || p.needsReposition {
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
+		p.cursorAtPrompt = false
+		p.needsReposition = false
+	}
 
 	// Write the actual content. The terminal's scrolling region (set to 1..height-6)
 	// ensures that newlines here only scroll within that region.
@@ -127,7 +133,7 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 // On carriage return, printCol resets to 1 without scrolling.
 func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	s := string(data)
-	scrollBottom := p.height - 6
+	scrollBottom := p.height - 5
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -224,12 +230,14 @@ func (p *PromptPreservingWriter) SetPrintLine(line int) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 	p.printLine = line
+	p.needsReposition = true
 }
 
 func (p *PromptPreservingWriter) SetPrintCol(col int) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 	p.printCol = col
+	p.needsReposition = true
 }
 
 func getRealTerminalHeight() int {

@@ -309,6 +309,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		totalPromptTokens += assistantMsg.PromptTokens
 		totalApiDuration += a.lastGenerationDuration
 
+		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
 		*messages = append(*messages, *assistantMsg)
 		if sessionID != "" {
 			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
@@ -718,6 +719,7 @@ func (f *fallbackStreamRenderer) StartToolCall(toolName string, toolCallIndex in
 func (f *fallbackStreamRenderer) WriteToolCall(content string)                     {}
 func (f *fallbackStreamRenderer) GetToolTitleLineNumber(index int) int             { return -1 }
 func (f *fallbackStreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {}
+func (f *fallbackStreamRenderer) GetReasoningDuration() float64                    { return 0 }
 
 func isReadOnly(toolName string) bool {
 	return toolName == "read" || toolName == "ls" || toolName == "grep" || toolName == "find" || toolName == "task_status"
