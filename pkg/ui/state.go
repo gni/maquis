@@ -41,10 +41,6 @@ func SetScrollRegionOffset(offset int) {
 	getUI().SetScrollRegionOffset(offset)
 }
 
-// ClearScrollRegionOffset resets the scroll region to the default.
-func ClearScrollRegionOffset() {
-	getUI().ClearScrollRegionOffset()
-}
 
 // InitStatusBar starts the status bar.
 func InitStatusBar(w io.Writer) {

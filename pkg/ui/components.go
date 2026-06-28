@@ -344,16 +344,6 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 	return sb.String()
 }
 
-func RenderToolCall(w io.Writer, toolName string, arguments string, theme UITheme) {
-	titleStyle := style.NewStyle().
-		Foreground(theme.Secondary).
-		Bold(true)
-
-	formattedArgs := formatToolArguments(toolName, arguments, theme)
-
-	fmt.Fprintln(w, titleStyle.Render(fmt.Sprintf("tool call: %s", toolName)))
-	fmt.Fprint(w, formattedArgs)
-}
 
 func extractToolTarget(toolName string, argsJSON string) string {
 	if argsJSON == "" {
@@ -621,7 +611,6 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		strings.Contains(toolName, "read") ||
 		strings.Contains(toolName, "write") ||
 		strings.Contains(toolName, "view") ||
-		strings.Contains(toolName, "edit") ||
 		strings.Contains(toolName, "content")
 
 	if !isError && (isCodeTool || isJSON) {
@@ -830,9 +819,6 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	return fmt.Sprintf("%s%s %s", borderStyle.Render("─── "), innerTitle, borderStyle.Render(dashes))
 }
 
-func PrintPromptSeparator(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme) {
-	PrintPromptSeparatorWithSpinner(w, showThinking, reasoningEffort, theme, "")
-}
 
 func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	borderStyle := style.NewStyle().Foreground(theme.Border)

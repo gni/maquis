@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ func clearScrollRegionLines(ppw *PromptPreservingWriter, startLine int, w io.Wri
 }
 
 func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool, agentName string) *StreamRenderer {
-	return &StreamRenderer{
+	sr := &StreamRenderer{
 		w:                    w,
 		theme:                theme,
 		showThinking:         showThinking,
@@ -83,6 +84,10 @@ func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrit
 		streamWrites:         streamWrites,
 		agentName:            agentName,
 	}
+	sr.parser = &jsonStreamParser{
+		streamWrites: streamWrites,
+	}
+	return sr
 }
 
 func (sr *StreamRenderer) HasOutput() bool {
@@ -97,6 +102,9 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 
 	if !sr.showThinking {
 		return
+	}
+	if len(chunk) > 0 {
+		sr.checkFirstWrite()
 	}
 	if !sr.inThinking {
 		sr.inThinking = true
@@ -153,6 +161,7 @@ func (sr *StreamRenderer) Write(chunk string) {
 	sr.endThinking()
 
 	if len(chunk) > 0 {
+		sr.checkFirstWrite()
 		sr.hasWrittenText = true
 		sr.lastEndedWithNewline = strings.HasSuffix(chunk, "\n")
 	}
@@ -431,12 +440,47 @@ func HighlightWithoutTrailingNewline(w io.Writer, source, lang, chromaStyle stri
 }
 
 func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
-	// No-op: suppress streaming tool calls to avoid double rendering and scrollback pollution.
-	// Tool calls are printed cleanly and exactly once during the execution phase.
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser != nil {
+		sr.parser.activeToolName = toolName
+		sr.parser.activeToolIndex = toolCallIndex
+		sr.parser.titlePrinted = false
+		sr.parser.path = ""
+		sr.parser.pathPrinted = false
+		sr.parser.isContent = false
+		sr.parser.isPath = false
+		sr.parser.isOldText = false
+		sr.parser.isNewText = false
+		sr.parser.outputBuf.Reset()
+		sr.parser.lineBuffer.Reset()
+		sr.parser.inString = false
+		sr.parser.inEscape = false
+		sr.parser.currentKey = ""
+		sr.parser.inValue = false
+		sr.parser.buf.Reset()
+	}
 }
 
 func (sr *StreamRenderer) WriteToolCall(content string) {
-	// No-op: suppress streaming tool calls to avoid double rendering and scrollback pollution.
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if len(content) > 0 {
+		sr.checkFirstWrite()
+	}
+
+	if sr.parser != nil {
+		sr.parser.feed(content, sr.w, sr.theme)
+	}
+}
+
+func (sr *StreamRenderer) checkFirstWrite() {
+	if getUI().PasteLinesOffset > 0 {
+		getUI().PasteLinesOffset = 0
+		InitStatusBar(os.Stderr)
+	}
 }
 
 func (sr *StreamRenderer) GetToolTitleLineNumber(index int) int {

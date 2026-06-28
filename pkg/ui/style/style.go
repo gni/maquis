@@ -46,9 +46,6 @@ func RoundedBorder() int {
 	return roundedBorder
 }
 
-func NormalBorder() int {
-	return normalBorder
-}
 
 const (
 	Center = iota
@@ -96,15 +93,6 @@ func (s Style) Foreground(c color.Color) Style {
 	return s
 }
 
-func (s Style) Background(c color.Color) Style {
-	if lc, ok := c.(colorVal); ok {
-		s.bg = &lc
-	} else if c != nil {
-		r, g, b, _ := c.RGBA()
-		s.bg = &colorVal{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8)}
-	}
-	return s
-}
 
 func (s Style) Bold(v bool) Style {
 	s.bold = v
@@ -381,9 +369,6 @@ func JoinHorizontal(pos int, strs ...string) string {
 	return strings.Join(joinedLines, "\n")
 }
 
-func JoinVertical(pos int, strs ...string) string {
-	return strings.Join(strs, "\n")
-}
 
 func StripAnsi(str string) string {
 	var sb strings.Builder

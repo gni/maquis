@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"maquis/pkg/agent/tool"
 	"maquis/pkg/config"
+	"maquis/pkg/db"
 	"maquis/pkg/ui/style"
 )
 
@@ -206,5 +208,97 @@ func TestMultiAgentToolRegistration(t *testing.T) {
 	_, ok = baseAgent.Registry.GetAllExecutors()["subagent__bob"]
 	if ok {
 		t.Errorf("expected tool 'subagent__bob' to be unregistered after agent was killed")
+	}
+}
+
+func TestSwarmAuditTool(t *testing.T) {
+	tempDir := t.TempDir()
+
+	cfg := &config.Config{}
+	baseAgent := &Agent{
+		Config:   cfg,
+		Registry: tool.NewToolRegistry(),
+	}
+
+	var buf bytes.Buffer
+	theme := style.UITheme{}
+	mam := NewMultiAgentManager(baseAgent, &buf, theme)
+	mam.agentsDir = tempDir
+
+	err := mam.SpawnAgent("bob", "You are bob", "", "")
+	if err != nil {
+		t.Fatalf("failed to spawn bob: %v", err)
+	}
+
+	bob, exists := mam.Agents["bob"]
+	if !exists {
+		t.Fatalf("bob not found")
+	}
+
+	// Setup mock history on bob
+	bob.HistoryMu.Lock()
+	bob.History = append(bob.History, db.Message{
+		Role:    "user",
+		Name:    "ParentAgent",
+		Content: "Hello bob, please run tests",
+	})
+	bob.History = append(bob.History, db.Message{
+		Role:             "assistant",
+		ReasoningContent: "I need to run the tests to verify the code.",
+		Content:          "Running tests now.",
+		ToolCalls: []db.ToolCall{
+			{
+				ID:   "call_1",
+				Type: "function",
+				Function: db.ToolFunction{
+					Name:      "bash",
+					Arguments: `{"command":"go test ./..."}`,
+				},
+			},
+		},
+	})
+	bob.History = append(bob.History, db.Message{
+		Role:       "tool",
+		ToolCallID: "call_1",
+		Name:       "bash",
+		Content:    "PASS\nok  maquis/pkg/agent",
+	})
+	bob.History = append(bob.History, db.Message{
+		Role:    "assistant",
+		Content: "Tests passed successfully!",
+	})
+	bob.HistoryMu.Unlock()
+
+	// Save bob's state to tempDir
+	err = mam.SaveAgentState(bob, "idle")
+	if err != nil {
+		t.Fatalf("failed to save bob state: %v", err)
+	}
+
+	// Verify swarm_audit tool is registered and works
+	auditExecutor, ok := baseAgent.Registry.GetAllExecutors()["swarm_audit"]
+	if !ok {
+		t.Fatalf("swarm_audit tool not registered")
+	}
+
+	res, err := auditExecutor.Execute(baseAgent, `{"name":"bob"}`)
+	if err != nil {
+		t.Fatalf("failed to execute swarm_audit: %v", err)
+	}
+
+	if !strings.Contains(res, "=== Swarm Audit Trail for Subagent: 'bob' ===") {
+		t.Errorf("unexpected audit output: %q", res)
+	}
+	if !strings.Contains(res, "I need to run the tests to verify the code.") {
+		t.Errorf("expected thought in audit trail, got: %q", res)
+	}
+	if !strings.Contains(res, "Action (Tool Call): bash") {
+		t.Errorf("expected tool call in audit trail, got: %q", res)
+	}
+	if !strings.Contains(res, "Result (Tool Output - bash)") {
+		t.Errorf("expected tool output in audit trail, got: %q", res)
+	}
+	if !strings.Contains(res, "Tests passed successfully!") {
+		t.Errorf("expected final response in audit trail, got: %q", res)
 	}
 }

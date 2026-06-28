@@ -3,8 +3,6 @@ package ui
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"maquis/pkg/ui/style"
@@ -54,7 +52,7 @@ type parserWriter struct {
 }
 
 func (pw parserWriter) Write(data []byte) (int, error) {
-	if pw.p.needsPath() && pw.p.path == "" && !pw.p.titlePrinted {
+	if pw.p.needsPath() && pw.p.path == "" && !pw.p.titlePrinted && !pw.p.isPath {
 		return pw.p.outputBuf.Write(data)
 	}
 	return pw.w.Write(data)
@@ -98,9 +96,17 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						p.path += unescaped
 						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(unescaped))
 					} else if p.isOldText {
-						// Suppress raw oldText from stream output
+						if unescaped == "\n" {
+							fmt.Fprint(pw, "\n")
+						} else {
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(unescaped))
+						}
 					} else if p.isNewText {
-						// Suppress raw newText from stream output
+						if unescaped == "\n" {
+							fmt.Fprint(pw, "\n")
+						} else {
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(unescaped))
+						}
 					}
 				} else {
 					p.buf.WriteString(unescaped)
@@ -129,7 +135,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 						fmt.Fprintln(pw)
 					}
-					if p.isContent {
+					if p.isContent || p.isOldText || p.isNewText {
 						fmt.Fprintln(pw)
 					}
 					p.inValue = false
@@ -151,9 +157,17 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						p.path += charStr
 						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(charStr))
 					} else if p.isOldText {
-						// Suppress raw oldText from stream output
+						if charStr == "\n" {
+							fmt.Fprint(pw, "\n")
+						} else {
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(charStr))
+						}
 					} else if p.isNewText {
-						// Suppress raw newText from stream output
+						if charStr == "\n" {
+							fmt.Fprint(pw, "\n")
+						} else {
+							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(charStr))
+						}
 					}
 				} else {
 					p.buf.WriteByte(char)
@@ -180,10 +194,22 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 					p.isPath = true
 					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
 				} else if p.currentKey == "oldText" {
-					p.isOldText = true
+					if p.streamWrites {
+						p.isOldText = true
+						if !p.titlePrinted {
+							p.printStreamTitle(w, theme)
+							if p.outputBuf.Len() > 0 {
+								fmt.Fprint(w, p.outputBuf.String())
+								p.outputBuf.Reset()
+							}
+						}
+						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
+					} else {
+						p.isOldText = true
+					}
 				} else if p.currentKey == "newText" {
 					if p.streamWrites {
-						p.isContent = true
+						p.isNewText = true
 						p.guessedLang = ""
 						if !p.titlePrinted {
 							p.printStreamTitle(w, theme)
@@ -192,7 +218,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 								p.outputBuf.Reset()
 							}
 						}
-						fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
+						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
 					} else {
 						p.isNewText = true
 					}
@@ -229,36 +255,6 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 	}
 }
 
-func guessLanguage(line string) string {
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ") || strings.HasPrefix(trimmed, "def ") {
-		return "python"
-	}
-	if strings.HasPrefix(trimmed, "package ") || strings.HasPrefix(trimmed, "func ") {
-		return "go"
-	}
-	if strings.HasPrefix(trimmed, "#include") || strings.HasPrefix(trimmed, "using namespace") {
-		return "cpp"
-	}
-	if strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "public ") || strings.HasPrefix(trimmed, "private ") {
-		return "java"
-	}
-	if strings.HasPrefix(trimmed, "const ") || strings.HasPrefix(trimmed, "let ") || strings.HasPrefix(trimmed, "function ") {
-		return "javascript"
-	}
-	if strings.HasPrefix(trimmed, "<?php") {
-		return "php"
-	}
-	if strings.HasPrefix(trimmed, "<!") || strings.HasPrefix(trimmed, "<html") {
-		return "html"
-	}
-	return ""
-}
-
-func (p *jsonStreamParser) printTitle(w io.Writer, title string) {
-	p.titlePrinted = true
-}
-
 func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
 	p.titlePrinted = true
 }
@@ -267,18 +263,6 @@ func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme)
 	// Disabled: Relative downward/upward cursor jumps (\x1b[%dB) corrupt
 	// absolute positioning if the terminal wrapped or scrolled off-screen.
 	// If the LLM sends 'path' late, the title will just remain generically generic.
-}
-
-func getRelativePath(path string) string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return path
-	}
-	rel, err := filepath.Rel(cwd, path)
-	if err != nil {
-		return path
-	}
-	return rel
 }
 
 func getNewlineCount(w io.Writer) int {

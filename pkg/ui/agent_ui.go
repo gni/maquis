@@ -28,6 +28,7 @@ type AgentUIImpl struct {
 	ScrollRegionOffset int
 	CollapseResults    bool
 	LastStatsText      string
+	LastStatusBarText  string
 	IsInteractive      bool
 
 	StateMu    sync.Mutex

@@ -77,6 +77,9 @@ type Agent struct {
 
 	SpawnedAgents          map[string]bool
 	SpawnedAgentsMu        sync.RWMutex
+
+	SystemEvents           chan string
+	PendingSystemEvent     string
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -101,6 +104,7 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 		Tasks:          make(map[string]*Task),
 		NextTaskId:     1,
 		SpawnedAgents:  make(map[string]bool),
+		SystemEvents:   make(chan string, 100),
 	}
 
 	// Register built-in tools
@@ -115,13 +119,9 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewTaskStatusTool())
 	a.Registry.Register(tool.NewTaskKillTool())
 	a.Registry.Register(tool.NewGitDiffTool())
+	a.Registry.Register(tool.NewExploreTool())
 
-	// 1. Register global plugins from ~/.maquis/plugins/
-	home, err := os.UserHomeDir()
-	if err == nil {
-		globalPluginsDir := filepath.Join(home, ".maquis", "plugins")
-		_ = tool.RegisterPlugins(a.Registry, globalPluginsDir)
-	}
+	// Only register local executable plugins from the "plugins" directory in the workspace
 
 	// 2. Register local executable plugins from the "plugins" directory in the workspace
 	pluginsDir := filepath.Join(absWorkspace, "plugins")
@@ -162,11 +162,7 @@ func (a *Agent) ReloadSkills() []tool.Skill {
 func (a *Agent) ReloadPlugins() error {
 	a.Registry.UnregisterPrefix("plugin__")
 
-	home, err := os.UserHomeDir()
-	if err == nil {
-		globalPluginsDir := filepath.Join(home, ".maquis", "plugins")
-		_ = tool.RegisterPlugins(a.Registry, globalPluginsDir)
-	}
+
 
 	pluginsDir := filepath.Join(a.WorkspaceRoot, "plugins")
 	return tool.RegisterPlugins(a.Registry, pluginsDir)

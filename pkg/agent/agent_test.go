@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -371,6 +372,64 @@ func TestRecursiveLs(t *testing.T) {
 		t.Errorf("expected file1.txt and subdir/file2.txt in recursive ls output, got: %q", resRec)
 	}
 }
+
+func TestKillTaskProcessGroup(t *testing.T) {
+	tempDirRoot := os.Getenv("GOTMPDIR")
+	if tempDirRoot == "" {
+		tempDirRoot = os.TempDir()
+	}
+	tempDir, err := os.MkdirTemp(tempDirRoot, "maquis-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	a := &Agent{
+		WorkspaceRoot: tempDir,
+		Tasks:         make(map[string]*Task),
+		NextTaskId:    1,
+	}
+
+	var buf bytes.Buffer
+	// Spawn a task that runs a shell, which in turn spawns sleep in background and waits
+	id, err := a.SpawnTask("sh -c 'sleep 999 & wait'", &buf)
+	if err != nil {
+		t.Fatalf("failed to spawn task: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	a.TasksMu.Lock()
+	task := a.Tasks[id]
+	a.TasksMu.Unlock()
+
+	if task.Cmd.Process == nil {
+		t.Fatalf("process not started")
+	}
+
+	err = a.KillTask(id)
+	if err != nil {
+		t.Fatalf("failed to kill task: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	status, _, _ := a.GetTaskStatus(id)
+	if status != "killed" {
+		t.Errorf("expected status 'killed', got %q", status)
+	}
+
+	// Verify no "sleep 999" processes are left running.
+	// We run pgrep -f to check.
+	cmd := exec.Command("pgrep", "-f", "sleep 999")
+	out, _ := cmd.Output()
+	if len(out) > 0 {
+		t.Errorf("orphan sleep 999 process detected! Output: %s", string(out))
+		// Clean up the orphan
+		exec.Command("pkill", "-f", "sleep 999").Run()
+	}
+}
+
 
 
 

@@ -60,9 +60,12 @@ func DefaultConfig() *Config {
 		model = "gpt-4-turbo"
 	}
 
-	skillsDir := "skills"
+	homeDir, _ := os.UserHomeDir()
+	skillsDir := filepath.Join(homeDir, ".maquis", "skills")
 	if _, err := os.Stat("/workspace/agent/skills"); err == nil {
 		skillsDir = "/workspace/agent/skills"
+	} else if _, err := os.Stat("skills"); err == nil {
+		skillsDir = "skills"
 	}
 
 	return &Config{
@@ -138,9 +141,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	if config.SkillsDir == "" {
-		config.SkillsDir = "skills"
+		homeDir, _ := os.UserHomeDir()
+		config.SkillsDir = filepath.Join(homeDir, ".maquis", "skills")
 		if _, err := os.Stat("/workspace/agent/skills"); err == nil {
 			config.SkillsDir = "/workspace/agent/skills"
+		} else if _, err := os.Stat("skills"); err == nil {
+			config.SkillsDir = "skills"
 		}
 	}
 

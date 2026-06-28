@@ -39,10 +39,6 @@ func RunExtension(
 
 	// Define extension directories
 	var dirs []string
-	home, err := os.UserHomeDir()
-	if err == nil {
-		dirs = append(dirs, filepath.Join(home, ".maquis", "extensions"))
-	}
 	dirs = append(dirs, filepath.Join(a.GetWorkspaceRoot(), "extensions"))
 
 	var extPath string
@@ -98,7 +94,7 @@ func RunExtension(
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err := cmd.Run()
 	if ctxTimeout.Err() == context.DeadlineExceeded {
 		return true, fmt.Errorf("extension timed out after 15 seconds")
 	}

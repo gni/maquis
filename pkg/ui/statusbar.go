@@ -86,7 +86,7 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 	var buf bytes.Buffer
 
 	// Only set the scrolling region when the terminal height changes
-	scrollBottom := height - 2 - getUI().ScrollRegionOffset
+	scrollBottom := height - 2 - getUI().ScrollRegionOffset - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -101,22 +101,12 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 		}
 		fmt.Fprintf(&buf, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
 		getUI().LastH = height
+		getUI().LastStatusBarText = "" // Force redraw of the actual text
 	}
 
 	// Save cursor
 	fmt.Fprint(&buf, "\x1b7")
 
-	// Draw separator line at height-1
-	fmt.Fprintf(&buf, "\x1b[%d;1H", height-1)
-	fmt.Fprint(&buf, "\x1b[2K")
-	borderStyle := style.NewStyle().Foreground(theme.Border)
-	borderLine := borderStyle.Render(strings.Repeat("─", width-1))
-	fmt.Fprint(&buf, borderLine)
- 
-	// Draw status bar content at height
-	fmt.Fprintf(&buf, "\x1b[%d;1H", height)
-	fmt.Fprint(&buf, "\x1b[2K")
- 
 	leftPart := formatLeft(theme, width)
 	rightPart := formatRight(theme, width)
  
@@ -128,7 +118,26 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 		padding = 1
 	}
  
-	fmt.Fprintf(&buf, "%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
+	newStatusBarText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
+
+	// Line-Level Delta Rendering check
+	if newStatusBarText == getUI().LastStatusBarText && height == getUI().LastH {
+		return
+	}
+	getUI().LastStatusBarText = newStatusBarText
+
+	// Draw separator line at height-1
+	fmt.Fprintf(&buf, "\x1b[%d;1H", height-1)
+	fmt.Fprint(&buf, "\x1b[2K")
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	borderLine := borderStyle.Render(strings.Repeat("─", width-1))
+	fmt.Fprint(&buf, borderLine)
+ 
+	// Draw status bar content at height
+	fmt.Fprintf(&buf, "\x1b[%d;1H", height)
+	fmt.Fprint(&buf, "\x1b[2K")
+
+	fmt.Fprint(&buf, newStatusBarText)
  
 	// Restore cursor
 	fmt.Fprint(&buf, "\x1b8")

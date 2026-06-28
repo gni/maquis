@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,10 +43,21 @@ type taskWriter struct {
 
 func (tw *taskWriter) Write(p []byte) (n int, err error) {
 	tw.task.mu.Lock()
+
+	// Keep buffer capped at ~100KB to prevent OOM on long tasks
+	capBuf := func(buf *bytes.Buffer) {
+		const maxLen = 100 * 1024
+		if buf.Len() > maxLen {
+			buf.Next(buf.Len() - maxLen)
+		}
+	}
+
 	if tw.isStderr {
 		tw.task.Stderr.Write(p)
+		capBuf(tw.task.Stderr)
 	} else {
 		tw.task.Stdout.Write(p)
+		capBuf(tw.task.Stdout)
 	}
 	tw.task.LastOutputTime = time.Now()
 	tw.task.mu.Unlock()
@@ -81,6 +93,7 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = a.WorkspaceRoot
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C.UTF-8")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	task.Cmd = cmd
 
@@ -120,43 +133,11 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 			fmt.Fprintf(w, "\n[Task %s finished with status: %s]\n", task.ID, finalStatus)
 		}
 		a.TasksMu.Unlock()
-	}()
-
-	go func() {
-		// Watchdog to kill the task if no output (no reply) is received for 30 seconds
-		timeout := 30 * time.Second
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				task.mu.Lock()
-				status := task.Status
-				lastOut := task.LastOutputTime
-				task.mu.Unlock()
-
-				if status != "running" {
-					return
-				}
-
-				if time.Since(lastOut) > timeout {
-					_ = a.KillTask(task.ID)
-
-					task.mu.Lock()
-					task.Status = "timed_out"
-					task.EndTime = time.Now()
-					task.mu.Unlock()
-
-					a.TasksMu.Lock()
-					if a.StreamingTask == task.ID {
-						a.StreamingTask = ""
-					}
-					fmt.Fprintf(w, "\n[Task %s killed: no output (no reply) for %v]\n", task.ID, timeout)
-					a.TasksMu.Unlock()
-					return
-				}
-			}
+		
+		// Send event to the agent loop!
+		select {
+		case a.SystemEvents <- fmt.Sprintf("System Event: Background task %s finished with status %s. Please review the output or logs.", task.ID, finalStatus):
+		default:
 		}
 	}()
 
@@ -180,9 +161,17 @@ func (a *Agent) KillTask(id string) error {
 	}
 
 	if task.Cmd != nil && task.Cmd.Process != nil {
-		err := task.Cmd.Process.Kill()
-		if err != nil {
-			return err
+		pgid, err := syscall.Getpgid(task.Cmd.Process.Pid)
+		if err == nil {
+			err = syscall.Kill(-pgid, syscall.SIGKILL)
+			if err != nil {
+				_ = task.Cmd.Process.Kill()
+			}
+		} else {
+			err = task.Cmd.Process.Kill()
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -204,14 +193,23 @@ func (a *Agent) GetTaskStatus(id string) (string, string, error) {
 	defer task.mu.Unlock()
 
 	var sb bytes.Buffer
+	
+	// Helper function to get the tail of a byte slice
+	getTail := func(b []byte, maxLen int) []byte {
+		if len(b) > maxLen {
+			return append([]byte(fmt.Sprintf("...(truncated %d bytes)...\n", len(b)-maxLen)), b[len(b)-maxLen:]...)
+		}
+		return b
+	}
+
 	if task.Stdout.Len() > 0 {
 		sb.WriteString("STDOUT:\n")
-		sb.Write(task.Stdout.Bytes())
+		sb.Write(getTail(task.Stdout.Bytes(), 4000))
 		sb.WriteString("\n")
 	}
 	if task.Stderr.Len() > 0 {
 		sb.WriteString("STDERR:\n")
-		sb.Write(task.Stderr.Bytes())
+		sb.Write(getTail(task.Stderr.Bytes(), 4000))
 		sb.WriteString("\n")
 	}
 

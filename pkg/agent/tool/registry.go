@@ -138,13 +138,19 @@ func (r *ToolRegistry) Execute(ctx AgentContext, name string, arguments string) 
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 
-	repairedArgs := repairJSON(arguments)
 	var temp interface{}
-	if err := json.Unmarshal([]byte(repairedArgs), &temp); err != nil {
-		return "", fmt.Errorf("JSON validation failed: %w.\nParameters generated: %s\nRecommendation: Please output valid JSON. Double-check closing braces, ensure internal double-quotes are escaped, and verify that newlines inside strings are escaped as '\\n'.", err, arguments)
+	// 1. Try parsing the raw arguments first
+	if err := json.Unmarshal([]byte(arguments), &temp); err == nil {
+		return executor.Execute(ctx, arguments)
 	}
 
-	return executor.Execute(ctx, repairedArgs)
+	// 2. If it fails, try repairing
+	repairedArgs := repairJSON(arguments)
+	if err := json.Unmarshal([]byte(repairedArgs), &temp); err == nil {
+		return executor.Execute(ctx, repairedArgs)
+	} else {
+		return "", fmt.Errorf("JSON validation failed: %w.\nParameters generated: %s\nRecommendation: Please output valid JSON. Double-check closing braces, ensure internal double-quotes are escaped, and verify that newlines inside strings are escaped as '\\n'.", err, arguments)
+	}
 }
 
 func repairJSON(js string) string {
@@ -153,7 +159,43 @@ func repairJSON(js string) string {
 		return "{}"
 	}
 
-	// 1. Fix missing closing brackets/braces
+	// 1. Strip markdown code block wrappers if present
+	if strings.HasPrefix(js, "```") {
+		lines := strings.Split(js, "\n")
+		var cleanLines []string
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmedLine, "```") {
+				cleanLines = append(cleanLines, line)
+			}
+		}
+		js = strings.Join(cleanLines, "\n")
+		js = strings.TrimSpace(js)
+	}
+
+	// 2. Fix extra closing braces/brackets at the end
+	for len(js) > 0 {
+		openBraces := strings.Count(js, "{")
+		closeBraces := strings.Count(js, "}")
+		if closeBraces > openBraces && strings.HasSuffix(js, "}") {
+			js = strings.TrimSuffix(js, "}")
+			js = strings.TrimSpace(js)
+		} else {
+			break
+		}
+	}
+	for len(js) > 0 {
+		openBrackets := strings.Count(js, "[")
+		closeBrackets := strings.Count(js, "]")
+		if closeBrackets > openBrackets && strings.HasSuffix(js, "]") {
+			js = strings.TrimSuffix(js, "]")
+			js = strings.TrimSpace(js)
+		} else {
+			break
+		}
+	}
+
+	// 3. Fix missing closing brackets/braces
 	openBraces := strings.Count(js, "{")
 	closeBraces := strings.Count(js, "}")
 	if openBraces > closeBraces {
@@ -166,7 +208,7 @@ func repairJSON(js string) string {
 		js += strings.Repeat("]", openBrackets-closeBrackets)
 	}
 
-	// 2. Fix unescaped newlines inside JSON string values
+	// 4. Fix unescaped newlines inside JSON string values
 	var sb strings.Builder
 	inString := false
 	inEscape := false

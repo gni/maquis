@@ -145,61 +145,6 @@ func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (i
 	return globalPrompt, globalCompletion
 }
 
-// RepairJSON corrects common formatting errors in JSON strings (missing brackets/control characters)
-func RepairJSON(js string) string {
-	js = strings.TrimSpace(js)
-	if js == "" {
-		return "{}"
-	}
-
-	// 1. Fix missing closing brackets/braces
-	openBraces := strings.Count(js, "{")
-	closeBraces := strings.Count(js, "}")
-	if openBraces > closeBraces {
-		js += strings.Repeat("}", openBraces-closeBraces)
-	}
-
-	openBrackets := strings.Count(js, "[")
-	closeBrackets := strings.Count(js, "]")
-	if openBrackets > closeBrackets {
-		js += strings.Repeat("]", openBrackets-closeBrackets)
-	}
-
-	// 2. Fix unescaped newlines inside JSON string values
-	var sb strings.Builder
-	inString := false
-	inEscape := false
-	for i := 0; i < len(js); i++ {
-		c := js[i]
-		if inEscape {
-			sb.WriteByte(c)
-			inEscape = false
-			continue
-		}
-		if c == '\\' {
-			sb.WriteByte(c)
-			inEscape = true
-			continue
-		}
-		if c == '"' {
-			inString = !inString
-			sb.WriteByte(c)
-			continue
-		}
-		if inString && c == '\n' {
-			sb.WriteString(`\n`)
-		} else if inString && c == '\t' {
-			sb.WriteString(`\t`)
-		} else if inString && c == '\r' {
-			sb.WriteString(`\r`)
-		} else {
-			sb.WriteByte(c)
-		}
-	}
-	js = sb.String()
-
-	return js
-}
 
 // FormatDefensiveError turns syntax errors into descriptive, action-oriented correction prompts
 func FormatDefensiveError(toolName string, err error) string {

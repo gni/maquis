@@ -693,14 +693,76 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			}
 		}
 
-		ki.pastedText = string(normalized)
+		ki.pastedText += string(normalized)
 
 		if ki.w != nil {
-			getUI().PasteLinesOffset = bytes.Count(normalized, []byte("\n"))
+			promptPrefix := "\r\x1b[32m> \x1b[0m"
+			if !ki.isAtMainPrompt {
+				promptPrefix = "\r"
+			}
+			typeAheadCopy := string(ki.typeAheadBuffer)
+
+			width, height := getTerminalSize()
+			if width <= 0 {
+				width = 80
+			}
+			maxPasteLines := height - 6
+			if maxPasteLines < 1 {
+				maxPasteLines = 1
+			}
+
+			lines := strings.Split(ki.pastedText, "\n")
+			physicalRowsNeeded := 0
+			firstLineIdx := 0
+
+			for i := len(lines) - 1; i >= 0; i-- {
+				l := len(stripAnsi(lines[i]))
+				if i == 0 {
+					l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
+				}
+				rows := (l + width - 1) / width
+				if l == 0 {
+					rows = 1
+				}
+
+				if physicalRowsNeeded+rows > maxPasteLines && i != len(lines)-1 {
+					firstLineIdx = i + 1
+					break
+				}
+				physicalRowsNeeded += rows
+			}
+
+			if firstLineIdx > 0 {
+				lines = lines[firstLineIdx:]
+				hidden := firstLineIdx
+				prefix := fmt.Sprintf("\x1b[90m... (%d lines hidden) ...\x1b[0m ", hidden)
+				lines[0] = prefix + lines[0]
+
+				// re-evaluate physical rows
+				physicalRowsNeeded = 0
+				for i := 0; i < len(lines); i++ {
+					l := len(stripAnsi(lines[i]))
+					if i == 0 {
+						l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
+					}
+					rows := (l + width - 1) / width
+					if l == 0 {
+						rows = 1
+					}
+					physicalRowsNeeded += rows
+				}
+			}
+
+			getUI().PasteLinesOffset = physicalRowsNeeded - 1
+			if getUI().PasteLinesOffset < 0 {
+				getUI().PasteLinesOffset = 0
+			}
+
+			visualPastedText := strings.Join(lines, "\n")
 			ki.redrawLayout()
 
 			cw := crnlWriter{w: ki.w}
-			_, _ = cw.Write(normalized)
+			_, _ = cw.Write([]byte(promptPrefix + typeAheadCopy + visualPastedText))
 		}
 
 		return 0, nil
@@ -839,6 +901,18 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	}()
 
 	go func() {
+		for event := range a.SystemEvents {
+			a.TasksMu.Lock()
+			a.PendingSystemEvent = event
+			a.TasksMu.Unlock()
+			// \025 is Ctrl+U (clears the current input line), \n submits it
+			for _, b := range []byte("\025\n") {
+				kiReader.injectChan <- b
+			}
+		}
+	}()
+
+	go func() {
 		for {
 			b, ok := <-rawChan
 			if !ok {
@@ -942,7 +1016,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 						}
 					}
 					getUI().StateMu.Unlock()
-					kiReader.redrawTypeAhead()
+					if len(rawChan) == 0 {
+						kiReader.redrawTypeAhead()
+					}
 					kiReader.inputChan <- b
 					continue
 				}
@@ -959,7 +1035,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					getUI().StateMu.Lock()
 					kiReader.typeAheadBuffer = append(kiReader.typeAheadBuffer, b)
 					getUI().StateMu.Unlock()
-					kiReader.redrawTypeAhead()
+					if len(rawChan) == 0 {
+						kiReader.redrawTypeAhead()
+					}
 				}
 
 				kiReader.inputChan <- b
@@ -1046,6 +1124,14 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		kiReader.isAtMainPrompt = false
 		term.Restore(fd, oldState)
 
+		a.TasksMu.Lock()
+		pendingEvent := a.PendingSystemEvent
+		a.PendingSystemEvent = ""
+		a.TasksMu.Unlock()
+		if pendingEvent != "" {
+			line = "/system_event " + pendingEvent
+		}
+
 		if height > 0 {
 			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
 		}
@@ -1119,6 +1205,36 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			getUI().StateMu.Unlock()
 			DrawStaticStatsLine(os.Stderr, theme, "", savedStats)
 			DrawStatusBar(os.Stderr, theme)
+			continue
+		}
+
+		if strings.HasPrefix(line, "/system_event ") {
+			eventMsg := strings.TrimPrefix(line, "/system_event ")
+			
+			// Draw a small, subtle indicator instead of the giant prompt block
+			eventStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+			fmt.Fprintf(ppWriter, "\n%s\n", eventStyle.Render("✦ "+eventMsg))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = cancel
+			kiReader.typeAheadBuffer = nil
+			getUI().StateMu.Unlock()
+
+			restore, err := setNonCanonical(fd)
+
+			a.RunAgentLoop(ctx, ppWriter, &messages, eventMsg, allowedTools, theme, false, currentSessionID)
+
+			if err == nil && restore != nil {
+				restore()
+			}
+			cancel()
+			getUI().StateMu.Lock()
+			getUI().ActiveCancelFunc = nil
+			getUI().StateMu.Unlock()
+			kiReader.Drain()
+
+			redrawScreen(os.Stderr, a, kiReader, rl)
 			continue
 		}
 

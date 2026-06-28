@@ -44,6 +44,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 	if ma.BaseAgent != nil && ma.BaseAgent.Config != nil && ma.BaseAgent.Config.CompactPrompt {
 		thinkingGuidelines := fmt.Sprintf("\n\nThinking Guidelines:\n"+
 			"- Workspace root: `%s`. Read, edit, or list files inside this workspace directory tree.\n"+
+			"- Use the 'explore' tool to find definitions of classes, functions, or methods quickly without reading full files.\n"+
 			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
 			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
 			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
@@ -61,6 +62,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using 'ls' or similar listing tool) to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
 		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
 		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
+		"- Use the 'explore' tool to find the exact signature and body of classes, functions, or methods. This is much faster and token-efficient than using 'search' (grep) and 'read' on entire files.\n"+
 		"- Before editing or modifying a file, you MUST read the file first to ensure your edits match the current content exactly.\n"+
 		"- When searching files, listing directories, reading code, or executing shell commands (such as find, grep, wc, ls, etc.), you MUST ALWAYS exclude or ignore dependency and build directories (such as node_modules, venv, .venv, .git, build, dist, target, and tmp) unless the user explicitly requests them.\n"+
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max).\n"+
@@ -100,6 +102,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n"+
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n"+
 			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n"+
+			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n"+
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.",
 			strings.Join(activeAgents, ", "))
 	} else {
@@ -109,6 +112,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n" +
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n" +
 			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n" +
+			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n" +
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate."
 	}
 
@@ -479,8 +483,54 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				return db.Message{}, ctx.Err()
 			}
 
+			isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
+
 			if wasStreamed {
 				startLine = sr.GetToolTitleLineNumber(idx)
+				nextTitleLine := ncw.count
+				if idx < len(assistantMsg.ToolCalls)-1 {
+					nextTitleLine = sr.GetToolTitleLineNumber(idx + 1)
+				}
+				linesToClear := nextTitleLine - startLine
+				if linesToClear > 0 && !isSubagent {
+					type promptWriter interface {
+						Unwrap() io.Writer
+						GetPrintLine() int
+						SetPrintLine(int)
+						SetPrintCol(int)
+					}
+					var pp promptWriter
+					curr := writer
+					for {
+						if p, ok := curr.(promptWriter); ok {
+							pp = p
+							break
+						}
+						if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
+							curr = unwrapper.Unwrap()
+						} else {
+							break
+						}
+					}
+					if pp != nil {
+						physicalStart := pp.GetPrintLine() - (ncw.count - startLine)
+						physicalEnd := physicalStart + linesToClear - 1
+						if physicalStart < 1 {
+							physicalStart = 1
+						}
+						if physicalEnd > pp.GetPrintLine() {
+							physicalEnd = pp.GetPrintLine()
+						}
+						for line := physicalStart; line <= physicalEnd; line++ {
+							fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H\x1b[2K", line)
+						}
+						fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H", physicalStart)
+						pp.SetPrintLine(physicalStart)
+						pp.SetPrintCol(1)
+					}
+					ncw.count = startLine
+					ncw.col = 0
+				}
 			} else {
 				prefixStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 				fmt.Fprintf(ncw, "%s [%s] calling tool:\n",
@@ -493,6 +543,12 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				} else {
 					fmt.Fprintf(ncw, "▸ %s\n", tc.Function.Name)
 				}
+			}
+
+			// If it's a subagent tool, update the tool header to green BEFORE executing it.
+			if isSubagent && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+				linesToGoBack := ncw.count - startLine
+				ma.BaseAgent.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
 			}
 
 			mac := &multiAgentContext{
@@ -517,10 +573,12 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			countBefore := ncw.count
 			linesToGoBack := ncw.count - startLine
 
-			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-				ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
-			} else {
-				fmt.Fprintln(ncw, output)
+			if !isSubagent {
+				if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+					ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+				} else {
+					fmt.Fprintln(ncw, output)
+				}
 			}
 			countAfter := ncw.count
 			diff := countAfter - countBefore
@@ -657,6 +715,7 @@ func NewMultiAgentManager(baseAgent *Agent, w io.Writer, theme style.UITheme) *M
 		baseAgent.Registry.Register(&spawnSubagentTool{mam: mam})
 		baseAgent.Registry.Register(&killSubagentTool{mam: mam})
 		baseAgent.Registry.Register(&swarmTopologyTool{mam: mam})
+		baseAgent.Registry.Register(&swarmAuditTool{mam: mam})
 	}
 
 	return mam
@@ -1158,7 +1217,7 @@ func (mam *MultiAgentManager) LoadSavedAgents() error {
 
 	defs := make(map[string]*AgentDef)
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || strings.HasSuffix(entry.Name(), "_state.json") {
 			continue
 		}
 		path := filepath.Join(agentsDir, entry.Name())
@@ -1167,7 +1226,7 @@ func (mam *MultiAgentManager) LoadSavedAgents() error {
 			continue
 		}
 		var def AgentDef
-		if err := json.Unmarshal(data, &def); err == nil {
+		if err := json.Unmarshal(data, &def); err == nil && def.Name != "" {
 			defs[def.Name] = &def
 		}
 	}
@@ -1372,5 +1431,118 @@ func (s *swarmTopologyTool) Execute(ctx tool.AgentContext, arguments string) (st
 		sysPrompt = strings.ReplaceAll(sysPrompt, "\n", " ")
 		sb.WriteString(fmt.Sprintf("  Goal: %s\n", sysPrompt))
 	}
+	return sb.String(), nil
+}
+
+type swarmAuditTool struct {
+	mam *MultiAgentManager
+}
+
+func (s *swarmAuditTool) Name() string { return "swarm_audit" }
+func (s *swarmAuditTool) Definition() tool.Tool {
+	return tool.Tool{
+		Type: "function",
+		Function: tool.FunctionDefinition{
+			Name:        "swarm_audit",
+			Description: "Audit the execution history of a spawned subagent to see exactly what actions, tool calls, thoughts, and results it produced. Essential for verifying subagent work.",
+			Parameters: tool.JSONSchema{
+				Type: "object",
+				Properties: map[string]tool.SchemaProp{
+					"name": {
+						Type:        "string",
+						Description: "The name of the subagent to audit (e.g. 'coder', 'researcher').",
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+}
+
+func (s *swarmAuditTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
+	var args struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	s.mam.mu.RLock()
+	subagent, exists := s.mam.Agents[args.Name]
+	s.mam.mu.RUnlock()
+
+	if !exists {
+		// Try loading state from disk if it exists but not in memory
+		agentsDir, err := s.mam.getAgentsDir()
+		if err != nil {
+			return "", fmt.Errorf("subagent '%s' not found", args.Name)
+		}
+		path := filepath.Join(agentsDir, args.Name+"_state.json")
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("subagent '%s' not found", args.Name)
+		}
+		
+		// Create a dummy MultiAgent just to load its state
+		subagent = &MultiAgent{Name: args.Name}
+		if err := s.mam.LoadAgentState(subagent); err != nil {
+			return "", fmt.Errorf("failed to load subagent state: %w", err)
+		}
+	}
+
+	subagent.HistoryMu.RLock()
+	history := make([]db.Message, len(subagent.History))
+	copy(history, subagent.History)
+	subagent.HistoryMu.RUnlock()
+
+	if len(history) == 0 {
+		return fmt.Sprintf("No execution history found for subagent '%s'.", args.Name), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("=== Swarm Audit Trail for Subagent: '%s' ===\n\n", args.Name))
+
+	step := 1
+	for _, msg := range history {
+		if msg.Role == "system" {
+			// Skip system prompt to avoid cluttering unless it's a loaded skill
+			if strings.HasPrefix(msg.Content, "loaded reference skill") {
+				sb.WriteString(fmt.Sprintf("[System] %s\n\n", msg.Content))
+			}
+			continue
+		}
+
+		if msg.Role == "user" {
+			sb.WriteString(fmt.Sprintf("Step %d: [Task Assigned from %s]\n", step, msg.Name))
+			sb.WriteString(fmt.Sprintf("Prompt: %s\n\n", msg.Content))
+			step++
+			continue
+		}
+
+		if msg.Role == "assistant" {
+			if msg.ReasoningContent != "" {
+				sb.WriteString(fmt.Sprintf("Thought:\n%s\n\n", msg.ReasoningContent))
+			}
+			if msg.Content != "" {
+				sb.WriteString(fmt.Sprintf("Response:\n%s\n\n", msg.Content))
+			}
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					sb.WriteString(fmt.Sprintf("Action (Tool Call): %s(%s)\n\n", tc.Function.Name, tc.Function.Arguments))
+				}
+			}
+			continue
+		}
+
+		if msg.Role == "tool" {
+			out := msg.Content
+			// Truncate very long tool outputs to keep the audit readable
+			if len(out) > 1500 {
+				out = out[:1500] + "\n... (output truncated for audit readability) ..."
+			}
+			sb.WriteString(fmt.Sprintf("Result (Tool Output - %s):\n%s\n\n", msg.Name, out))
+			continue
+		}
+	}
+
 	return sb.String(), nil
 }

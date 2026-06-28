@@ -12,8 +12,12 @@ import (
 )
 
 type ReplaceEdit struct {
-	OldText string `json:"oldText"`
-	NewText string `json:"newText"`
+	OldText      string `json:"oldText"`
+	NewText      string `json:"newText"`
+	OldTextSnake string `json:"old_text"`
+	NewTextSnake string `json:"new_text"`
+	OldString    string `json:"old_string"`
+	NewString    string `json:"new_string"`
 }
 
 type readTool struct{}
@@ -29,7 +33,7 @@ func (t *readTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "read",
-			Description: "Read the contents of a file with optional line offsets and limits.",
+			Description: "Read the contents of a file. IMPORTANT: Do NOT use this tool to find or extract function, class, struct, or method definitions. Use the 'explore' tool for that instead. Only use 'read' to view imports, config files, or full contents when preparing to edit.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -224,7 +228,7 @@ func (t *editTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "edit",
-			Description: "Edit a single file using exact search and replace text blocks. oldText must match exactly.",
+			Description: "Edit a single file using exact search and replace text blocks. oldText must match exactly. oldText cannot be empty (to insert text, match the preceding/following line and include it in newText).",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -287,8 +291,27 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var diffBuilder strings.Builder
 	for i := range edits {
 		edit := &edits[i]
+		if edit.OldText == "" {
+			if edit.OldTextSnake != "" {
+				edit.OldText = edit.OldTextSnake
+			} else if edit.OldString != "" {
+				edit.OldText = edit.OldString
+			}
+		}
+		if edit.NewText == "" {
+			if edit.NewTextSnake != "" {
+				edit.NewText = edit.NewTextSnake
+			} else if edit.NewString != "" {
+				edit.NewText = edit.NewString
+			}
+		}
+
 		edit.OldText = strings.ReplaceAll(edit.OldText, "\r\n", "\n")
 		edit.NewText = strings.ReplaceAll(edit.NewText, "\r\n", "\n")
+
+		if strings.TrimSpace(edit.OldText) == "" {
+			return "", fmt.Errorf("edit[%d]: oldText cannot be empty or just whitespace. If you want to insert new text, you must include some existing surrounding text in oldText, and replicate it in newText alongside your insertion.", i)
+		}
 
 		indexOfOldText := strings.Index(content, edit.OldText)
 		if indexOfOldText == -1 {

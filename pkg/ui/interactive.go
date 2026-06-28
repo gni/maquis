@@ -646,42 +646,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	}
 }
 
-func ChooseSession(w io.Writer, sessions []db.SessionInfo, rlInput io.Reader, rlOutput io.Writer) (string, error) {
-	if len(sessions) == 0 {
-		return "", fmt.Errorf("no sessions found")
-	}
-
-	fmt.Fprintln(rlOutput, "\navailable past sessions:")
-	for i, s := range sessions {
-		previewText := s.Preview
-		if len(previewText) > 40 {
-			previewText = previewText[:40] + "..."
-		}
-		fmt.Fprintf(rlOutput, "  [%d] %s (%d msgs) - %s\n", i+1, s.Timestamp[:16], s.MsgCount, previewText)
-	}
-	fmt.Fprintln(rlOutput)
-
-	reader := bufio.NewReader(rlInput)
-	for {
-		fmt.Fprintf(rlOutput, "enter session number to load (1 to %d) or press enter to cancel: ", len(sessions))
-		choiceStr, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		choiceStr = strings.TrimSpace(choiceStr)
-		if choiceStr == "" {
-			return "", fmt.Errorf("selection cancelled")
-		}
-
-		num, err := strconv.Atoi(choiceStr)
-		if err != nil || num < 1 || num > len(sessions) {
-			fmt.Fprintln(rlOutput, "error: invalid session number.")
-			continue
-		}
-		return sessions[num-1].SessionID, nil
-	}
-}
-
 func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (string, bool, error) {
 	for {
 		sessions, err := db.GetSessions()

@@ -131,10 +131,10 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	if sessionID != "" {
 		if !db.HasMessages(sessionID) {
 			if len(*messages) > 1 && (*messages)[0].Role == "system" {
-				_ = db.SaveMessage(sessionID, (*messages)[0])
+				go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[0])
 			}
 		}
-		_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+		go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -155,7 +155,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 	maxSteps := a.Config.MaxReasoningSteps
 	if maxSteps <= 0 {
-		maxSteps = 9999
+		maxSteps = 30
 	}
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
@@ -311,7 +311,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
 		*messages = append(*messages, *assistantMsg)
 		if sessionID != "" {
-			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+			go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
 		}
 
 		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
@@ -401,6 +401,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				return
 			}
 
+			isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
+
 			if wasStreamed {
 				startLine = sr.GetToolTitleLineNumber(idx)
 				nextTitleLine := ncw.count
@@ -408,7 +410,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					nextTitleLine = sr.GetToolTitleLineNumber(idx + 1)
 				}
 				linesToClear := nextTitleLine - startLine
-				if linesToClear > 0 {
+				if linesToClear > 0 && !isSubagent {
 					type promptWriter interface {
 						Unwrap() io.Writer
 						GetPrintLine() int
@@ -495,8 +497,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			}
 
 			if approved {
-				isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
-
 				// If it's a subagent tool, update the tool header to green BEFORE executing it.
 				// This way, the subagent outputs its results below the green header, and we don't
 				// overwrite/duplicate the output after it completes.
@@ -601,7 +601,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					Content:    toolOutput,
 				})
 				if sessionID != "" {
-					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+					go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
 				}
 
 			} else {
@@ -630,15 +630,13 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					Content:    toolOutput,
 				})
 				if sessionID != "" {
-					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+					go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
 				}
 
 				// Abort execution of subsequent tools in the batch
 				return
 			}
 		}
-
-		time.Sleep(200 * time.Millisecond)
 	}
 
 	errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)

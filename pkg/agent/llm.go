@@ -137,19 +137,55 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		}
 	}
 
-	var apiMessages []db.Message
+	var validMessages []db.Message
+	limit := p.Config.ContextWindowLimit
+	if limit <= 0 {
+		limit = 128000
+	}
+	limitChars := limit * 4
+	totalChars := 0
+
 	for _, msg := range messages {
 		if msg.Role == "assistant" && msg.Content == "" && len(msg.ToolCalls) == 0 {
-			// Skip completely empty assistant messages to avoid API rejection
 			continue
 		}
 		if msg.Role != "assistant" && msg.Content == "" {
 			msgCopy := msg
 			msgCopy.Content = " "
-			apiMessages = append(apiMessages, msgCopy)
+			validMessages = append(validMessages, msgCopy)
 		} else {
-			apiMessages = append(apiMessages, msg)
+			validMessages = append(validMessages, msg)
 		}
+		totalChars += len(validMessages[len(validMessages)-1].Content)
+		if validMessages[len(validMessages)-1].Role == "assistant" {
+			totalChars += len(validMessages[len(validMessages)-1].ReasoningContent)
+		}
+	}
+
+	startIndex := 0
+	if len(validMessages) > 0 && validMessages[0].Role == "system" {
+		startIndex = 1
+	}
+	for totalChars > limitChars && startIndex < len(validMessages)-1 {
+		dropMsg := validMessages[startIndex]
+		dropChars := len(dropMsg.Content)
+		if dropMsg.Role == "assistant" {
+			dropChars += len(dropMsg.ReasoningContent)
+		}
+		totalChars -= dropChars
+		startIndex++
+	}
+
+	var apiMessages []db.Message
+	if startIndex > 0 && len(validMessages) > 0 && validMessages[0].Role == "system" {
+		apiMessages = append(apiMessages, validMessages[0])
+		if startIndex < len(validMessages) {
+			apiMessages = append(apiMessages, validMessages[startIndex:]...)
+		}
+	} else if startIndex > 0 && len(validMessages) > 0 {
+		apiMessages = validMessages[startIndex:]
+	} else {
+		apiMessages = validMessages
 	}
 
 	var finalTools []tool.Tool
@@ -264,6 +300,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 
 	inThoughtMode := false
 	streamBuffer := ""
+	var chunk ChatCompletionResponseChunk
 
 	for {
 		select {
@@ -294,7 +331,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 			break
 		}
 
-		var chunk ChatCompletionResponseChunk
+		chunk = ChatCompletionResponseChunk{}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
@@ -583,7 +620,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["background"] = prop
 		}
 	case "read":
-		compressed.Function.Description = "Read file lines"
+		compressed.Function.Description = "Read file lines. Do NOT use to find/extract function or class code; use 'explore' instead."
 		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 			prop.Description = "File path"
 			compressed.Function.Parameters.Properties["path"] = prop
@@ -595,6 +632,16 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
 			prop.Description = "Max lines"
 			compressed.Function.Parameters.Properties["limit"] = prop
+		}
+	case "explore":
+		compressed.Function.Description = "Find and extract the exact code of a function, class, struct, or method by name."
+		if prop, ok := compressed.Function.Parameters.Properties["query"]; ok {
+			prop.Description = "Symbol name to find"
+			compressed.Function.Parameters.Properties["query"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Subfolder to limit search"
+			compressed.Function.Parameters.Properties["path"] = prop
 		}
 	case "write":
 		compressed.Function.Description = "Write file"
