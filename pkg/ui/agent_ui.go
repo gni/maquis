@@ -23,7 +23,7 @@ type AgentUIImpl struct {
 	PasteCounter       int
 	ActiveInputReader  io.Reader
 	InApprovalPrompt   bool
-	State              StatusBarState
+	State                 StatusBarState
 	LastH              int
 	Enabled            bool
 	ScrollRegionOffset int
@@ -31,6 +31,7 @@ type AgentUIImpl struct {
 	LastStatsText      string
 	LastStatusBarText  string
 	IsInteractive      bool
+	TriggerRedraw      func()
 
 	StateMu    sync.Mutex
 	TerminalMu sync.Mutex

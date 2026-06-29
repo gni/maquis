@@ -133,7 +133,11 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 // On carriage return, printCol resets to 1 without scrolling.
 func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	s := string(data)
+	termW, h := getTerminalSize()
 	scrollBottom := p.height - 5
+	if h > 0 {
+		scrollBottom = h - 5
+	}
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
@@ -163,6 +167,14 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 				default:
 					if r >= 32 && r != '\uFFFD' {
 						p.printCol++
+						if termW > 0 && p.printCol > termW {
+							p.printCol = 1
+							if p.printLine < scrollBottom {
+								p.printLine++
+							} else {
+								p.scrollCount++
+							}
+						}
 					}
 				}
 			}

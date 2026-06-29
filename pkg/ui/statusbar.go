@@ -85,8 +85,8 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 
 	var buf bytes.Buffer
 
-	// Only set the scrolling region when the terminal height changes
-	scrollBottom := height - 2 - getUI().ScrollRegionOffset - getUI().PasteLinesOffset
+	offset := getUI().ScrollRegionOffset
+	scrollBottom := height - 2 - offset - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}

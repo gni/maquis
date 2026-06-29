@@ -1555,6 +1555,30 @@ func isMutatingOrInteractiveSlashCommand(line string) bool {
 	return false
 }
 
+func countWrappedLines(s string, termW int) int {
+	if termW <= 0 {
+		return strings.Count(s, "\n")
+	}
+	lines := strings.Split(s, "\n")
+	count := 0
+	for i, line := range lines {
+		if i == len(lines)-1 && line == "" {
+			break
+		}
+		stripped := stripAnsi(line)
+		length := utf8.RuneCountInString(stripped)
+		if length == 0 {
+			count += 1
+		} else {
+			count += (length + termW - 1) / termW
+		}
+	}
+	if s == "" {
+		return 0
+	}
+	return count
+}
+
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
@@ -1596,14 +1620,14 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		PrintSessionHistory(cwBuf, activeMessages, activeTheme, a.Config)
 	}
 
-	_, height := getTerminalSize()
+	termW, height := getTerminalSize()
 	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
 
 	content := buf.String()
-	linesCount := strings.Count(content, "\n")
+	linesCount := countWrappedLines(content, termW)
 
 	var finalBuf bytes.Buffer
 	cwFinal := crnlWriter{w: &finalBuf}

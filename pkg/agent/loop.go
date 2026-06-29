@@ -618,7 +618,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 			} else {
 				// Rejected!
-				toolOutput := "Error: Tool execution rejected by user."
+				toolOutput := "error: tool execution rejected by user."
 				a.lastToolOutput = toolOutput
 				a.lastToolIsError = true
 

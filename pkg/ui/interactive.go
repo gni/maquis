@@ -24,7 +24,16 @@ import (
 func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	var input io.Reader = os.Stdin
 	var output io.Writer = os.Stdout
-	var fd int = int(os.Stdin.Fd())
+	fd := int(os.Stdin.Fd())
+
+	if w != nil {
+		output = w
+		if tty, ok := w.(*os.File); ok {
+			input = tty
+			output = tty
+			fd = int(tty.Fd())
+		}
+	}
 
 	getUI().StateMu.Lock()
 	hasActiveReader := getUI().ActiveInputReader != nil
@@ -34,16 +43,7 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	}
 	getUI().StateMu.Unlock()
 
-	getUI().StateMu.Lock()
-	getUI().InApprovalPrompt = true
-	getUI().StateMu.Unlock()
-	defer func() {
-		getUI().StateMu.Lock()
-		getUI().InApprovalPrompt = false
-		getUI().StateMu.Unlock()
-	}()
-
-	if !hasActiveReader {
+	if !hasActiveReader && input == os.Stdin {
 		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
 			defer tty.Close()
 			input = tty
@@ -52,63 +52,124 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 		}
 	}
 
-	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-	fmt.Fprint(output, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
-
 	isTerm := term.IsTerminal(fd)
+	var oldState *term.State
 	if isTerm && !hasActiveReader {
-		oldState, err := term.MakeRaw(fd)
+		var err error
+		oldState, err = term.MakeRaw(fd)
 		if err == nil {
 			defer term.Restore(fd, oldState)
 		}
 	}
 
-	buf := make([]byte, 1)
-	n, err := input.Read(buf)
-	if err != nil || n == 0 {
-		if isTerm {
-			fmt.Fprint(output, "\r\x1b[K")
-		} else {
-			fmt.Fprintln(output)
+	// We no longer fallback to single byte if hasActiveReader is true. We support dropdown!
+	// We only fallback if it's NOT a terminal AND no active reader
+	if !isTerm && !hasActiveReader {
+		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+		fmt.Fprint(output, promptStyle.Render(" approve tool execution? [y/n/a (always)]: "))
+		buf := make([]byte, 1)
+		input.Read(buf)
+		char := buf[0]
+		if char == 'y' || char == 'Y' {
+			return true, false
+		} else if char == 'a' || char == 'A' {
+			return true, true
 		}
 		return false, false
 	}
 
-	char := buf[0]
-	// Handle Ctrl+C (3), Ctrl+D (4), or Esc (27)
-	if char == 3 || char == 4 || char == 27 {
-		if isTerm {
-			fmt.Fprint(output, "\r\x1b[K")
-		} else {
-			fmt.Fprintln(output, "rejected")
-		}
-		return false, false
-	}
+	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+	activeStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+	options := []string{"yes", "no", "always"}
+	selected := 0
 
-	if char == 'y' || char == 'Y' {
-		if isTerm {
-			fmt.Fprint(output, "\r\x1b[K")
+	firstRender := true
+	fmt.Fprint(os.Stdout, "\x1b[?25l") // Hide cursor
+	defer fmt.Fprint(os.Stdout, "\x1b[?25h") // Ensure cursor is restored
+
+	renderMenu := func() {
+		if firstRender {
+			fmt.Fprint(output, "\r\x1b[K", promptStyle.Render(" approve tool execution?\r\n"))
+			for i, opt := range options {
+				fmt.Fprint(output, "\r\x1b[K")
+				if i == selected {
+					fmt.Fprintf(output, "  > %s\r\n", activeStyle.Render(opt))
+				} else {
+					fmt.Fprintf(output, "    %s\r\n", opt)
+				}
+			}
+			firstRender = false
 		} else {
-			fmt.Fprintln(output, "y")
-		}
-		return true, false
-	} else if char == 'a' || char == 'A' {
-		if isTerm {
-			fmt.Fprint(output, "\r\x1b[K")
-		} else {
-			fmt.Fprintln(output, "always")
-		}
-		return true, true
-	} else {
-		if isTerm {
-			fmt.Fprint(output, "\r\x1b[K")
-		} else {
-			if char == '\r' || char == '\n' {
-				fmt.Fprintln(output, "n")
-			} else {
-				fmt.Fprintf(output, "%c\n", char)
+			fmt.Fprintf(os.Stdout, "\x1b[%dA", len(options)+1)
+			fmt.Fprint(os.Stdout, "\r\x1b[K", promptStyle.Render(" approve tool execution?\r\n"))
+			for i, opt := range options {
+				fmt.Fprint(os.Stdout, "\r\x1b[K")
+				if i == selected {
+					fmt.Fprintf(os.Stdout, "  > %s\r\n", activeStyle.Render(opt))
+				} else {
+					fmt.Fprintf(os.Stdout, "    %s\r\n", opt)
+				}
 			}
 		}
+	}
+
+	clearMenu := func() {
+		// Do nothing! We leave the menu on screen. 
+		// ncw.count has correctly counted the lines, so RenderToolOutput will erase it perfectly!
+	}
+
+	renderMenu()
+
+	buf := make([]byte, 3)
+	for {
+		n, err := input.Read(buf)
+		if err != nil || n == 0 {
+			continue
+		}
+		if n == 1 {
+			char := buf[0]
+			if char == '\r' || char == '\n' {
+				break
+			}
+			if char == 3 || char == 4 || char == 27 {
+				selected = 1 // default to no on esc/ctrl-c
+				break
+			}
+			if char == 'y' || char == 'Y' {
+				selected = 0
+				break
+			}
+			if char == 'n' || char == 'N' {
+				selected = 1
+				break
+			}
+			if char == 'a' || char == 'A' {
+				selected = 2
+				break
+			}
+		} else if n == 3 && buf[0] == 27 && buf[1] == '[' {
+			if buf[2] == 'A' { // up
+				selected--
+				if selected < 0 {
+					selected = len(options) - 1
+				}
+			} else if buf[2] == 'B' { // down
+				selected++
+				if selected >= len(options) {
+					selected = 0
+				}
+			}
+		}
+		renderMenu()
+	}
+
+	clearMenu()
+
+	if selected == 0 {
+		return true, false
+	} else if selected == 2 {
+		return true, true
+	} else {
 		return false, false
 	}
 }
