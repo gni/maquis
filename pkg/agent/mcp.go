@@ -60,6 +60,10 @@ func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error
 	a.McpClientsMu.Unlock()
 
 	for name, cfg := range configs {
+		if cfg.Disabled {
+			continue
+		}
+		
 		mcpHTTPClient := a.HttpClient
 		if mcpHTTPClient == nil {
 			mcpHTTPClient = &http.Client{

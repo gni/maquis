@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"maquis/pkg/ui/style"
@@ -88,9 +89,17 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				if p.inValue {
 					if p.isContent {
 						if unescaped == "\n" {
+							if p.guessedLang == "" && p.path != "" {
+								ext := filepath.Ext(p.path)
+								if len(ext) > 1 { p.guessedLang = ext[1:] } else { p.guessedLang = "plaintext" }
+							}
+							lang := p.guessedLang
+							if lang == "" { lang = "plaintext" }
+							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 							fmt.Fprint(pw, "\n")
+							p.lineBuffer.Reset()
 						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(unescaped))
+							p.lineBuffer.WriteString(unescaped)
 						}
 					} else if p.isPath {
 						p.path += unescaped
@@ -149,9 +158,17 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 					charStr := string(char)
 					if p.isContent {
 						if char == '\n' {
+							if p.guessedLang == "" && p.path != "" {
+								ext := filepath.Ext(p.path)
+								if len(ext) > 1 { p.guessedLang = ext[1:] } else { p.guessedLang = "plaintext" }
+							}
+							lang := p.guessedLang
+							if lang == "" { lang = "plaintext" }
+							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 							fmt.Fprint(pw, "\n")
+							p.lineBuffer.Reset()
 						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(charStr))
+							p.lineBuffer.WriteString(charStr)
 						}
 					} else if p.isPath {
 						p.path += charStr
@@ -222,7 +239,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 					} else {
 						p.isNewText = true
 					}
-				} else if p.currentKey == "write_content" || p.currentKey == "content" {
+				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") {
 					if p.streamWrites {
 						p.isContent = true
 						p.guessedLang = ""
@@ -233,18 +250,32 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 								p.outputBuf.Reset()
 							}
 						}
-						fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
+						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
 					} else {
-						p.isOldText = true
+						p.isContent = true
 					}
 				}
 			} else if char == '}' || char == ']' {
+				if p.isContent && p.lineBuffer.Len() > 0 {
+					lang := p.guessedLang
+					if lang == "" { lang = "plaintext" }
+					_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
+					fmt.Fprint(pw, "\n")
+					p.lineBuffer.Reset()
+				}
 				p.inValue = false
 				p.isContent = false
 				p.isPath = false
 				p.isOldText = false
 				p.isNewText = false
 			} else if char == ',' {
+				if p.isContent && p.lineBuffer.Len() > 0 {
+					lang := p.guessedLang
+					if lang == "" { lang = "plaintext" }
+					_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
+					fmt.Fprint(pw, "\n")
+					p.lineBuffer.Reset()
+				}
 				p.inValue = false
 				p.isContent = false
 				p.isPath = false

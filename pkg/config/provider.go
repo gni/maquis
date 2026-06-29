@@ -7,6 +7,11 @@ type ProviderConfig struct {
 	Model    string `json:"model,omitempty"`
 }
 
+type ProvidersFile struct {
+	ActiveProvider string                    `json:"active_provider"`
+	Providers      map[string]ProviderConfig `json:"providers"`
+}
+
 func (c *Config) SyncActiveProvider() {
 	if c.ActiveProvider == "" || c.Providers == nil {
 		return

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -131,12 +132,14 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/session <list/new/load/clear>", "manage persistent chat sessions interactively"},
 		{"/skills", "list all available reference skills"},
 		{"/skills load <name>", "explicitly load a reference skill into the context"},
-		{"/mcp", "list all configured mcp servers and active tool schemas"},
+		{"/mcp <enable/disable>", "list and toggle mcp servers and active tool schemas"},
+		{"/provider", "manage ai endpoints, keys, and model profiles"},
 		{"/plugins", "list all registered custom plugin tools"},
 		{"/extensions", "list all custom slash command extensions"},
 		{"/reload", "re-scan and hot-reload custom plugins and tools"},
-		{"/agent <list/join/spawn/skill/kill>", "manage multi-agent swarm threads interactively"},
-		{"/rewind", "clear conversation history"},
+		{"/agent <list/join/spawn/skill/remove>", "manage multi-agent swarm threads interactively"},
+		{"/task <list/view/stream/remove>", "manage async background tasks"},
+		{"/clear", "clear conversation and start a new one"},
 		{"/help, /commands, ?", "display this help menu"},
 		{"/exit, /quit", "exit the maquis CLI application"},
 	}
@@ -191,7 +194,6 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 	configStr := fmt.Sprintf(
 		"%s\n\n"+
 			"  %-20s %s\n"+
-			"  %-20s %s\n"+
 			"  %-20s %.2f\n"+
 			"  %-20s %s\n"+
 			"  %-20s %v\n"+
@@ -209,8 +211,7 @@ func RenderConfig(w io.Writer, cfg *config.Config, theme UITheme) {
 			"  %-20s %s\n\n"+
 			"tip: change any setting via: /config <key> <value> (e.g. /config yes true)",
 		titleStyle.Render("maquis runtime settings"),
-		keyStyle.Render("endpoint:"), valStyle.Render(cfg.Endpoint),
-		keyStyle.Render("model:"), valStyle.Render(cfg.Model),
+		keyStyle.Render("active provider:"), valStyle.Render(cfg.ActiveProvider),
 		keyStyle.Render("temperature:"), cfg.Temperature,
 		keyStyle.Render("auto-approve:"), approveVal,
 		keyStyle.Render("show thinking:"), cfg.ShowThinking,
@@ -350,15 +351,21 @@ func extractToolTarget(toolName string, argsJSON string) string {
 		return ""
 	}
 	var argsMap map[string]interface{}
-	if err := json.Unmarshal([]byte(argsJSON), &argsMap); err != nil {
-		return ""
-	}
+	_ = json.Unmarshal([]byte(argsJSON), &argsMap)
 
 	getString := func(key string) string {
-		if val, ok := argsMap[key]; ok {
-			if s, ok := val.(string); ok {
-				return s
+		if argsMap != nil {
+			if val, ok := argsMap[key]; ok {
+				if s, ok := val.(string); ok {
+					return s
+				}
 			}
+		}
+		// Fallback for incomplete JSON
+		regex := regexp.MustCompile(fmt.Sprintf(`"%s"\s*:\s*"([^"]+)"`, regexp.QuoteMeta(key)))
+		matches := regex.FindStringSubmatch(argsJSON)
+		if len(matches) > 1 {
+			return matches[1]
 		}
 		return ""
 	}
@@ -628,7 +635,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 				ReplacementContent string `json:"ReplacementContent"`
 			}
 			if argsJSON != "" {
-				_ = json.Unmarshal([]byte(argsJSON), &args)
+				err := json.Unmarshal([]byte(argsJSON), &args)
 				filePath := args.Path
 				if filePath == "" {
 					filePath = args.AbsolutePath
@@ -644,14 +651,19 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 				}
 
 				if strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
-					if args.CodeContent != "" {
-						body = args.CodeContent
-					} else if args.ReplacementContent != "" {
-						body = args.ReplacementContent
-					} else if args.Content != "" {
-						body = args.Content
-					} else if args.WriteContent != "" {
-						body = args.WriteContent
+					if err != nil {
+						body = argsJSON
+						lang = "json"
+					} else {
+						if args.CodeContent != "" {
+							body = args.CodeContent
+						} else if args.ReplacementContent != "" {
+							body = args.ReplacementContent
+						} else if args.Content != "" {
+							body = args.Content
+						} else if args.WriteContent != "" {
+							body = args.WriteContent
+						}
 					}
 				}
 			}
@@ -1093,15 +1105,25 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						if hasPrintedAnything {
 							fmt.Fprintln(w)
 						}
-						path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
-						var symbol string
-						if tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace") {
-							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+						
+						isWriteTool := tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace")
+						
+						if len(tc.Function.Arguments) > 0 && isWriteTool {
+							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, -2)
 						} else {
-							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+							path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
+							var symbol string
+							if isWriteTool {
+								symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+							} else {
+								symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+							}
+							title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
+							fmt.Fprintln(w, title)
 						}
-						title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
-						fmt.Fprintln(w, title)
+						
+						cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
+						fmt.Fprintln(w, cancelStyle.Render("  [Operation Cancelled]"))
 						hasPrintedAnything = true
 					}
 				}

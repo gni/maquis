@@ -107,7 +107,7 @@ func HandleSlashCommand(
 			}
 			id := parts[2]
 			a.ToggleStreaming(id, w)
-		case "kill":
+		case "remove":
 			if len(parts) < 3 {
 				fmt.Fprintln(w, "usage: /task kill <id>")
 				return true, false
@@ -317,7 +317,7 @@ func HandleSlashCommand(
 			agent.RenderSkills(w, a.ActiveSkills, *theme)
 		}
 		return true, false
-	case "/rewind":
+	case "/rewind", "/clear":
 		getUI().LastStatsText = ""
 		*messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
@@ -329,7 +329,7 @@ func HandleSlashCommand(
 		}
 		// Clear terminal screen and scrollback
 		fmt.Fprint(w, "\x1b[H\x1b[2J")
-		fmt.Fprintln(w, "conversation history cleared.")
+		fmt.Fprintln(w, "conversation cleared and started a new one.")
 		pTok, cTok := calcHistoryTokens()
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
 		DrawStatusBar(w, *theme)
@@ -669,20 +669,20 @@ func HandleSlashCommand(
 			default:
 				fmt.Fprintln(w, "unknown skill operation. usage: /agent skill [list <agent_name> | load <agent_name> <skill_name> | clear <agent_name>]")
 			}
-		case "kill":
+		case "remove":
 			if len(parts) < 3 {
-				fmt.Fprintln(w, "usage: /agent kill <name>")
+				fmt.Fprintln(w, "usage: /agent remove <name>")
 				return true, false
 			}
 			target := parts[2]
-			err := mam.KillAgent(target)
+			err := mam.RemoveAgent(target)
 			if err != nil {
-				fmt.Fprintf(w, "error killing agent: %v\n", err)
+				fmt.Fprintf(w, "error removing agent: %v\n", err)
 			} else {
-				fmt.Fprintf(w, "agent '%s' terminated.\n", target)
+				fmt.Fprintf(w, "agent .%s. removed.\n", target)
 			}
 		default:
-			fmt.Fprintln(w, "unknown agent subcommand. usage: /agent [list | join <name> | spawn <name> <prompt> [parent_name] [skill_name] | kill <name> | skill [list/load/clear] ...]")
+			fmt.Fprintln(w, "unknown agent subcommand. usage: /agent [list | join <name> | spawn <name> <prompt> [parent_name] [skill_name] | remove <name> | skill [list/load/clear] ...]")
 		}
 		return true, false
 	case "/reload":

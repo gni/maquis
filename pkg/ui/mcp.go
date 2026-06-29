@@ -91,7 +91,11 @@ func HandleMCPCommand(
 			sort.Strings(keys)
 			for _, name := range keys {
 				status, active := mcpStatuses[name]
-				if !active {
+				cfg := a.Config.MCPServers[name]
+				
+				if cfg.Disabled {
+					status = "\x1b[31mdisabled\x1b[0m"
+				} else if !active {
 					if err, failed := a.McpStartErrors[name]; failed {
 						status = fmt.Sprintf("failed to start (%v)", err)
 					} else {
@@ -135,6 +139,35 @@ func HandleMCPCommand(
 			_ = a.StartMCPServers(a.Config.MCPServers)
 		}
 		
+		pTok, cTok := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		DrawStatusBar(os.Stderr, theme)
+	case "enable", "disable":
+		if len(parts) < 3 {
+			fmt.Fprintf(w, "usage: /mcp %s <name>\n", sub)
+			return
+		}
+		name := parts[2]
+		if a.Config.MCPServers == nil {
+			a.Config.MCPServers = make(map[string]config.MCPServerConfig)
+		}
+		cfg, ok := a.Config.MCPServers[name]
+		if !ok {
+			fmt.Fprintf(w, "error: MCP server '%s' not found.\n", name)
+			return
+		}
+		
+		cfg.Disabled = (sub == "disable")
+		a.Config.MCPServers[name] = cfg
+		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		fmt.Fprintf(w, "MCP Server '%s' successfully %sd.\n", name, sub)
+
+		// Restart MCP servers
+		a.StopMCPServers()
+		if len(a.Config.MCPServers) > 0 {
+			_ = a.StartMCPServers(a.Config.MCPServers)
+		}
+
 		pTok, cTok := calcHistoryTokens()
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
 		DrawStatusBar(os.Stderr, theme)
@@ -191,6 +224,8 @@ func printMCPHelp(w io.Writer, theme UITheme) {
 	fmt.Fprintln(w, "  /mcp list                                  List all configured MCP servers and status")
 	fmt.Fprintln(w, "  /mcp tools                                 List all registered MCP tools")
 	fmt.Fprintln(w, "  /mcp add <name> <url> [headerKey:val]...   Add or update an MCP server configuration")
+	fmt.Fprintln(w, "  /mcp enable <name>                         Enable an MCP server")
+	fmt.Fprintln(w, "  /mcp disable <name>                        Disable an MCP server")
 	fmt.Fprintln(w, "  /mcp remove <name>                         Remove an MCP server configuration")
 }
 
@@ -316,6 +351,18 @@ func RunInteractiveMCPConfig(
 					curr.URL = newVal
 					cloned.MCPServers[srvName] = curr
 					return nil
+				},
+			})
+
+			items = append(items, &settingItem{
+				id:          "server_enabled",
+				name:        "status",
+				value:       func() string { if cloned.MCPServers[srvName].Disabled { return "\x1b[31mdisabled\x1b[0m" } else { return "\x1b[32menabled\x1b[0m" } },
+				description: fmt.Sprintf("Toggle to enable or disable MCP server '%s'", srvName),
+				onToggle: func() {
+					curr := cloned.MCPServers[srvName]
+					curr.Disabled = !curr.Disabled
+					cloned.MCPServers[srvName] = curr
 				},
 			})
 
@@ -543,10 +590,8 @@ func RunInteractiveMCPConfig(
 			if char == 13 || char == 10 {
 				if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
 					item := filtered[selectedIdx]
-					if item.id == "selected_server" || item.id == "action_add_header" || item.id == "action_add_server" || item.id == "action_remove_server" {
-						if item.onToggle != nil {
-							item.onToggle()
-						}
+					if item.onToggle != nil {
+						item.onToggle()
 					} else if item.onEdit != nil {
 						fmt.Fprintf(rlOutput, "\r\n\r\n  edit %s (current: %s):\r\n", item.name, item.value())
 						fmt.Fprint(rlOutput, "  enter new value (empty to delete if header): ")

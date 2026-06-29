@@ -238,7 +238,21 @@ func (t *editTool) Definition() Tool {
 					},
 					"updates": {
 						Type:        "array",
-						Description: "List of replacement blocks. Each contains 'oldText' and 'newText'.",
+						Description: "List of replacement blocks.",
+						Items: &SchemaProp{
+							Type: "object",
+							Properties: map[string]SchemaProp{
+								"oldText": {
+									Type:        "string",
+									Description: "The exact text to be replaced. NEVER use an empty string. To insert text, you MUST include the adjacent existing text in this field, and reproduce it in newText alongside your insertion.",
+								},
+								"newText": {
+									Type:        "string",
+									Description: "The replacement text.",
+								},
+							},
+							Required: []string{"oldText", "newText"},
+						},
 					},
 				},
 				Required: []string{"path", "updates"},

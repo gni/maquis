@@ -24,6 +24,10 @@ func RunExtension(
 	messages *[]db.Message,
 	w io.Writer,
 ) (bool, error) {
+	if a.Config.DisableLocalPlugins {
+		return true, fmt.Errorf("local extensions are disabled for this workspace (run with trust to enable)")
+	}
+
 	// Strip leading slash (e.g. "/stats" -> "stats")
 	name := strings.TrimPrefix(cmdName, "/")
 	if name == "" {

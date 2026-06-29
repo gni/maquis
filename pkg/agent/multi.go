@@ -101,7 +101,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n"+
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n"+
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n"+
-			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n"+
+			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n"+
 			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n"+
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.",
 			strings.Join(activeAgents, ", "))
@@ -111,7 +111,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n" +
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n" +
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n" +
-			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n" +
+			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n" +
 			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n" +
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate."
 	}
@@ -713,7 +713,7 @@ func NewMultiAgentManager(baseAgent *Agent, w io.Writer, theme style.UITheme) *M
 
 	if baseAgent != nil && baseAgent.Registry != nil {
 		baseAgent.Registry.Register(&spawnSubagentTool{mam: mam})
-		baseAgent.Registry.Register(&killSubagentTool{mam: mam})
+		baseAgent.Registry.Register(&removeSubagentTool{mam: mam})
 		baseAgent.Registry.Register(&swarmTopologyTool{mam: mam})
 		baseAgent.Registry.Register(&swarmAuditTool{mam: mam})
 	}
@@ -936,7 +936,7 @@ func (mam *MultiAgentManager) ListAgents() []string {
 	return names
 }
 
-func (mam *MultiAgentManager) KillAgent(name string) error {
+func (mam *MultiAgentManager) RemoveAgent(name string) error {
 	mam.mu.Lock()
 	defer mam.mu.Unlock()
 
@@ -1342,16 +1342,16 @@ func (s *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (st
 	return fmt.Sprintf("Subagent '%s' successfully spawned. You can now use the 'subagent__%s' tool to delegate tasks to it.", args.Name, args.Name), nil
 }
 
-type killSubagentTool struct {
+type removeSubagentTool struct {
 	mam *MultiAgentManager
 }
 
-func (s *killSubagentTool) Name() string { return "kill_subagent" }
-func (s *killSubagentTool) Definition() tool.Tool {
+func (s *removeSubagentTool) Name() string { return "remove_subagent" }
+func (s *removeSubagentTool) Definition() tool.Tool {
 	return tool.Tool{
 		Type: "function",
 		Function: tool.FunctionDefinition{
-			Name:        "kill_subagent",
+			Name:        "remove_subagent",
 			Description: "Terminate a running subagent.",
 			Parameters: tool.JSONSchema{
 				Type: "object",
@@ -1367,7 +1367,7 @@ func (s *killSubagentTool) Definition() tool.Tool {
 	}
 }
 
-func (s *killSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
+func (s *removeSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
 	var args struct {
 		Name string `json:"name"`
 	}
@@ -1375,7 +1375,7 @@ func (s *killSubagentTool) Execute(ctx tool.AgentContext, arguments string) (str
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	err := s.mam.KillAgent(args.Name)
+	err := s.mam.RemoveAgent(args.Name)
 	if err != nil {
 		return "", err
 	}

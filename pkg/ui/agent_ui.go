@@ -20,6 +20,7 @@ type AgentUIImpl struct {
 
 	ActiveCancelFunc   context.CancelFunc
 	PasteLinesOffset   int
+	PasteCounter       int
 	ActiveInputReader  io.Reader
 	InApprovalPrompt   bool
 	State              StatusBarState

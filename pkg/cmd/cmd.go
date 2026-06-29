@@ -128,6 +128,57 @@ var rootCmd = &cobra.Command{
 			Timeout:   120 * time.Second,
 		}
 
+		cwd, _ := os.Getwd()
+		
+		pipedData := ""
+		if isPiped() {
+			pipedData, _ = readStdin()
+		}
+		hasPromptArgs := len(args) > 0
+		isNonInteractive := pipedData != "" || hasPromptArgs
+
+		// Prompt for workspace trust if local executable extensions/plugins exist
+		trustFile := filepath.Join(cwd, ".maquis-trust")
+		trusted := false
+		if _, err := os.Stat(trustFile); err == nil {
+			trusted = true
+		}
+
+		pluginsDir := filepath.Join(cwd, "plugins")
+		extensionsDir := filepath.Join(cwd, "extensions")
+		hasLocalCode := false
+
+		if info, err := os.Stat(pluginsDir); err == nil && info.IsDir() {
+			if entries, _ := os.ReadDir(pluginsDir); len(entries) > 0 {
+				hasLocalCode = true
+			}
+		}
+		if info, err := os.Stat(extensionsDir); err == nil && info.IsDir() {
+			if entries, _ := os.ReadDir(extensionsDir); len(entries) > 0 {
+				hasLocalCode = true
+			}
+		}
+
+		if hasLocalCode && !trusted && !isNonInteractive {
+			fmt.Printf("\n\x1b[33m⚠️  Security Warning\x1b[0m: Workspace '%s' contains local plugins or extensions.\n", cwd)
+			fmt.Printf("These can execute arbitrary code on your machine. Do you trust this workspace? [y/N]: ")
+			var resp string
+			fmt.Scanln(&resp)
+			resp = strings.ToLower(strings.TrimSpace(resp))
+			if resp == "y" || resp == "yes" {
+				trusted = true
+				_ = os.WriteFile(trustFile, []byte("trusted"), 0644)
+				fmt.Println("\x1b[32mWorkspace trusted.\x1b[0m")
+			}
+		}
+
+		if hasLocalCode && !trusted {
+			if !isNonInteractive {
+				fmt.Println("\x1b[31mLocal plugins and extensions have been DISABLED for this session.\x1b[0m")
+			}
+			cfg.DisableLocalPlugins = true
+		}
+
 		// Instantiate Agent context
 		a := agent.NewAgent(cfg, configPath, httpClient)
 		a.UI = ui.NewAgentUI(cfg, theme)
@@ -138,12 +189,7 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Warning: failed to load skills: %v\n", err)
 		}
 
-		pipedData := ""
-		if isPiped() {
-			pipedData, _ = readStdin()
-		}
-		hasPromptArgs := len(args) > 0
-		isNonInteractive := pipedData != "" || hasPromptArgs
+
 
 		// Start MCP servers
 		if len(cfg.MCPServers) > 0 {

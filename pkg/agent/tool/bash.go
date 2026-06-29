@@ -2,11 +2,13 @@ package tool
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type bashTool struct{}
@@ -61,13 +63,21 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return fmt.Sprintf("Task spawned in background with ID: %s. You can monitor its output using 'task_status' or kill it using 'task_kill'. Toggle live stream via Ctrl+O.", id), nil
 	}
 
-	cmd := exec.CommandContext(ctx.Context(), "bash", "-c", args.Command)
+	timeoutCtx, cancel := context.WithTimeout(ctx.Context(), 120*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", args.Command)
 	cmd.Dir = ctx.GetWorkspaceRoot()
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C.UTF-8")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+
+	// If the command timed out
+	if timeoutCtx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("command timed out after 120 seconds. If this is a server or long-running process, use 'background: true'")
+	}
 
 	// SanitizeUTF8 helper is in file.go, which is in the same package (tool), so it can be called directly!
 	output := SanitizeUTF8(stdout.Bytes())
@@ -79,6 +89,19 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			combined += "\n"
 		}
 		combined += errOutput
+	}
+
+	lines := strings.Split(combined, "\n")
+	if len(lines) > 200 {
+		var truncatedLines []string
+		truncatedLines = append(truncatedLines, lines[:20]...)
+		truncatedLines = append(truncatedLines, fmt.Sprintf("\n... [ %d lines omitted to save context length ] ...\n", len(lines)-100))
+		truncatedLines = append(truncatedLines, lines[len(lines)-80:]...)
+		combined = strings.Join(truncatedLines, "\n")
+	}
+
+	if len(combined) > 50000 {
+		combined = combined[:25000] + "\n... [ output too large, truncated middle ] ...\n" + combined[len(combined)-25000:]
 	}
 
 	if err != nil {

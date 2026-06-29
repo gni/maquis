@@ -48,6 +48,12 @@ func ParseFrontmatter(content string) (map[string]string, string) {
 
 func LoadSkills(skillsDir string) ([]Skill, error) {
 	var skills []Skill
+	
+	if strings.HasPrefix(skillsDir, "~/") {
+		homeDir, _ := os.UserHomeDir()
+		skillsDir = filepath.Join(homeDir, skillsDir[2:])
+	}
+	
 	if _, err := os.Stat(skillsDir); os.IsNotExist(err) {
 		return skills, nil
 	}
@@ -180,7 +186,7 @@ func (a *Agent) GetSystemPrompt() string {
 			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n"+
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n"+
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n"+
-			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n"+
+			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n"+
 			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n"+
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.",
 			strings.Join(activeAgents, ", "))
@@ -190,7 +196,7 @@ func (a *Agent) GetSystemPrompt() string {
 			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n" +
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n" +
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n" +
-			"- You can terminate any running subagent by calling the 'kill_subagent' tool with its name.\n" +
+			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n" +
 			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n" +
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate."
 	}

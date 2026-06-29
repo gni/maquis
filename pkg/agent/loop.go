@@ -285,15 +285,41 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		sr.Flush()
 		stopTicker()
 
-		if err := <-streamErrChan; err != nil {
+		streamErr := <-streamErrChan
+
+		var globalPromptTokens, globalCompletionTokens int
+		if assistantMsg != nil {
+			totalCompletionTokens += assistantMsg.CompletionTokens
+			totalPromptTokens += assistantMsg.PromptTokens
+			totalApiDuration += a.lastGenerationDuration
+
+			assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
+			*messages = append(*messages, *assistantMsg)
+			if sessionID != "" {
+				go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+			}
+
+			globalPromptTokens, globalCompletionTokens = a.GetGlobalTokens(*messages, allowlist)
+
+			if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
+				a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
+			}
+		}
+
+		if streamErr != nil {
+			if !isNonInteractive {
+				fmt.Fprintln(writerToUse)
+				cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
+				fmt.Fprintln(writerToUse, cancelStyle.Render("[Operation Cancelled]"))
+			}
 			if ctx.Err() == nil {
 				if isNonInteractive {
 					errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-					fmt.Fprintf(ncw, "\n%s %v\n", errStyle.Render("Error during generation:"), err)
+					fmt.Fprintf(ncw, "\n%s %v\n", errStyle.Render("Error during generation:"), streamErr)
 				} else {
 					*messages = append(*messages, db.Message{
 						Role:    "error",
-						Content: err.Error(),
+						Content: streamErr.Error(),
 					})
 				}
 			}
@@ -304,21 +330,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			return
 		}
 
-		totalCompletionTokens += assistantMsg.CompletionTokens
-		totalPromptTokens += assistantMsg.PromptTokens
-		totalApiDuration += a.lastGenerationDuration
 
-		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
-		*messages = append(*messages, *assistantMsg)
-		if sessionID != "" {
-			go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
-		}
-
-		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
-
-		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
-			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
-		}
 
 		var finalTps float64
 		if a.lastGenerationDuration > 0 {

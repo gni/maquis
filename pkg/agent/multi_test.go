@@ -163,7 +163,7 @@ func TestMultiAgentPersistence(t *testing.T) {
 	}
 
 	// Test deletion on Kill
-	err = mam2.KillAgent("sub_agent")
+	err = mam2.RemoveAgent("sub_agent")
 	if err != nil {
 		t.Fatalf("failed to kill subagent: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestMultiAgentToolRegistration(t *testing.T) {
 	}
 
 	// Kill agent and verify tool is unregistered
-	err = mam.KillAgent("bob")
+	err = mam.RemoveAgent("bob")
 	if err != nil {
 		t.Fatalf("failed to kill bob: %v", err)
 	}

@@ -16,8 +16,14 @@ import (
 //go:embed config/config.json
 var defaultTemplate []byte
 
+//go:embed config/providers.json
+var defaultProvidersTemplate []byte
+
+//go:embed config/mcp.json
+var defaultMCPTemplate []byte
+
 func main() {
-	config.SetDefaultTemplate(defaultTemplate)
+	config.SetDefaultTemplate(defaultTemplate, defaultProvidersTemplate, defaultMCPTemplate)
 
 	// Restore cursor on startup in case a previous crashed run left it hidden
 	fmt.Fprint(os.Stderr, "\x1b[?25h")

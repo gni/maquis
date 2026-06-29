@@ -40,7 +40,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 		"/config ",
 		"/config show",
 		"/config set ",
-		"/rewind",
+		"/clear",
 		"/skills",
 		"/skills load ",
 		"/session ",
@@ -54,6 +54,11 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 		"/exit",
 		"/quit",
 		"/mcp",
+		"/task ",
+		"/task list",
+		"/task view ",
+		"/task stream ",
+		"/task kill ",
 		"/toggle",
 		"/collapse",
 		"/expand",
@@ -712,35 +717,18 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			}
 
 			lines := strings.Split(ki.pastedText, "\n")
-			physicalRowsNeeded := 0
-			firstLineIdx := 0
+			newlinesCount := len(lines) - 1
 
-			for i := len(lines) - 1; i >= 0; i-- {
-				l := len(stripAnsi(lines[i]))
-				if i == 0 {
-					l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
-				}
-				rows := (l + width - 1) / width
-				if l == 0 {
-					rows = 1
-				}
+			if newlinesCount > 50 {
+				getUI().PasteCounter++
+				prefix := fmt.Sprintf("\x1b[90m[Pasted text #%d (+%d lines)]\x1b[0m", getUI().PasteCounter, newlinesCount)
+				lines = []string{prefix}
+				getUI().PasteLinesOffset = 0
+			} else {
+				physicalRowsNeeded := 0
+				firstLineIdx := 0
 
-				if physicalRowsNeeded+rows > maxPasteLines && i != len(lines)-1 {
-					firstLineIdx = i + 1
-					break
-				}
-				physicalRowsNeeded += rows
-			}
-
-			if firstLineIdx > 0 {
-				lines = lines[firstLineIdx:]
-				hidden := firstLineIdx
-				prefix := fmt.Sprintf("\x1b[90m... (%d lines hidden) ...\x1b[0m ", hidden)
-				lines[0] = prefix + lines[0]
-
-				// re-evaluate physical rows
-				physicalRowsNeeded = 0
-				for i := 0; i < len(lines); i++ {
+				for i := len(lines) - 1; i >= 0; i-- {
 					l := len(stripAnsi(lines[i]))
 					if i == 0 {
 						l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
@@ -749,13 +737,39 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 					if l == 0 {
 						rows = 1
 					}
+
+					if physicalRowsNeeded+rows > maxPasteLines && i != len(lines)-1 {
+						firstLineIdx = i + 1
+						break
+					}
 					physicalRowsNeeded += rows
 				}
-			}
 
-			getUI().PasteLinesOffset = physicalRowsNeeded - 1
-			if getUI().PasteLinesOffset < 0 {
-				getUI().PasteLinesOffset = 0
+				if firstLineIdx > 0 {
+					lines = lines[firstLineIdx:]
+					hidden := firstLineIdx
+					prefix := fmt.Sprintf("\x1b[90m... (%d lines hidden) ...\x1b[0m ", hidden)
+					lines[0] = prefix + lines[0]
+
+					// re-evaluate physical rows
+					physicalRowsNeeded = 0
+					for i := 0; i < len(lines); i++ {
+						l := len(stripAnsi(lines[i]))
+						if i == 0 {
+							l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
+						}
+						rows := (l + width - 1) / width
+						if l == 0 {
+							rows = 1
+						}
+						physicalRowsNeeded += rows
+					}
+				}
+
+				getUI().PasteLinesOffset = physicalRowsNeeded - 1
+				if getUI().PasteLinesOffset < 0 {
+					getUI().PasteLinesOffset = 0
+				}
 			}
 
 			visualPastedText := strings.Join(lines, "\n")
@@ -1362,7 +1376,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					needsRedraw := currActiveAgent != prevActiveAgent ||
 						currentSessionID != prevSessionID ||
 						cmdName == "/collapse" || cmdName == "/expand" || cmdName == "/toggle" ||
-						cmdName == "/rewind" ||
+						cmdName == "/clear" || cmdName == "/rewind" ||
 						(cmdName == "/config" && len(parts) == 1) ||
 						(cmdName == "/session" && (len(parts) == 1 || (len(parts) > 1 && parts[1] == "explorer"))) ||
 						(cmdName == "/agent" && len(parts) == 1)
@@ -1535,7 +1549,7 @@ func isMutatingOrInteractiveSlashCommand(line string) bool {
 			return true
 		}
 	}
-	if cmdName == "/rewind" {
+	if cmdName == "/clear" || cmdName == "/rewind" {
 		return true
 	}
 	return false

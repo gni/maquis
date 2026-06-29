@@ -146,6 +146,16 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	totalChars := 0
 
 	for _, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			var validTCs []db.ToolCall
+			for _, tc := range msg.ToolCalls {
+				var dummy map[string]interface{}
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &dummy); err == nil {
+					validTCs = append(validTCs, tc)
+				}
+			}
+			msg.ToolCalls = validTCs
+		}
 		if msg.Role == "assistant" && msg.Content == "" && len(msg.ToolCalls) == 0 {
 			continue
 		}
@@ -305,7 +315,57 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			// Build partial message before returning
+			if streamBuffer != "" {
+				if inThoughtMode {
+					reasoningBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+				} else {
+					textBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+				}
+				streamBuffer = ""
+			}
+			
+			if promptTokens == 0 {
+				promptTokens = 1 // Prevent div by zero
+			}
+			if completionTokens == 0 {
+				completionTokens = (len(textBuilder.String()) + len(reasoningBuilder.String())) / 4
+				if completionTokens == 0 {
+					completionTokens = 1
+				}
+			}
+
+			partialMsg := &db.Message{
+				Role:             "assistant",
+				Content:          textBuilder.String(),
+				ReasoningContent: reasoningBuilder.String(),
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+			}
+			
+			// Append tool calls to partial msg
+			if len(toolCallsMap) > 0 {
+				maxIdx := -1
+				for idx := range toolCallsMap {
+					if idx > maxIdx {
+						maxIdx = idx
+					}
+				}
+				for i := 0; i <= maxIdx; i++ {
+					if tc, ok := toolCallsMap[i]; ok {
+						partialMsg.ToolCalls = append(partialMsg.ToolCalls, *tc)
+					}
+				}
+			} else {
+				fallbackCalls := ParseFallbackToolCalls(partialMsg.Content)
+				if len(fallbackCalls) > 0 {
+					partialMsg.ToolCalls = fallbackCalls
+				}
+			}
+
+			return partialMsg, ctx.Err()
 		default:
 		}
 
@@ -313,6 +373,51 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		if err != nil {
 			if err == io.EOF {
 				break
+			}
+			if ctx.Err() != nil {
+				// Context cancelled while reading, return partial message
+				if streamBuffer != "" {
+					if inThoughtMode {
+						reasoningBuilder.WriteString(streamBuffer)
+						chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+					} else {
+						textBuilder.WriteString(streamBuffer)
+						chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+					}
+					streamBuffer = ""
+				}
+				
+				if promptTokens == 0 { promptTokens = 1 }
+				if completionTokens == 0 {
+					completionTokens = (len(textBuilder.String()) + len(reasoningBuilder.String())) / 4
+					if completionTokens == 0 { completionTokens = 1 }
+				}
+
+				partialMsg := &db.Message{
+					Role:             "assistant",
+					Content:          textBuilder.String(),
+					ReasoningContent: reasoningBuilder.String(),
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+				}
+				
+				if len(toolCallsMap) > 0 {
+					maxIdx := -1
+					for idx := range toolCallsMap {
+						if idx > maxIdx { maxIdx = idx }
+					}
+					for i := 0; i <= maxIdx; i++ {
+						if tc, ok := toolCallsMap[i]; ok {
+							partialMsg.ToolCalls = append(partialMsg.ToolCalls, *tc)
+						}
+					}
+				} else {
+					fallbackCalls := ParseFallbackToolCalls(partialMsg.Content)
+					if len(fallbackCalls) > 0 {
+						partialMsg.ToolCalls = fallbackCalls
+					}
+				}
+				return partialMsg, ctx.Err()
 			}
 			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
@@ -434,6 +539,17 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		}
 
 		if len(choice.Delta.ToolCalls) > 0 {
+			if streamBuffer != "" {
+				if inThoughtMode {
+					reasoningBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+				} else {
+					textBuilder.WriteString(streamBuffer)
+					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+				}
+				streamBuffer = ""
+			}
+
 			for _, tc := range choice.Delta.ToolCalls {
 				idx := 0
 				if tc.Index != nil {

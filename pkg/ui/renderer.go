@@ -265,6 +265,13 @@ func (sr *StreamRenderer) flushLocked() {
 			fmt.Fprint(sr.w, sr.parser.outputBuf.String())
 			sr.parser.outputBuf.Reset()
 		}
+		if sr.parser.lineBuffer.Len() > 0 {
+			lang := sr.parser.guessedLang
+			if lang == "" { lang = "plaintext" }
+			_ = HighlightWithoutTrailingNewline(sr.w, sr.parser.lineBuffer.String(), lang, sr.theme.ChromaStyle)
+			fmt.Fprint(sr.w, "\n")
+			sr.parser.lineBuffer.Reset()
+		}
 	}
 
 	if sr.inCodeBlock {

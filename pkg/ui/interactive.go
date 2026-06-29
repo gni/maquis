@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -164,66 +163,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 
 	var items []*settingItem
 	items = []*settingItem{
-		{
-			id:          "active_provider",
-			name:        "active provider",
-			value:       func() string {
-				if cloned.ActiveProvider == "" {
-					return "none (default)"
-				}
-				return cloned.ActiveProvider
-			},
-			description: "Currently active endpoint provider profile",
-			onToggle: func() {
-				var keys []string
-				keys = append(keys, "")
-				for k := range cloned.Providers {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys[1:])
-
-				idx := 0
-				for i, k := range keys {
-					if cloned.ActiveProvider == k {
-						idx = i
-						break
-					}
-				}
-				nextIdx := (idx + 1) % len(keys)
-				cloned.ActiveProvider = keys[nextIdx]
-				if cloned.ActiveProvider != "" {
-					cloned.SyncActiveProvider()
-				}
-			},
-		},
-		{
-			id:          "endpoint",
-			name:        "endpoint url",
-			value:       func() string { return cloned.Endpoint },
-			description: "API endpoint URL for the LLM service",
-			onEdit: func(newVal string) error {
-				if newVal == "" {
-					return nil
-				}
-				cloned.Endpoint = newVal
-				cloned.UpdateActiveProvider()
-				return nil
-			},
-		},
-		{
-			id:          "model",
-			name:        "model name",
-			value:       func() string { return cloned.Model },
-			description: "Name of the LLM model to use",
-			onEdit: func(newVal string) error {
-				if newVal == "" {
-					return nil
-				}
-				cloned.Model = newVal
-				cloned.UpdateActiveProvider()
-				return nil
-			},
-		},
 		{
 			id:          "temperature",
 			name:        "temperature",
@@ -1005,7 +944,7 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 
 					confirm, errInput := sr.ReadLine(rlOutput)
 					if errInput == nil && (strings.HasPrefix(strings.ToLower(strings.TrimSpace(confirm)), "y")) {
-						errKill := mam.KillAgent(selectedName)
+						errKill := mam.RemoveAgent(selectedName)
 						fmt.Fprint(rlOutput, "\x1b[H\x1b[2J")
 						if errKill != nil {
 							fmt.Fprintf(rlOutput, "Error terminating agent: %v\r\n\r\nPress enter to continue...", errKill)

@@ -122,10 +122,10 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewExploreTool())
 
 	// Only register local executable plugins from the "plugins" directory in the workspace
-
-	// 2. Register local executable plugins from the "plugins" directory in the workspace
-	pluginsDir := filepath.Join(absWorkspace, "plugins")
-	_ = tool.RegisterPlugins(a.Registry, pluginsDir)
+	if !a.Config.DisableLocalPlugins {
+		pluginsDir := filepath.Join(absWorkspace, "plugins")
+		_ = tool.RegisterPlugins(a.Registry, pluginsDir)
+	}
 
 	return a
 }
@@ -160,10 +160,14 @@ func (a *Agent) ReloadSkills() []tool.Skill {
 }
 
 func (a *Agent) ReloadPlugins() error {
+	if a.Config.DisableLocalPlugins {
+		return fmt.Errorf("local plugins are disabled for this workspace (run with trust to enable)")
+	}
+
+	// Clear all existing plugins (tools prefixed with "plugin__")
 	a.Registry.UnregisterPrefix("plugin__")
 
-
-
+	// Re-register local plugins from the workspace
 	pluginsDir := filepath.Join(a.WorkspaceRoot, "plugins")
 	return tool.RegisterPlugins(a.Registry, pluginsDir)
 }
