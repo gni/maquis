@@ -231,7 +231,7 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 
 				if msg.Role == "user" {
 					writer := w
-					if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
+					if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 						writer = ma.BaseAgent.CurrentWriter
 					}
 					fmt.Fprintf(writer, "\n%s [%s] received task from %s: %s\n",
@@ -302,7 +302,7 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 
 func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.UITheme) (db.Message, error) {
 	writer := w
-	if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
+	if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 		writer = ma.BaseAgent.CurrentWriter
 	}
 	rawW := unwrapWriter(writer)
@@ -316,7 +316,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 	var spinnerDone chan struct{}
 	var pauseThinkingSpinner chan bool
 
-	if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+	if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 		stopSpinner = make(chan struct{})
 		spinnerDone = make(chan struct{})
 		pauseThinkingSpinner = make(chan bool, 1)
@@ -380,7 +380,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		if ctx.Err() != nil {
 			return db.Message{}, ctx.Err()
 		}
-		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			ma.BaseAgent.UI.SetCursorHidden(true)
 		}
 		ma.HistoryMu.RLock()
@@ -402,7 +402,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			close(chunkChan)
 		}()
 
-		if ma.BaseAgent != nil {
+		if ma.Parent == nil && ma.BaseAgent != nil {
 			ma.BaseAgent.CurrentStreamMu.Lock()
 			ma.BaseAgent.CurrentStreamBuffer = new(bytes.Buffer)
 			ma.BaseAgent.CurrentStreamMu.Unlock()
@@ -411,7 +411,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		}
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
-		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, ma.BaseAgent.Config.ShowThinking, ma.BaseAgent.Config.StreamWrites, ma.Name)
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
@@ -462,7 +462,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 
 			now := time.Now()
-			if now.Sub(lastDraw) >= 100*time.Millisecond && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+			if ma.Parent == nil && now.Sub(lastDraw) >= 100*time.Millisecond && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 				elapsed := now.Sub(subagentGenStart).Seconds()
 				var tps float64
 				if elapsed > 0 {
@@ -482,11 +482,11 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 		}
 		sr.Flush()
-		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			ma.BaseAgent.UI.SetCursorHidden(false)
 		}
 
-		if ma.BaseAgent != nil && !subagentGenStart.IsZero() {
+		if ma.Parent == nil && ma.BaseAgent != nil && !subagentGenStart.IsZero() {
 			elapsed := time.Since(subagentGenStart).Seconds()
 			var finalTps float64
 			if elapsed > 0 {
@@ -503,7 +503,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
 		}
 		
-		if ma.BaseAgent != nil {
+		if ma.Parent == nil && ma.BaseAgent != nil {
 			ma.BaseAgent.CurrentStreamMu.Lock()
 			ma.BaseAgent.CurrentStreamBuffer = nil
 			ma.BaseAgent.CurrentStreamMu.Unlock()
