@@ -1544,20 +1544,8 @@ func parseManualCommand(line string, enabled bool) (bool, string) {
 
 	firstWord := parts[0]
 	directCommands := map[string]bool{
-		"ls":    true,
-		"pwd":   true,
-		"git":   true,
-		"cat":   true,
-		"cd":    true,
-		"mkdir": true,
-		"touch": true,
-		"rm":    true,
-		"mv":    true,
-		"cp":    true,
-		"grep":  true,
-		"find":  true,
-		"chmod": true,
-		"make":  true,
+		"ls": true,
+		"cd": true,
 	}
 
 	if directCommands[firstWord] {

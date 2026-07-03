@@ -103,8 +103,29 @@ func (sr *StreamRenderer) HasOutput() bool {
 }
 
 func (sr *StreamRenderer) printReasoningLine(line string) {
+	trimmed := strings.TrimSpace(line)
 	dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 	startSeq, resetSeq := dimStyle.GetSequence()
+
+	// 1. Handle blockquotes: e.g. "> text"
+	if strings.HasPrefix(trimmed, ">") {
+		quoteText := strings.TrimSpace(trimmed[1:])
+		rendered := sr.renderInlineMarkdown(quoteText)
+		styled := dimStyle.Render("┃ " + rendered)
+		fmt.Fprint(sr.w, styled)
+		return
+	}
+
+	// 2. Handle bullet points: e.g. "- item" or "* item"
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "• ") {
+		bulletText := trimmed[2:]
+		bulletSymbol := style.NewStyle().Foreground(sr.theme.Border).Render("•")
+		rendered := sr.renderInlineMarkdown(bulletText)
+		fmt.Fprintf(sr.w, "  %s %s%s", bulletSymbol, startSeq, rendered+resetSeq)
+		return
+	}
+
+	// 3. Standard text line: parse inline styles (bold, code, italic)
 	rendered := sr.renderInlineMarkdown(line)
 	fmt.Fprint(sr.w, startSeq+rendered+resetSeq)
 }

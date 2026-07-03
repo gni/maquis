@@ -29,17 +29,20 @@ func TestParseManualCommand(t *testing.T) {
 		// Direct commands enabled
 		{"ls", true, true, "ls"},
 		{"ls -la", true, true, "ls -la"},
-		{"pwd", true, true, "pwd"},
-		{"git status", true, true, "git status"},
+		{"cd", true, true, "cd"},
+		{"cd ..", true, true, "cd .."},
+		{"pwd", true, false, ""},
+		{"git status", true, false, ""},
 
 		// Non-direct commands in new rule
 		{"go build", true, false, ""},
 		{"go run main.go", true, false, ""},
-		{"mkdir src", true, true, "mkdir src"},
-		{"find .", true, true, "find ."},
+		{"mkdir src", true, false, ""},
+		{"find .", true, false, ""},
 
 		// Direct commands disabled
 		{"ls", false, false, ""},
+		{"cd", false, false, ""},
 		{"pwd", false, false, ""},
 		{"git status", false, false, ""},
 
