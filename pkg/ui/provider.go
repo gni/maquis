@@ -315,7 +315,16 @@ func RunInteractiveProviderConfig(
 			items = append(items, &settingItem{
 				id:          "prov_key_" + pName,
 				name:        "  api key",
-				value:       func() string { return cfgProv.ApiKey },
+				value: func() string {
+					key := cfgProv.ApiKey
+					if key == "" {
+						return "(not set)"
+					}
+					if len(key) <= 8 {
+						return "********"
+					}
+					return key[:4] + "..." + key[len(key)-4:] + " (masked)"
+				},
 				description: fmt.Sprintf("API Key credential for '%s'", pName),
 				onEdit: func(newVal string) error {
 					curr := cloned.Providers[pName]

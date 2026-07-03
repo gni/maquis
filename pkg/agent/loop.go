@@ -192,7 +192,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		a.CurrentStreamBuffer = new(bytes.Buffer)
 		a.CurrentStreamMu.Unlock()
 		
-		teeWriter := io.MultiWriter(writerToUse, a.CurrentStreamBuffer)
+		teeWriter := &customTeeWriter{screen: writerToUse, buffer: a.CurrentStreamBuffer}
 		ncw := &newlineCounterWriter{Writer: teeWriter}
 		var sr StreamRenderer
 		if a.UI != nil {
@@ -695,4 +695,21 @@ func getTerminalSize() (int, int) {
 		return w, h
 	}
 	return 80, 24
+}
+
+type customTeeWriter struct {
+	screen io.Writer
+	buffer io.Writer
+}
+
+func (c *customTeeWriter) Write(p []byte) (n int, err error) {
+	n, err = c.screen.Write(p)
+	if err == nil {
+		_, _ = c.buffer.Write(p)
+	}
+	return n, err
+}
+
+func (c *customTeeWriter) Unwrap() io.Writer {
+	return c.screen
 }

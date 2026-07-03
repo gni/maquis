@@ -103,31 +103,8 @@ func (sr *StreamRenderer) HasOutput() bool {
 }
 
 func (sr *StreamRenderer) printReasoningLine(line string) {
-	trimmed := strings.TrimSpace(line)
 	dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
-	startSeq, resetSeq := dimStyle.GetSequence()
-
-	// 1. Handle blockquotes: e.g. "> text"
-	if strings.HasPrefix(trimmed, ">") {
-		quoteText := strings.TrimSpace(trimmed[1:])
-		rendered := sr.renderInlineMarkdown(quoteText)
-		styled := dimStyle.Render("┃ " + rendered)
-		fmt.Fprint(sr.w, styled)
-		return
-	}
-
-	// 2. Handle bullet points: e.g. "- item" or "* item"
-	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "• ") {
-		bulletText := trimmed[2:]
-		bulletSymbol := style.NewStyle().Foreground(sr.theme.Border).Render("•")
-		rendered := sr.renderInlineMarkdown(bulletText)
-		fmt.Fprintf(sr.w, "  %s %s%s", bulletSymbol, startSeq, rendered+resetSeq)
-		return
-	}
-
-	// 3. Standard text line: parse inline styles (bold, code, italic)
-	rendered := sr.renderInlineMarkdown(line)
-	fmt.Fprint(sr.w, startSeq+rendered+resetSeq)
+	fmt.Fprint(sr.w, dimStyle.Render(line))
 }
 
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
@@ -162,25 +139,93 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 			line := sr.reasoningLineBuffer.String()
 			sr.reasoningLineBuffer.Reset()
 
-			ppw := findPromptPreservingWriter(sr.w)
-			if ppw != nil && sr.hasReasoningLineStart {
-				scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
-				adjustedLine := sr.reasoningLineStartLine - scrollDelta
-				if adjustedLine < 1 {
-					adjustedLine = 1
-				}
-				if ppw.GetPrintLine() == adjustedLine {
-					clearScrollRegionLines(ppw, adjustedLine, sr.w)
-					ppw.SetPrintLine(adjustedLine)
-					ppw.SetPrintCol(sr.reasoningLineStartCol)
-					sr.printReasoningLine(line)
-					fmt.Fprint(sr.w, "\n")
+			trimmed := strings.TrimSpace(line)
+			if sr.inCodeBlock {
+				if strings.HasPrefix(trimmed, "```") {
+					sr.inCodeBlock = false
 				} else {
-					fmt.Fprint(sr.w, "\n")
+					ppw := findPromptPreservingWriter(sr.w)
+					if ppw != nil && sr.hasReasoningLineStart {
+						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
+						adjustedLine := sr.reasoningLineStartLine - scrollDelta
+						if adjustedLine < 1 {
+							adjustedLine = 1
+						}
+						if ppw.GetPrintLine() == adjustedLine {
+							clearScrollRegionLines(ppw, adjustedLine, sr.w)
+							ppw.SetPrintLine(adjustedLine)
+							ppw.SetPrintCol(sr.reasoningLineStartCol)
+							fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render("  "+line))
+							fmt.Fprint(sr.w, "\n")
+						} else {
+							fmt.Fprint(sr.w, "\n")
+						}
+					} else {
+						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render("  "+line))
+						fmt.Fprint(sr.w, "\n")
+					}
 				}
 			} else {
-				sr.printReasoningLine(line)
-				fmt.Fprint(sr.w, "\n")
+				if strings.HasPrefix(trimmed, "```") {
+					ppw := findPromptPreservingWriter(sr.w)
+					if ppw != nil && sr.hasReasoningLineStart {
+						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
+						adjustedLine := sr.reasoningLineStartLine - scrollDelta
+						if adjustedLine < 1 {
+							adjustedLine = 1
+						}
+						if ppw.GetPrintLine() == adjustedLine {
+							clearScrollRegionLines(ppw, adjustedLine, sr.w)
+							ppw.SetPrintLine(adjustedLine)
+							ppw.SetPrintCol(sr.reasoningLineStartCol)
+						}
+					}
+					sr.inCodeBlock = true
+				} else {
+					ppw := findPromptPreservingWriter(sr.w)
+					if ppw != nil && sr.hasReasoningLineStart {
+						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
+						adjustedLine := sr.reasoningLineStartLine - scrollDelta
+						if adjustedLine < 1 {
+							adjustedLine = 1
+						}
+						if ppw.GetPrintLine() == adjustedLine {
+							clearScrollRegionLines(ppw, adjustedLine, sr.w)
+							ppw.SetPrintLine(adjustedLine)
+							ppw.SetPrintCol(sr.reasoningLineStartCol)
+							
+							termW, _ := getTerminalSize()
+							wrapLimit := termW - sr.reasoningLineStartCol - 1
+							if wrapLimit < 20 {
+								wrapLimit = 20
+							}
+							wrapped := wrapMarkdownLine(line, wrapLimit)
+							for idx, wl := range wrapped {
+								sr.printReasoningLine(wl)
+								if idx < len(wrapped)-1 {
+									fmt.Fprint(sr.w, "\n")
+								}
+							}
+							fmt.Fprint(sr.w, "\n")
+						} else {
+							fmt.Fprint(sr.w, "\n")
+						}
+					} else {
+						termW, _ := getTerminalSize()
+						wrapLimit := termW - 5
+						if wrapLimit < 20 {
+							wrapLimit = 20
+						}
+						wrapped := wrapMarkdownLine(line, wrapLimit)
+						for idx, wl := range wrapped {
+							sr.printReasoningLine(wl)
+							if idx < len(wrapped)-1 {
+								fmt.Fprint(sr.w, "\n")
+							}
+						}
+						fmt.Fprint(sr.w, "\n")
+					}
+				}
 			}
 			sr.hasReasoningLineStart = false
 		} else {
@@ -192,6 +237,10 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 					sr.reasoningLineStartScroll = ppw.GetScrollCount()
 					sr.hasReasoningLineStart = true
 				}
+			}
+			if sr.inCodeBlock {
+				fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render(string(char)))
+			} else {
 				fmt.Fprint(sr.w, string(char))
 			}
 			sr.reasoningLineBuffer.WriteRune(char)
@@ -222,10 +271,33 @@ func (sr *StreamRenderer) endThinking() {
 					clearScrollRegionLines(ppw, adjustedLine, sr.w)
 					ppw.SetPrintLine(adjustedLine)
 					ppw.SetPrintCol(sr.reasoningLineStartCol)
-					sr.printReasoningLine(rem)
+					
+					termW, _ := getTerminalSize()
+					wrapLimit := termW - sr.reasoningLineStartCol - 1
+					if wrapLimit < 20 {
+						wrapLimit = 20
+					}
+					wrapped := wrapMarkdownLine(rem, wrapLimit)
+					for idx, wl := range wrapped {
+						sr.printReasoningLine(wl)
+						if idx < len(wrapped)-1 {
+							fmt.Fprint(sr.w, "\n")
+						}
+					}
 				}
 			} else {
-				sr.printReasoningLine(rem)
+				termW, _ := getTerminalSize()
+				wrapLimit := termW - 5
+				if wrapLimit < 20 {
+					wrapLimit = 20
+				}
+				wrapped := wrapMarkdownLine(rem, wrapLimit)
+				for idx, wl := range wrapped {
+					sr.printReasoningLine(wl)
+					if idx < len(wrapped)-1 {
+						fmt.Fprint(sr.w, "\n")
+					}
+				}
 			}
 			sr.reasoningLineBuffer.Reset()
 		}
@@ -323,13 +395,36 @@ func (sr *StreamRenderer) Write(chunk string) {
 							clearScrollRegionLines(ppw, adjustedLine, sr.w)
 							ppw.SetPrintLine(adjustedLine)
 							ppw.SetPrintCol(sr.lineStartCol)
-							sr.printNormalLine(line)
+							
+							termW, _ := getTerminalSize()
+							wrapLimit := termW - sr.lineStartCol - 1
+							if wrapLimit < 20 {
+								wrapLimit = 20
+							}
+							wrapped := wrapMarkdownLine(line, wrapLimit)
+							for idx, wl := range wrapped {
+								sr.printNormalLine(wl)
+								if idx < len(wrapped)-1 {
+									fmt.Fprint(sr.w, "\n")
+								}
+							}
 							fmt.Fprint(sr.w, "\n")
 						} else {
 							fmt.Fprint(sr.w, "\n")
 						}
 					} else {
-						sr.printNormalLine(line)
+						termW, _ := getTerminalSize()
+						wrapLimit := termW - 5
+						if wrapLimit < 20 {
+							wrapLimit = 20
+						}
+						wrapped := wrapMarkdownLine(line, wrapLimit)
+						for idx, wl := range wrapped {
+							sr.printNormalLine(wl)
+							if idx < len(wrapped)-1 {
+								fmt.Fprint(sr.w, "\n")
+							}
+						}
 						fmt.Fprint(sr.w, "\n")
 					}
 				}
@@ -343,8 +438,8 @@ func (sr *StreamRenderer) Write(chunk string) {
 						sr.lineStartScroll = ppw.GetScrollCount()
 						sr.hasLineStart = true
 					}
-					fmt.Fprint(sr.w, string(char))
 				}
+				fmt.Fprint(sr.w, string(char))
 				sr.lineBuffer.WriteRune(char)
 			}
 		}
@@ -403,10 +498,33 @@ func (sr *StreamRenderer) flushLocked() {
 				clearScrollRegionLines(ppw, adjustedLine, sr.w)
 				ppw.SetPrintLine(adjustedLine)
 				ppw.SetPrintCol(sr.lineStartCol)
-				sr.printNormalLine(rem)
+				
+				termW, _ := getTerminalSize()
+				wrapLimit := termW - sr.lineStartCol - 1
+				if wrapLimit < 20 {
+					wrapLimit = 20
+				}
+				wrapped := wrapMarkdownLine(rem, wrapLimit)
+				for idx, wl := range wrapped {
+					sr.printNormalLine(wl)
+					if idx < len(wrapped)-1 {
+						fmt.Fprint(sr.w, "\n")
+					}
+				}
 			}
 		} else {
-			sr.printNormalLine(rem)
+			termW, _ := getTerminalSize()
+			wrapLimit := termW - 5
+			if wrapLimit < 20 {
+				wrapLimit = 20
+			}
+			wrapped := wrapMarkdownLine(rem, wrapLimit)
+			for idx, wl := range wrapped {
+				sr.printNormalLine(wl)
+				if idx < len(wrapped)-1 {
+					fmt.Fprint(sr.w, "\n")
+				}
+			}
 		}
 		sr.lineBuffer.Reset()
 		sr.lastEndedWithNewline = strings.HasSuffix(rem, "\n")
@@ -458,6 +576,13 @@ func (sr *StreamRenderer) printNormalLine(line string) {
 		bulletText := trimmed[2:]
 		bulletSymbol := style.NewStyle().Foreground(sr.theme.Primary).Render("•")
 		fmt.Fprintf(sr.w, "  %s %s", bulletSymbol, sr.renderInlineMarkdown(bulletText))
+		return
+	}
+
+	// 3.5 Handle numbered lists: e.g. "1. item"
+	if ok, numPrefix, listText := isNumberedList(trimmed); ok {
+		numSymbol := style.NewStyle().Foreground(sr.theme.Primary).Render(numPrefix)
+		fmt.Fprintf(sr.w, "  %s %s", numSymbol, sr.renderInlineMarkdown(listText))
 		return
 	}
 
@@ -637,4 +762,93 @@ func (sr *StreamRenderer) GetReasoningDuration() float64 {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	return sr.reasoningDuration
+}
+
+func isNumberedList(trimmed string) (bool, string, string) {
+	if len(trimmed) < 3 {
+		return false, "", ""
+	}
+	spIdx := strings.Index(trimmed, " ")
+	if spIdx == -1 {
+		return false, "", ""
+	}
+	prefix := trimmed[:spIdx]
+	if len(prefix) < 2 || !strings.HasSuffix(prefix, ".") {
+		return false, "", ""
+	}
+	numPart := prefix[:len(prefix)-1]
+	for _, r := range numPart {
+		if r < '0' || r > '9' {
+			return false, "", ""
+		}
+	}
+	return true, prefix, trimmed[spIdx+1:]
+}
+
+func wrapMarkdownLine(line string, width int) []string {
+	if width <= 10 {
+		return []string{line}
+	}
+	trimmed := strings.TrimSpace(line)
+	var prefix string
+	var content string
+
+	if strings.HasPrefix(trimmed, ">") {
+		prefix = "> "
+		content = strings.TrimSpace(trimmed[1:])
+	} else if strings.HasPrefix(trimmed, "- ") {
+		prefix = "- "
+		content = trimmed[2:]
+	} else if strings.HasPrefix(trimmed, "* ") {
+		prefix = "* "
+		content = trimmed[2:]
+	} else if strings.HasPrefix(trimmed, "• ") {
+		prefix = "• "
+		content = trimmed[2:]
+	} else if ok, numPrefix, listText := isNumberedList(trimmed); ok {
+		prefix = numPrefix + " "
+		content = listText
+	} else {
+		content = line
+	}
+
+	var leadingSpaces string
+	if prefix == "" {
+		for _, r := range line {
+			if r == ' ' {
+				leadingSpaces += " "
+			} else {
+				break
+			}
+		}
+	}
+
+	words := strings.Split(content, " ")
+	var lines []string
+	var currentLine strings.Builder
+
+	effectiveWidth := width - len(prefix) - len(leadingSpaces)
+	if effectiveWidth < 15 {
+		effectiveWidth = 15
+	}
+
+	for _, word := range words {
+		if currentLine.Len() == 0 {
+			currentLine.WriteString(word)
+		} else if currentLine.Len()+1+len(word) <= effectiveWidth {
+			currentLine.WriteByte(' ')
+			currentLine.WriteString(word)
+		} else {
+			lines = append(lines, prefix+leadingSpaces+currentLine.String())
+			currentLine.Reset()
+			currentLine.WriteString(word)
+		}
+	}
+	if currentLine.Len() > 0 {
+		lines = append(lines, prefix+leadingSpaces+currentLine.String())
+	}
+	if len(lines) == 0 {
+		lines = append(lines, line)
+	}
+	return lines
 }

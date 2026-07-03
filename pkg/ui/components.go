@@ -876,9 +876,37 @@ func renderReasoningMarkdownContent(w io.Writer, content string, theme UITheme) 
 		inThinking: true,
 	}
 	for i, line := range lines {
-		sr.printReasoningLine(line)
-		if i < len(lines)-1 {
-			fmt.Fprintln(w)
+		if sr.inCodeBlock {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") {
+				sr.inCodeBlock = false
+			} else {
+				fmt.Fprint(w, style.NewStyle().Foreground(theme.Border).Italic(true).Render("  "+line))
+				if i < len(lines)-1 {
+					fmt.Fprintln(w)
+				}
+			}
+		} else {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") {
+				sr.inCodeBlock = true
+			} else {
+				termW, _ := getTerminalSize()
+				wrapLimit := termW - 5
+				if wrapLimit < 20 {
+					wrapLimit = 20
+				}
+				wrapped := wrapMarkdownLine(line, wrapLimit)
+				for idx, wl := range wrapped {
+					sr.printReasoningLine(wl)
+					if idx < len(wrapped)-1 {
+						fmt.Fprintln(w)
+					}
+				}
+				if i < len(lines)-1 {
+					fmt.Fprintln(w)
+				}
+			}
 		}
 	}
 }
@@ -905,7 +933,18 @@ func renderMarkdownContent(w io.Writer, content string, theme UITheme) {
 			if strings.HasPrefix(trimmed, "```") {
 				sr.inCodeBlock = true
 			} else {
-				sr.printNormalLine(line)
+				termW, _ := getTerminalSize()
+				wrapLimit := termW - 5
+				if wrapLimit < 20 {
+					wrapLimit = 20
+				}
+				wrapped := wrapMarkdownLine(line, wrapLimit)
+				for idx, wl := range wrapped {
+					sr.printNormalLine(wl)
+					if idx < len(wrapped)-1 {
+						fmt.Fprintln(w)
+					}
+				}
 				if i < len(lines)-1 {
 					fmt.Fprintln(w)
 				}

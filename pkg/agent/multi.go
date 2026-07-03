@@ -231,7 +231,7 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 
 				if msg.Role == "user" {
 					writer := w
-					if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
+					if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 						writer = ma.BaseAgent.CurrentWriter
 					}
 					fmt.Fprintf(writer, "\n%s [%s] received task from %s: %s\n",
@@ -302,7 +302,7 @@ func (ma *MultiAgent) Start(w io.Writer, theme style.UITheme) {
 
 func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.UITheme) (db.Message, error) {
 	writer := w
-	if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
+	if ma.BaseAgent != nil && ma.BaseAgent.CurrentWriter != nil {
 		writer = ma.BaseAgent.CurrentWriter
 	}
 	rawW := unwrapWriter(writer)
@@ -380,7 +380,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		if ctx.Err() != nil {
 			return db.Message{}, ctx.Err()
 		}
-		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			ma.BaseAgent.UI.SetCursorHidden(true)
 		}
 		ma.HistoryMu.RLock()
@@ -402,16 +402,16 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			close(chunkChan)
 		}()
 
-		if ma.Parent == nil && ma.BaseAgent != nil {
+		if ma.BaseAgent != nil {
 			ma.BaseAgent.CurrentStreamMu.Lock()
 			ma.BaseAgent.CurrentStreamBuffer = new(bytes.Buffer)
 			ma.BaseAgent.CurrentStreamMu.Unlock()
-			teeWriter := io.MultiWriter(writer, ma.BaseAgent.CurrentStreamBuffer)
+			teeWriter := &customTeeWriter{screen: writer, buffer: ma.BaseAgent.CurrentStreamBuffer}
 			writer = teeWriter
 		}
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
-		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, ma.BaseAgent.Config.ShowThinking, ma.BaseAgent.Config.StreamWrites, ma.Name)
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
@@ -482,7 +482,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 		}
 		sr.Flush()
-		if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
 			ma.BaseAgent.UI.SetCursorHidden(false)
 		}
 
@@ -503,7 +503,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
 		}
 		
-		if ma.Parent == nil && ma.BaseAgent != nil {
+		if ma.BaseAgent != nil {
 			ma.BaseAgent.CurrentStreamMu.Lock()
 			ma.BaseAgent.CurrentStreamBuffer = nil
 			ma.BaseAgent.CurrentStreamMu.Unlock()
