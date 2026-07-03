@@ -51,7 +51,7 @@ func HandleMCPCommand(
 		}
 
 		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H\x1b[2J")
+		fmt.Fprint(w, "\x1b[H")
 		if len(a.McpStartErrors) > 0 {
 			RenderMCPStartupErrors(w, a.McpStartErrors, theme)
 		}
@@ -261,8 +261,6 @@ func RunInteractiveMCPConfig(
 		cloned.MCPServers = make(map[string]config.MCPServerConfig)
 	}
 
-	searchQuery := ""
-	selectedIdx := 0
 	selectedServer := ""
 
 	// Helper to get first key alphabetically
@@ -280,7 +278,7 @@ func RunInteractiveMCPConfig(
 
 	selectedServer = getFirstServer()
 
-	for {
+	itemsProvider := func() []*settingItem {
 		// Ensure selectedServer is valid if servers exist
 		if selectedServer != "" {
 			if _, exists := cloned.MCPServers[selectedServer]; !exists {
@@ -288,15 +286,6 @@ func RunInteractiveMCPConfig(
 			}
 		} else if len(cloned.MCPServers) > 0 {
 			selectedServer = getFirstServer()
-		}
-
-		type settingItem struct {
-			id          string
-			name        string
-			value       func() string
-			description string
-			onToggle    func()
-			onEdit      func(newVal string) error
 		}
 
 		var items []*settingItem
@@ -336,16 +325,16 @@ func RunInteractiveMCPConfig(
 
 		if selectedServer != "" {
 			srvName := selectedServer
-			srv := cloned.MCPServers[srvName]
+			cfgServer := cloned.MCPServers[srvName]
 
 			items = append(items, &settingItem{
 				id:          "server_url",
 				name:        "server url",
 				value:       func() string { return cloned.MCPServers[srvName].URL },
-				description: fmt.Sprintf("SSE endpoint URL for MCP server '%s'", srvName),
+				description: "The HTTP/SSE URL of the MCP server",
 				onEdit: func(newVal string) error {
 					if newVal == "" {
-						return fmt.Errorf("URL cannot be empty")
+						return fmt.Errorf("url cannot be empty")
 					}
 					curr := cloned.MCPServers[srvName]
 					curr.URL = newVal
@@ -366,29 +355,26 @@ func RunInteractiveMCPConfig(
 				},
 			})
 
-			// Add setting items for each existing header
-			var headerKeys []string
-			for hk := range srv.Headers {
-				headerKeys = append(headerKeys, hk)
+			// Extract and sort headers
+			var hKeys []string
+			for h := range cfgServer.Headers {
+				hKeys = append(hKeys, h)
 			}
-			sort.Strings(headerKeys)
+			sort.Strings(hKeys)
 
-			for _, hk := range headerKeys {
-				headerKey := hk
+			for _, hk := range hKeys {
+				headerName := hk
 				items = append(items, &settingItem{
-					id:          "header_" + headerKey,
-					name:        fmt.Sprintf("  header: %s", headerKey),
-					value:       func() string { return cloned.MCPServers[srvName].Headers[headerKey] },
-					description: fmt.Sprintf("Custom header value for '%s' sent to '%s'", headerKey, srvName),
+					id:          "header_" + headerName,
+					name:        "  header: " + headerName,
+					value:       func() string { return cloned.MCPServers[srvName].Headers[headerName] },
+					description: fmt.Sprintf("HTTP Header '%s' value for '%s'", headerName, srvName),
 					onEdit: func(newVal string) error {
 						curr := cloned.MCPServers[srvName]
-						if curr.Headers == nil {
-							curr.Headers = make(map[string]string)
-						}
 						if newVal == "" {
-							delete(curr.Headers, headerKey)
+							delete(curr.Headers, headerName)
 						} else {
-							curr.Headers[headerKey] = newVal
+							curr.Headers[headerName] = newVal
 						}
 						cloned.MCPServers[srvName] = curr
 						return nil
@@ -396,14 +382,13 @@ func RunInteractiveMCPConfig(
 				})
 			}
 
-			// Actions for the selected server
 			items = append(items, &settingItem{
 				id:          "action_add_header",
-				name:        "[ add custom header ]",
+				name:        "  [ add HTTP header ]",
 				value:       func() string { return "" },
-				description: fmt.Sprintf("Add a new custom header to send to MCP server '%s'", srvName),
+				description: fmt.Sprintf("Add a custom HTTP header for '%s'", srvName),
 				onToggle: func() {
-					fmt.Fprintf(rlOutput, "\r\n\r\n  === Add Header to '%s' ===\r\n", srvName)
+					fmt.Fprint(rlOutput, "\r\n\r\n  === Add Header ===\r\n")
 					fmt.Fprint(rlOutput, "  Enter header name (e.g. Authorization, X-Api-Key): ")
 					hName, err := readInputRaw(rlInput, rlOutput)
 					if err != nil {
@@ -425,6 +410,17 @@ func RunInteractiveMCPConfig(
 						curr.Headers[hName] = hVal
 						cloned.MCPServers[srvName] = curr
 					}
+				},
+			})
+
+			items = append(items, &settingItem{
+				id:          "action_remove_server",
+				name:        "[ remove selected server ]",
+				value:       func() string { return "" },
+				description: fmt.Sprintf("Delete the MCP server configuration for '%s'", srvName),
+				onToggle: func() {
+					delete(cloned.MCPServers, srvName)
+					selectedServer = getFirstServer()
 				},
 			})
 		}
@@ -466,183 +462,12 @@ func RunInteractiveMCPConfig(
 			},
 		})
 
-		if selectedServer != "" {
-			srvName := selectedServer
-			items = append(items, &settingItem{
-				id:          "action_remove_server",
-				name:        "[ remove selected server ]",
-				value:       func() string { return "" },
-				description: fmt.Sprintf("Delete the MCP server configuration for '%s'", srvName),
-				onToggle: func() {
-					delete(cloned.MCPServers, srvName)
-					selectedServer = getFirstServer()
-				},
-			})
-		}
-
-		// Filter items based on search query
-		var filtered []*settingItem
-		for _, item := range items {
-			valStr := item.value()
-			match := searchQuery == "" ||
-				strings.Contains(strings.ToLower(item.name), strings.ToLower(searchQuery)) ||
-				strings.Contains(strings.ToLower(valStr), strings.ToLower(searchQuery)) ||
-				strings.Contains(strings.ToLower(item.description), strings.ToLower(searchQuery))
-			if match {
-				filtered = append(filtered, item)
-			}
-		}
-
-		if selectedIdx >= len(filtered) {
-			selectedIdx = len(filtered) - 1
-		}
-		if selectedIdx < 0 {
-			selectedIdx = 0
-		}
-
-		var buf strings.Builder
-		buf.WriteString("\x1b[H")
-
-		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		buf.WriteString(titleStyle.Render("mcp servers settings setup"))
-		buf.WriteString("\n\n")
-
-		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
-		buf.WriteString(searchLabelStyle.Render("  search:  "))
-
-		searchValStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-		buf.WriteString(searchValStyle.Render(searchQuery))
-		buf.WriteString("\n")
-
-		underlineStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(underlineStyle.Render("           ────────────────────"))
-		buf.WriteString("\n\n")
-
-		if len(filtered) == 0 {
-			dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-			buf.WriteString(dimStyle.Render("  (no matching settings found)"))
-			buf.WriteString("\n")
-		} else {
-			for idx, item := range filtered {
-				nameStr := item.name
-				valStr := item.value()
-
-				keyColWidth := 28
-				nameLen := len(nameStr)
-				leader := ""
-				if nameLen < keyColWidth {
-					leader = strings.Repeat("·", keyColWidth-nameLen)
-				}
-
-				if idx == selectedIdx {
-					markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-					nameStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-					leaderStyle := style.NewStyle().Foreground(theme.Border)
-					valStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-					bracketStyle := style.NewStyle().Foreground(theme.Secondary)
-
-					valStrFormatted := ""
-					if valStr != "" {
-						valStrFormatted = fmt.Sprintf("%s %s %s", bracketStyle.Render("["), valStyle.Render(valStr), bracketStyle.Render("]"))
-					}
-					buf.WriteString(fmt.Sprintf("%s  %s %s %s\n", markerStyle.Render("▸"), nameStyle.Render(nameStr), leaderStyle.Render(leader), valStrFormatted))
-				} else {
-					nameStyle := style.NewStyle().Foreground(theme.Text)
-					leaderStyle := style.NewStyle().Foreground(theme.Border)
-					valStyle := style.NewStyle().Foreground(theme.Secondary)
-					buf.WriteString(fmt.Sprintf("   %s %s %s\n", nameStyle.Render(nameStr), leaderStyle.Render(leader), valStyle.Render(valStr)))
-				}
-			}
-		}
-
-		buf.WriteString("\n")
-
-		if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
-			descStyle := style.NewStyle().Foreground(theme.Success)
-			buf.WriteString(fmt.Sprintf("  %s\n", descStyle.Render(filtered[selectedIdx].description)))
-		} else {
-			buf.WriteString("\n")
-		}
-
-		buf.WriteString("\n")
-		navStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter select/edit · esc clear search/exit")))
-		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("esc to save and exit")))
-
-		buf.WriteString("\x1b[J")
-
-		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
-		_, _ = rlOutput.Write([]byte(outputStr))
-
-		var readBuf [16]byte
-		n, err := rlInput.Read(readBuf[:])
-		if err != nil {
-			return nil, err
-		}
-
-		if n == 1 {
-			char := readBuf[0]
-
-			if char == 3 || char == 4 {
-				return nil, fmt.Errorf("cancelled")
-			}
-
-			if char == 13 || char == 10 {
-				if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
-					item := filtered[selectedIdx]
-					if item.onToggle != nil {
-						item.onToggle()
-					} else if item.onEdit != nil {
-						fmt.Fprintf(rlOutput, "\r\n\r\n  edit %s (current: %s):\r\n", item.name, item.value())
-						fmt.Fprint(rlOutput, "  enter new value (empty to delete if header): ")
-
-						newVal, err := readInputRaw(rlInput, rlOutput)
-						if err == nil {
-							newVal = strings.TrimSpace(newVal)
-							err = item.onEdit(newVal)
-							if err != nil {
-								fmt.Fprintf(rlOutput, "\r\n  error: %v. press enter to continue...", err)
-								_, _ = readInputRaw(rlInput, rlOutput)
-							}
-						}
-					}
-				}
-				continue
-			}
-
-			if char == 27 {
-				if searchQuery != "" {
-					searchQuery = ""
-				} else {
-					return &cloned, nil
-				}
-				continue
-			}
-
-			if char == 127 || char == 8 {
-				if len(searchQuery) > 0 {
-					searchQuery = searchQuery[:len(searchQuery)-1]
-				}
-				continue
-			}
-
-			if char >= 32 && char <= 126 {
-				searchQuery += string(char)
-				continue
-			}
-		}
-
-		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
-			switch readBuf[2] {
-			case 'A':
-				if len(filtered) > 0 {
-					selectedIdx = (selectedIdx - 1 + len(filtered)) % len(filtered)
-				}
-			case 'B':
-				if len(filtered) > 0 {
-					selectedIdx = (selectedIdx + 1) % len(filtered)
-				}
-			}
-		}
+		return items
 	}
+
+	err = runSettingsMenuLoop(rlInput, rlOutput, theme, "mcp servers settings setup", itemsProvider, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &cloned, nil
 }

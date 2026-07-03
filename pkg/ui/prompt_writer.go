@@ -22,16 +22,17 @@ import (
 //   - height-1: ────────────────────────────────────────── (status separator)
 //   - height:   status bar content
 type PromptPreservingWriter struct {
-	inner          io.Writer
-	height         int
-	printLine      int // current row inside the scroll region
-	printCol       int // current column on printLine (1-based)
-	promptCol      int // current column on promptLine for cursor restore (1-based)
-	ansiState      int // 0: normal, 1: saw ESC, 2: saw ESC [, 3: saw ESC ]
-	cursorHidden   bool
-	cursorAtPrompt bool
-	needsReposition bool
-	scrollCount    int
+	inner                 io.Writer
+	height                int
+	printLine             int // current row inside the scroll region
+	printCol              int // current column on printLine (1-based)
+	promptCol             int // current column on promptLine for cursor restore (1-based)
+	ansiState             int // 0: normal, 1: saw ESC, 2: saw ESC [, 3: saw ESC ]
+	cursorHidden          bool
+	cursorAtPrompt        bool
+	needsReposition       bool
+	scrollCount           int
+	restoreCursorToPrompt bool
 }
 
 func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
@@ -40,21 +41,41 @@ func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter 
 		scrollBottom = 1
 	}
 	return &PromptPreservingWriter{
-		inner:          w,
-		height:         height,
-		printLine:      scrollBottom,
-		printCol:       1,
-		promptCol:      3, // default to 3 (after "> ")
-		ansiState:      0,
-		cursorHidden:   true, // Default to true because the cursor is hidden during agent execution
-		cursorAtPrompt: true,
-		needsReposition: true,
+		inner:                 w,
+		height:                height,
+		printLine:             scrollBottom,
+		printCol:              1,
+		promptCol:             3, // default to 3 (after "> ")
+		ansiState:             0,
+		cursorHidden:          false, // Default to false to keep cursor visible at prompt line
+		cursorAtPrompt:        true,
+		needsReposition:       true,
+		restoreCursorToPrompt: true,
 	}
 }
 
 func (p *PromptPreservingWriter) SetCursorHidden(hidden bool) {
 	TerminalMu.Lock()
 	p.cursorHidden = hidden
+	if hidden {
+		fmt.Fprintf(p.inner, "\x1b[?25l")
+	} else {
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+		p.cursorAtPrompt = true
+	}
+	TerminalMu.Unlock()
+}
+
+func (p *PromptPreservingWriter) SetRestoreCursorToPrompt(restore bool) {
+	TerminalMu.Lock()
+	p.restoreCursorToPrompt = restore
+	if restore {
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+		p.cursorAtPrompt = true
+	} else {
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
+		p.cursorAtPrompt = false
+	}
 	TerminalMu.Unlock()
 }
 
@@ -106,9 +127,20 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 		}
 	}
 
-	if p.cursorAtPrompt || p.needsReposition {
+	if !p.cursorHidden {
+		if p.restoreCursorToPrompt {
+			fmt.Fprintf(p.inner, "\x1b[?25l")
+		} else {
+			fmt.Fprintf(p.inner, "\x1b[?25h")
+		}
+	}
+
+	if p.restoreCursorToPrompt && (p.cursorAtPrompt || p.needsReposition) {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.cursorAtPrompt = false
+		p.needsReposition = false
+	} else if !p.restoreCursorToPrompt && p.needsReposition {
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.needsReposition = false
 	}
 
@@ -119,10 +151,15 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	// Track the column position so we can restore it accurately next time.
 	p.trackPosition(data[:n])
 
-	// Restore cursor to the prompt input line (height-2, promptCol)
+	// Restore cursor to the prompt input line (height-2, promptCol) or keep it at stream position
 	if !p.cursorHidden {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.height-2, p.promptCol)
-		p.cursorAtPrompt = true
+		if p.restoreCursorToPrompt {
+			fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+			p.cursorAtPrompt = true
+		} else {
+			fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
+			p.cursorAtPrompt = false
+		}
 	}
 
 	return n, err

@@ -51,7 +51,7 @@ func HandleProviderCommand(
 		}
 
 		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H\x1b[2J")
+		fmt.Fprint(w, "\x1b[H")
 		if len(a.McpStartErrors) > 0 {
 			RenderMCPStartupErrors(w, a.McpStartErrors, theme)
 		}
@@ -251,19 +251,7 @@ func RunInteractiveProviderConfig(
 
 	cloned := *cfg
 
-	type settingItem struct {
-		id          string
-		name        string
-		value       func() string
-		description string
-		onToggle    func()
-		onEdit      func(newVal string) error
-	}
-
-	searchQuery := ""
-	selectedIdx := 0
-
-	for {
+	itemsProvider := func() []*settingItem {
 		var items []*settingItem
 		items = []*settingItem{
 			{
@@ -293,296 +281,105 @@ func RunInteractiveProviderConfig(
 					}
 					nextIdx := (idx + 1) % len(keys)
 					cloned.ActiveProvider = keys[nextIdx]
-					if cloned.ActiveProvider != "" {
-						cloned.SyncActiveProvider()
-					}
 				},
 			},
 		}
 
-		if cloned.ActiveProvider != "" {
-			active := cloned.ActiveProvider
+		// Sort providers and add sub-settings
+		var pNames []string
+		for p := range cloned.Providers {
+			pNames = append(pNames, p)
+		}
+		sort.Strings(pNames)
+
+		for _, pn := range pNames {
+			pName := pn
+			cfgProv := cloned.Providers[pName]
+
 			items = append(items, &settingItem{
-				id:          "provider_endpoint",
-				name:        "endpoint url",
-				value:       func() string { return cloned.Endpoint },
-				description: fmt.Sprintf("API endpoint URL for active provider '%s'", active),
+				id:          "prov_endpoint_" + pName,
+				name:        "provider: " + pName,
+				value:       func() string { return cfgProv.Endpoint },
+				description: fmt.Sprintf("Base API endpoint URL for '%s'", pName),
 				onEdit: func(newVal string) error {
 					if newVal == "" {
-						return nil
+						return fmt.Errorf("endpoint URL cannot be empty")
 					}
-					cloned.Endpoint = newVal
-					cloned.UpdateActiveProvider()
+					curr := cloned.Providers[pName]
+					curr.Endpoint = newVal
+					cloned.Providers[pName] = curr
 					return nil
 				},
 			})
 
 			items = append(items, &settingItem{
-				id:          "provider_apikey",
-				name:        "api key",
-				value:       func() string {
-					if cloned.ApiKey == "" {
-						return "none"
-					}
-					return "********"
-				},
-				description: fmt.Sprintf("API authorization key for active provider '%s'", active),
+				id:          "prov_key_" + pName,
+				name:        "  api key",
+				value:       func() string { return cfgProv.ApiKey },
+				description: fmt.Sprintf("API Key credential for '%s'", pName),
 				onEdit: func(newVal string) error {
-					cloned.ApiKey = newVal
-					cloned.UpdateActiveProvider()
-					return nil
-				},
-			})
-
-			items = append(items, &settingItem{
-				id:          "provider_model",
-				name:        "model name",
-				value:       func() string { return cloned.Model },
-				description: fmt.Sprintf("Name of the LLM model to use for provider '%s'", active),
-				onEdit: func(newVal string) error {
-					if newVal == "" {
-						return nil
-					}
-					cloned.Model = newVal
-					cloned.UpdateActiveProvider()
+					curr := cloned.Providers[pName]
+					curr.ApiKey = newVal
+					cloned.Providers[pName] = curr
 					return nil
 				},
 			})
 		}
 
-		// Add custom actions
+		// Action items
 		items = append(items, &settingItem{
 			id:          "action_add",
 			name:        "[ add new provider ]",
 			value:       func() string { return "" },
-			description: "Add a new endpoint provider profile profile",
+			description: "Configure a custom provider endpoint (OpenAI API spec compatible)",
 			onToggle: func() {
-				fmt.Fprint(rlOutput, "\r\n\r\n  === Add New Endpoint Provider ===\r\n")
-
-				fmt.Fprint(rlOutput, "  Enter provider name (e.g. brain, anthropic): ")
+				fmt.Fprint(rlOutput, "\r\n\r\n  === Add Custom Provider ===\r\n")
+				fmt.Fprint(rlOutput, "  Enter provider name: ")
 				pName, err := readInputRaw(rlInput, rlOutput)
 				if err != nil {
 					return
 				}
 				pName = strings.TrimSpace(pName)
-
 				if pName != "" {
-					fmt.Fprint(rlOutput, "  Enter API endpoint URL: ")
+					fmt.Fprint(rlOutput, "  Enter base endpoint URL: ")
 					pURL, err := readInputRaw(rlInput, rlOutput)
 					if err != nil {
 						return
 					}
 					pURL = strings.TrimSpace(pURL)
-
 					if pURL != "" {
-						fmt.Fprint(rlOutput, "  Enter API authorization key (optional): ")
-						pKey, err := readInputRaw(rlInput, rlOutput)
-						if err != nil {
-							return
-						}
-						pKey = strings.TrimSpace(pKey)
-
-						fmt.Fprint(rlOutput, "  Enter LLM model name (optional): ")
-						pModel, err := readInputRaw(rlInput, rlOutput)
-						if err != nil {
-							return
-						}
-						pModel = strings.TrimSpace(pModel)
-
 						if cloned.Providers == nil {
 							cloned.Providers = make(map[string]config.ProviderConfig)
 						}
 						cloned.Providers[pName] = config.ProviderConfig{
-							Name:     pName,
 							Endpoint: pURL,
-							ApiKey:   pKey,
-							Model:    pModel,
 						}
 						cloned.ActiveProvider = pName
-						cloned.SyncActiveProvider()
 					}
 				}
 			},
 		})
 
-		items = append(items, &settingItem{
-			id:          "action_remove",
-			name:        "[ remove active provider ]",
-			value:       func() string { return "" },
-			description: "Delete the currently active endpoint provider profile",
-			onToggle: func() {
-				if cloned.ActiveProvider != "" {
-					delete(cloned.Providers, cloned.ActiveProvider)
+		if cloned.ActiveProvider != "" {
+			actName := cloned.ActiveProvider
+			items = append(items, &settingItem{
+				id:          "action_remove",
+				name:        "[ remove active provider ]",
+				value:       func() string { return "" },
+				description: fmt.Sprintf("Remove the provider configuration for '%s'", actName),
+				onToggle: func() {
+					delete(cloned.Providers, actName)
 					cloned.ActiveProvider = ""
-				}
-			},
-		})
-
-		// Filter items based on search query
-		var filtered []*settingItem
-		for _, item := range items {
-			valStr := item.value()
-			match := searchQuery == "" ||
-				strings.Contains(strings.ToLower(item.name), strings.ToLower(searchQuery)) ||
-				strings.Contains(strings.ToLower(valStr), strings.ToLower(searchQuery)) ||
-				strings.Contains(strings.ToLower(item.description), strings.ToLower(searchQuery))
-			if match {
-				filtered = append(filtered, item)
-			}
+				},
+			})
 		}
 
-		if selectedIdx >= len(filtered) {
-			selectedIdx = len(filtered) - 1
-		}
-		if selectedIdx < 0 {
-			selectedIdx = 0
-		}
-
-		var buf strings.Builder
-		buf.WriteString("\x1b[H")
-
-		titleStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		buf.WriteString(titleStyle.Render("endpoint providers config"))
-		buf.WriteString("\n\n")
-
-		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
-		buf.WriteString(searchLabelStyle.Render("  search:  "))
-
-		searchValStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-		buf.WriteString(searchValStyle.Render(searchQuery))
-		buf.WriteString("\n")
-
-		underlineStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(underlineStyle.Render("           ────────────────────"))
-		buf.WriteString("\n\n")
-
-		if len(filtered) == 0 {
-			dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-			buf.WriteString(dimStyle.Render("  (no matching settings found)"))
-			buf.WriteString("\n")
-		} else {
-			for idx, item := range filtered {
-				nameStr := item.name
-				valStr := item.value()
-
-				keyColWidth := 28
-				nameLen := len(nameStr)
-				leader := ""
-				if nameLen < keyColWidth {
-					leader = strings.Repeat("·", keyColWidth-nameLen)
-				}
-
-				if idx == selectedIdx {
-					markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-					nameStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-					leaderStyle := style.NewStyle().Foreground(theme.Border)
-					valStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-					bracketStyle := style.NewStyle().Foreground(theme.Secondary)
-
-					valStrFormatted := ""
-					if valStr != "" {
-						valStrFormatted = fmt.Sprintf("%s %s %s", bracketStyle.Render("["), valStyle.Render(valStr), bracketStyle.Render("]"))
-					}
-					buf.WriteString(fmt.Sprintf("%s  %s %s %s\n", markerStyle.Render("▸"), nameStyle.Render(nameStr), leaderStyle.Render(leader), valStrFormatted))
-				} else {
-					nameStyle := style.NewStyle().Foreground(theme.Text)
-					leaderStyle := style.NewStyle().Foreground(theme.Border)
-					valStyle := style.NewStyle().Foreground(theme.Secondary)
-					buf.WriteString(fmt.Sprintf("   %s %s %s\n", nameStyle.Render(nameStr), leaderStyle.Render(leader), valStyle.Render(valStr)))
-				}
-			}
-		}
-
-		buf.WriteString("\n")
-
-		if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
-			descStyle := style.NewStyle().Foreground(theme.Success)
-			buf.WriteString(fmt.Sprintf("  %s\n", descStyle.Render(filtered[selectedIdx].description)))
-		} else {
-			buf.WriteString("\n")
-		}
-
-		buf.WriteString("\n")
-		navStyle := style.NewStyle().Foreground(theme.Border)
-		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("↑/↓ navigate · enter select/edit · esc clear search/exit")))
-		buf.WriteString(fmt.Sprintf("  %s\n", navStyle.Render("esc to save and exit")))
-
-		buf.WriteString("\x1b[J")
-
-		outputStr := strings.ReplaceAll(buf.String(), "\n", "\x1b[K\r\n")
-		_, _ = rlOutput.Write([]byte(outputStr))
-
-		var readBuf [16]byte
-		n, err := rlInput.Read(readBuf[:])
-		if err != nil {
-			return nil, err
-		}
-
-		if n == 1 {
-			char := readBuf[0]
-
-			if char == 3 || char == 4 {
-				return nil, fmt.Errorf("cancelled")
-			}
-
-			if char == 13 || char == 10 {
-				if len(filtered) > 0 && selectedIdx >= 0 && selectedIdx < len(filtered) {
-					item := filtered[selectedIdx]
-					if item.id == "active_provider" || item.id == "action_add" || item.id == "action_remove" {
-						if item.onToggle != nil {
-							item.onToggle()
-						}
-					} else if item.onEdit != nil {
-						fmt.Fprintf(rlOutput, "\r\n\r\n  edit %s (current: %s):\r\n", item.name, item.value())
-						fmt.Fprint(rlOutput, "  enter new value: ")
-
-						newVal, err := readInputRaw(rlInput, rlOutput)
-						if err == nil {
-							newVal = strings.TrimSpace(newVal)
-							err = item.onEdit(newVal)
-							if err != nil {
-								fmt.Fprintf(rlOutput, "\r\n  error: %v. press enter to continue...", err)
-								_, _ = readInputRaw(rlInput, rlOutput)
-							}
-						}
-					}
-				}
-				continue
-			}
-
-			if char == 27 {
-				if searchQuery != "" {
-					searchQuery = ""
-				} else {
-					return &cloned, nil
-				}
-				continue
-			}
-
-			if char == 127 || char == 8 {
-				if len(searchQuery) > 0 {
-					searchQuery = searchQuery[:len(searchQuery)-1]
-				}
-				continue
-			}
-
-			if char >= 32 && char <= 126 {
-				searchQuery += string(char)
-				continue
-			}
-		}
-
-		if n >= 3 && readBuf[0] == 27 && readBuf[1] == '[' {
-			switch readBuf[2] {
-			case 'A':
-				if len(filtered) > 0 {
-					selectedIdx = (selectedIdx - 1 + len(filtered)) % len(filtered)
-				}
-			case 'B':
-				if len(filtered) > 0 {
-					selectedIdx = (selectedIdx + 1) % len(filtered)
-				}
-			}
-		}
+		return items
 	}
+
+	err = runSettingsMenuLoop(rlInput, rlOutput, theme, "endpoint providers config", itemsProvider, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &cloned, nil
 }

@@ -725,7 +725,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 	compressed.Function.Parameters.Properties = newProps
 
 	switch t.Function.Name {
-	case "bash":
+	case "ls":
 		compressed.Function.Description = "Run bash command"
 		if prop, ok := compressed.Function.Parameters.Properties["command"]; ok {
 			prop.Description = "Command string"
@@ -736,28 +736,20 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["background"] = prop
 		}
 	case "read":
-		compressed.Function.Description = "Read file lines. Do NOT use to find/extract function or class code; use 'explore' instead."
-		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-			prop.Description = "File path"
-			compressed.Function.Parameters.Properties["path"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["offset"]; ok {
-			prop.Description = "Start line"
-			compressed.Function.Parameters.Properties["offset"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
-			prop.Description = "Max lines"
-			compressed.Function.Parameters.Properties["limit"] = prop
-		}
-	case "explore":
-		compressed.Function.Description = "Find and extract the exact code of a function, class, struct, or method by name."
-		if prop, ok := compressed.Function.Parameters.Properties["query"]; ok {
-			prop.Description = "Symbol name to find"
-			compressed.Function.Parameters.Properties["query"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-			prop.Description = "Subfolder to limit search"
-			compressed.Function.Parameters.Properties["path"] = prop
+		compressed.Function.Description = "Read file lines. Read full contents when preparing to edit."
+		if compressed.Function.Parameters.Properties != nil {
+			if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+				prop.Description = "File path"
+				compressed.Function.Parameters.Properties["path"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["offset"]; ok {
+				prop.Description = "Start line"
+				compressed.Function.Parameters.Properties["offset"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
+				prop.Description = "Max lines"
+				compressed.Function.Parameters.Properties["limit"] = prop
+			}
 		}
 	case "write":
 		compressed.Function.Description = "Write file"
@@ -797,52 +789,6 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			}
 			compressed.Function.Parameters.Properties["updates"] = prop
 		}
-	case "grep":
-		compressed.Function.Description = "Search text patterns"
-		if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
-			prop.Description = "Search term"
-			compressed.Function.Parameters.Properties["pattern"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-			prop.Description = "Dir/file path"
-			compressed.Function.Parameters.Properties["path"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["glob"]; ok {
-			prop.Description = "Glob filter"
-			compressed.Function.Parameters.Properties["glob"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["ignoreCase"]; ok {
-			prop.Description = "Ignore case"
-			compressed.Function.Parameters.Properties["ignoreCase"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["literal"]; ok {
-			prop.Description = "Match exactly"
-			compressed.Function.Parameters.Properties["literal"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
-			prop.Description = "Max matches"
-			compressed.Function.Parameters.Properties["limit"] = prop
-		}
-	case "find":
-		compressed.Function.Description = "Find files by pattern"
-		if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
-			prop.Description = "Name pattern"
-			compressed.Function.Parameters.Properties["pattern"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-			prop.Description = "Start directory"
-			compressed.Function.Parameters.Properties["path"] = prop
-		}
-		if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
-			prop.Description = "Max results"
-			compressed.Function.Parameters.Properties["limit"] = prop
-		}
-	case "ls":
-		compressed.Function.Description = "List directory contents"
-		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-			prop.Description = "Directory path"
-			compressed.Function.Parameters.Properties["path"] = prop
-		}
 	case "load_skill":
 		compressed.Function.Description = "Load skill instructions"
 		if prop, ok := compressed.Function.Parameters.Properties["name"]; ok {
@@ -861,8 +807,6 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			prop.Description = "Task ID"
 			compressed.Function.Parameters.Properties["task_id"] = prop
 		}
-	case "git_diff":
-		compressed.Function.Description = "Get workspace git diff"
 	default:
 		if len(compressed.Function.Description) > 30 {
 			compressed.Function.Description = compressed.Function.Description[:27] + "..."

@@ -327,12 +327,61 @@ func HandleSlashCommand(
 		if ch, ok := rlHistory.(*customHistory); ok {
 			ch.entries = nil
 		}
+
+		if a.ClearAgentsFunc != nil {
+			a.ClearAgentsFunc()
+		}
+
+		getUI().StateMu.Lock()
+		getUI().State.CompletionTokens = 0
+		getUI().StateMu.Unlock()
+
 		// Clear terminal screen and scrollback
-		fmt.Fprint(w, "\x1b[H\x1b[2J")
+		fmt.Fprint(w, "\x1b[H")
 		fmt.Fprintln(w, "conversation cleared and started a new one.")
 		pTok, cTok := calcHistoryTokens()
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
 		DrawStatusBar(w, *theme)
+		return true, false
+	case "/stats":
+		if a.MultiAgentManager != nil {
+			a.MultiAgentManager.RenderStats(w, *messages, *theme)
+		} else {
+			// Fallback: print only base agent stats if MultiAgentManager is nil
+			headerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+			titleStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+			valueStyle := style.NewStyle().Foreground(theme.Text)
+			
+			calcTokens := func(history []db.Message) (int, int) {
+				var prompt, completion int
+				for _, m := range history {
+					if m.Role == "assistant" {
+						if m.PromptTokens > 0 {
+							prompt += m.PromptTokens
+						} else {
+							prompt += (len(m.Content) + len(m.ReasoningContent)) / 4
+						}
+						if m.CompletionTokens > 0 {
+							completion += m.CompletionTokens
+						} else {
+							completion += (len(m.Content) + len(m.ReasoningContent)) / 4
+						}
+					}
+				}
+				return prompt, completion
+			}
+
+			fmt.Fprintln(w, headerStyle.Render("╭───────────────────────────────────────────────────────────────────────────────────────────────────╮"))
+			fmt.Fprintln(w, headerStyle.Render("│  SWARM TOKEN UTILIZATION & COST STATS                                                             │"))
+			fmt.Fprintln(w, headerStyle.Render("├───────────────────────────────────────────────────────────────────────────────────────────────────┤"))
+
+			baseP, baseC := calcTokens(*messages)
+			fmt.Fprintf(w, "  %s:\n", titleStyle.Render("Base Agent (Main)"))
+			fmt.Fprintf(w, "    Prompt Tokens:      %s\n", valueStyle.Render(fmt.Sprintf("%d", baseP)))
+			fmt.Fprintf(w, "    Completion Tokens:  %s\n", valueStyle.Render(fmt.Sprintf("%d", baseC)))
+			fmt.Fprintf(w, "    Total Cost (Est):   %s\n\n", valueStyle.Render(fmt.Sprintf("%d", baseP+baseC)))
+			fmt.Fprintln(w, headerStyle.Render("╰───────────────────────────────────────────────────────────────────────────────────────────────────╯"))
+		}
 		return true, false
 	case "/session":
 		if len(parts) > 1 {
@@ -608,7 +657,11 @@ func HandleSlashCommand(
 				break
 			}
 
-			err := mam.SpawnAgent(name, prompt, parentName, skillName)
+			var skillNames []string
+			if skillName != "" {
+				skillNames = append(skillNames, skillName)
+			}
+			err := mam.SpawnAgent(name, prompt, parentName, skillNames)
 			if err != nil {
 				fmt.Fprintf(w, "error spawning agent: %v\n", err)
 			} else {

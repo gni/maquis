@@ -25,6 +25,15 @@ var defaultMCPTemplate []byte
 func main() {
 	config.SetDefaultTemplate(defaultTemplate, defaultProvidersTemplate, defaultMCPTemplate)
 
+	// Recover from panics to restore terminal state
+	defer func() {
+		if r := recover(); r != nil {
+			ui.ShutdownStatusBar(os.Stderr)
+			fmt.Fprint(os.Stderr, "\x1b[?25h") // Show cursor
+			panic(r)
+		}
+	}()
+
 	// Restore cursor on startup in case a previous crashed run left it hidden
 	fmt.Fprint(os.Stderr, "\x1b[?25h")
 

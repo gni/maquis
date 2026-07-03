@@ -33,7 +33,7 @@ func (t *readTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "read",
-			Description: "Read the contents of a file. IMPORTANT: Do NOT use this tool to find or extract function, class, struct, or method definitions. Use the 'explore' tool for that instead. Only use 'read' to view imports, config files, or full contents when preparing to edit.",
+			Description: "Read the contents of a file. If the file is truncated, you MUST call this tool again with the 'offset' parameter to read the remaining contents.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -139,7 +139,7 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	result := strings.Join(resultLines, "\n")
 	if truncated {
-		result += fmt.Sprintf("\n\n[File truncated. Showing lines %d-%d of %d. Use offset=%d to read the next section.]", offset, end, len(lines), end+1)
+		result += fmt.Sprintf("\n\n[File truncated. Showing lines %d-%d of %d. IMPORTANT: You MUST call the read tool again with offset=%d to read the next section!]", offset, end, len(lines), end+1)
 	}
 	return result, nil
 }
@@ -454,123 +454,7 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	return diffBuilder.String(), nil
 }
 
-type lsTool struct{}
 
-func NewLsTool() ToolExecutor {
-	return &lsTool{}
-}
-
-func (t *lsTool) Name() string { return "ls" }
-
-func (t *lsTool) Definition() Tool {
-	return Tool{
-		Type: "function",
-		Function: FunctionDefinition{
-			Name:        "ls",
-			Description: "List files and directories in a path.",
-			Parameters: JSONSchema{
-				Type: "object",
-				Properties: map[string]SchemaProp{
-					"path": {
-						Type:        "string",
-						Description: "Path of the directory to list.",
-					},
-					"recursive": {
-						Type:        "boolean",
-						Description: "List all files and directories recursively.",
-					},
-				},
-				Required: []string{},
-			},
-		},
-	}
-}
-
-func (t *lsTool) Execute(ctx AgentContext, arguments string) (string, error) {
-	var args struct {
-		Path      string `json:"path"`
-		Recursive bool   `json:"recursive"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		// ignore JSON syntax errors
-	}
-
-	searchPath := args.Path
-	if searchPath == "" {
-		searchPath = "."
-	}
-
-	safePath, err := ctx.SafePath(searchPath)
-	if err != nil {
-		return "", err
-	}
-
-	if !args.Recursive {
-		entries, err := os.ReadDir(safePath)
-		if err != nil {
-			return "", fmt.Errorf("failed to read directory: %w", err)
-		}
-
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Contents of %s:\n", searchPath))
-		for _, entry := range entries {
-			info, err := entry.Info()
-			typeStr := "file"
-			size := int64(0)
-			if entry.IsDir() {
-				typeStr = "dir "
-			} else if err == nil {
-				size = info.Size()
-			}
-
-			sb.WriteString(fmt.Sprintf("  [%s]  %-25s  %d bytes\n", typeStr, entry.Name(), size))
-		}
-		return sb.String(), nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Contents of %s (recursive):\n", searchPath))
-	patterns := loadGitignorePatterns(ctx.GetWorkspaceRoot())
-	count := 0
-	err = filepath.Walk(safePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		isDir := info.IsDir()
-		relPath, _ := filepath.Rel(safePath, path)
-		if isIgnored(info.Name(), isDir) || (matchesGitignore(relPath, isDir, patterns) && (isDir || isCompiledOrLockfile(info.Name()))) || (strings.HasPrefix(info.Name(), ".") && info.Name() != ".") {
-			if isDir {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if relPath == "." {
-			return nil
-		}
-
-		if count >= 500 {
-			return fmt.Errorf("limit_reached")
-		}
-
-		typeStr := "file"
-		if info.IsDir() {
-			typeStr = "dir "
-		}
-
-		sb.WriteString(fmt.Sprintf("  [%s]  %-35s  %d bytes\n", typeStr, relPath, info.Size()))
-		count++
-		return nil
-	})
-	if err != nil && err.Error() == "limit_reached" {
-		sb.WriteString("\n[Listing truncated. Too many files found (limit: 500). Use recursive: false or search a subdirectory.]\n")
-		err = nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to walk directory: %w", err)
-	}
-	return sb.String(), nil
-}
 
 func isBinary(data []byte) bool {
 	limit := len(data)
@@ -658,87 +542,6 @@ func normalizeSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-func isIgnored(name string, isDir bool) bool {
-	if isDir {
-		low := strings.ToLower(name)
-		if low == "node_modules" || low == "venv" || low == ".venv" || low == ".git" || low == "__pycache__" || low == ".idea" || low == ".vscode" || low == "build" || low == "dist" || low == "target" || low == "tmp" || low == "temp" || low == "vendor" || low == ".yarn" || low == ".cache" {
-			return true
-		}
-	} else {
-		ext := filepath.Ext(name)
-		if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || name == ".gitignore" || name == "package-lock.json" || name == "yarn.lock" || name == "pnpm-lock.yaml" || name == ".DS_Store" || name == "pnpm-workspace.yaml" || ext == ".tsbuildinfo" || name == ".eslintcache" {
-			return true
-		}
-	}
-	return false
-}
-
-func loadGitignorePatterns(workspaceRoot string) []string {
-	gitignorePath := filepath.Join(workspaceRoot, ".gitignore")
-	data, err := os.ReadFile(gitignorePath)
-	if err != nil {
-		return nil
-	}
-
-	var patterns []string
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		patterns = append(patterns, line)
-	}
-	return patterns
-}
-
-func matchesGitignore(path string, isDir bool, patterns []string) bool {
-	path = filepath.ToSlash(path)
-	for _, p := range patterns {
-		p = filepath.ToSlash(p)
-		if p == "" {
-			continue
-		}
-
-		isDirPattern := strings.HasSuffix(p, "/")
-		cleanPattern := strings.TrimSuffix(p, "/")
-
-		parts := strings.Split(path, "/")
-		for _, part := range parts {
-			if part == cleanPattern {
-				if !isDirPattern || isDir {
-					return true
-				}
-			}
-			if strings.Contains(cleanPattern, "*") {
-				if matched, _ := filepath.Match(cleanPattern, part); matched {
-					if !isDirPattern || isDir {
-						return true
-					}
-				}
-			}
-		}
-
-		if strings.HasSuffix(path, cleanPattern) {
-			if !isDirPattern || isDir {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isCompiledOrLockfile(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	if ext == ".pyc" || ext == ".pyo" || ext == ".pyd" || ext == ".o" || ext == ".a" || ext == ".so" || ext == ".dll" || ext == ".dylib" || ext == ".exe" || ext == ".class" || ext == ".jar" || ext == ".zip" || ext == ".tar" || ext == ".gz" {
-		return true
-	}
-	lowName := strings.ToLower(name)
-	if lowName == "package-lock.json" || lowName == "yarn.lock" || lowName == "pnpm-lock.yaml" || lowName == "composer.lock" || lowName == "poetry.lock" || lowName == "cargo.lock" {
-		return true
-	}
-	return false
-}
 
 func hasIgnoredComponent(path string) bool {
 	path = filepath.Clean(path)

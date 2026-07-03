@@ -152,7 +152,7 @@ func FormatDefensiveError(toolName string, err error) string {
 
 	var suggestion string
 	if strings.Contains(errStr, "not found") || strings.Contains(errStr, "no such file") {
-		suggestion = "Inspect your immediate working directory structure using 'ls' or check the file path. Ensure the file actually exists before calling this tool."
+		suggestion = "Inspect your immediate working directory structure using 'bash' with 'ls' or check the file path. Ensure the file actually exists before calling this tool."
 	} else if strings.Contains(errStr, "oldText block not found") || strings.Contains(errStr, "targetContent not found") {
 		suggestion = "The exact text block you tried to replace was not found. Read the file content first to verify the exact indentation, line endings, and characters, then try again with a precise match."
 	} else if strings.Contains(errStr, "escapes workspace") || strings.Contains(errStr, "security violation") {
@@ -222,12 +222,10 @@ func buildToolCall(name string, args string) db.ToolCall {
 
 		// Wrap according to tool name
 		switch {
-		case name == "bash":
+		case name == "ls":
 			finalArgs = fmt.Sprintf(`{"command": %s}`, escapedArgsStr)
-		case name == "read" || name == "ls":
+		case name == "read":
 			finalArgs = fmt.Sprintf(`{"path": %s}`, escapedArgsStr)
-		case name == "grep" || name == "find":
-			finalArgs = fmt.Sprintf(`{"pattern": %s}`, escapedArgsStr)
 		case name == "load_skill":
 			finalArgs = fmt.Sprintf(`{"name": %s}`, escapedArgsStr)
 		case name == "task_status" || name == "task_kill":

@@ -46,6 +46,12 @@ type StreamRenderer struct {
 	lineStartCol         int
 	lineStartScroll      int
 	hasLineStart         bool
+
+	reasoningLineBuffer      strings.Builder
+	reasoningLineStartLine   int
+	reasoningLineStartCol    int
+	reasoningLineStartScroll int
+	hasReasoningLineStart    bool
 }
 
 func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
@@ -96,6 +102,13 @@ func (sr *StreamRenderer) HasOutput() bool {
 	return sr.hasWrittenText || sr.hasWrittenThoughts
 }
 
+func (sr *StreamRenderer) printReasoningLine(line string) {
+	dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
+	startSeq, resetSeq := dimStyle.GetSequence()
+	rendered := sr.renderInlineMarkdown(line)
+	fmt.Fprint(sr.w, startSeq+rendered+resetSeq)
+}
+
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -122,7 +135,47 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 	}
 
 	sr.reasoningText.WriteString(chunk)
-	fmt.Fprint(sr.w, chunk)
+
+	for _, char := range chunk {
+		if char == '\n' {
+			line := sr.reasoningLineBuffer.String()
+			sr.reasoningLineBuffer.Reset()
+
+			ppw := findPromptPreservingWriter(sr.w)
+			if ppw != nil && sr.hasReasoningLineStart {
+				scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
+				adjustedLine := sr.reasoningLineStartLine - scrollDelta
+				if adjustedLine < 1 {
+					adjustedLine = 1
+				}
+				if ppw.GetPrintLine() == adjustedLine {
+					clearScrollRegionLines(ppw, adjustedLine, sr.w)
+					ppw.SetPrintLine(adjustedLine)
+					ppw.SetPrintCol(sr.reasoningLineStartCol)
+					sr.printReasoningLine(line)
+					fmt.Fprint(sr.w, "\n")
+				} else {
+					fmt.Fprint(sr.w, "\n")
+				}
+			} else {
+				sr.printReasoningLine(line)
+				fmt.Fprint(sr.w, "\n")
+			}
+			sr.hasReasoningLineStart = false
+		} else {
+			ppw := findPromptPreservingWriter(sr.w)
+			if ppw != nil {
+				if !sr.hasReasoningLineStart {
+					sr.reasoningLineStartLine = ppw.GetPrintLine()
+					sr.reasoningLineStartCol = ppw.GetPrintCol()
+					sr.reasoningLineStartScroll = ppw.GetScrollCount()
+					sr.hasReasoningLineStart = true
+				}
+				fmt.Fprint(sr.w, string(char))
+			}
+			sr.reasoningLineBuffer.WriteRune(char)
+		}
+	}
 }
 
 func (sr *StreamRenderer) EndThinking() {
@@ -134,6 +187,29 @@ func (sr *StreamRenderer) EndThinking() {
 func (sr *StreamRenderer) endThinking() {
 	if sr.inThinking {
 		sr.inThinking = false
+
+		rem := sr.reasoningLineBuffer.String()
+		if rem != "" {
+			ppw := findPromptPreservingWriter(sr.w)
+			if ppw != nil && sr.hasReasoningLineStart {
+				scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
+				adjustedLine := sr.reasoningLineStartLine - scrollDelta
+				if adjustedLine < 1 {
+					adjustedLine = 1
+				}
+				if ppw.GetPrintLine() == adjustedLine {
+					clearScrollRegionLines(ppw, adjustedLine, sr.w)
+					ppw.SetPrintLine(adjustedLine)
+					ppw.SetPrintCol(sr.reasoningLineStartCol)
+					sr.printReasoningLine(rem)
+				}
+			} else {
+				sr.printReasoningLine(rem)
+			}
+			sr.reasoningLineBuffer.Reset()
+		}
+		sr.hasReasoningLineStart = false
+
 		if sr.reasoningText.Len() > 0 {
 			if sr.reasoningResetSequence != "" {
 				fmt.Fprint(sr.w, sr.reasoningResetSequence)
@@ -203,9 +279,11 @@ func (sr *StreamRenderer) Write(chunk string) {
 						if adjustedLine < 1 {
 							adjustedLine = 1
 						}
-						clearScrollRegionLines(ppw, adjustedLine, sr.w)
-						ppw.SetPrintLine(adjustedLine)
-						ppw.SetPrintCol(sr.lineStartCol)
+						if ppw.GetPrintLine() == adjustedLine {
+							clearScrollRegionLines(ppw, adjustedLine, sr.w)
+							ppw.SetPrintLine(adjustedLine)
+							ppw.SetPrintCol(sr.lineStartCol)
+						}
 					}
 					sr.inCodeBlock = true
 					sr.codeLanguage = strings.TrimPrefix(trimmed, "```")
@@ -220,11 +298,15 @@ func (sr *StreamRenderer) Write(chunk string) {
 						if adjustedLine < 1 {
 							adjustedLine = 1
 						}
-						clearScrollRegionLines(ppw, adjustedLine, sr.w)
-						ppw.SetPrintLine(adjustedLine)
-						ppw.SetPrintCol(sr.lineStartCol)
-						sr.printNormalLine(line)
-						fmt.Fprint(sr.w, "\n")
+						if ppw.GetPrintLine() == adjustedLine {
+							clearScrollRegionLines(ppw, adjustedLine, sr.w)
+							ppw.SetPrintLine(adjustedLine)
+							ppw.SetPrintCol(sr.lineStartCol)
+							sr.printNormalLine(line)
+							fmt.Fprint(sr.w, "\n")
+						} else {
+							fmt.Fprint(sr.w, "\n")
+						}
 					} else {
 						sr.printNormalLine(line)
 						fmt.Fprint(sr.w, "\n")
@@ -296,10 +378,12 @@ func (sr *StreamRenderer) flushLocked() {
 			if adjustedLine < 1 {
 				adjustedLine = 1
 			}
-			clearScrollRegionLines(ppw, adjustedLine, sr.w)
-			ppw.SetPrintLine(adjustedLine)
-			ppw.SetPrintCol(sr.lineStartCol)
-			sr.printNormalLine(rem)
+			if ppw.GetPrintLine() == adjustedLine {
+				clearScrollRegionLines(ppw, adjustedLine, sr.w)
+				ppw.SetPrintLine(adjustedLine)
+				ppw.SetPrintCol(sr.lineStartCol)
+				sr.printNormalLine(rem)
+			}
 		} else {
 			sr.printNormalLine(rem)
 		}
@@ -374,7 +458,12 @@ func (sr *StreamRenderer) renderInlineMarkdown(text string) string {
 			}
 			if j < n {
 				codeVal := string(runes[i+1 : j])
-				styled := style.NewStyle().Foreground(sr.theme.Highlight).Render(codeVal)
+				var styled string
+				if sr.inThinking {
+					styled = style.NewStyle().Foreground(sr.theme.Border).Underline(true).Italic(true).Render(codeVal)
+				} else {
+					styled = style.NewStyle().Foreground(sr.theme.Highlight).Render(codeVal)
+				}
 				result.WriteString(styled)
 				i = j + 1
 				continue
@@ -394,7 +483,12 @@ func (sr *StreamRenderer) renderInlineMarkdown(text string) string {
 			}
 			if found {
 				boldVal := string(runes[i+2 : j])
-				styled := style.NewStyle().Foreground(sr.theme.Primary).Bold(true).Render(sr.renderInlineMarkdown(boldVal))
+				var styled string
+				if sr.inThinking {
+					styled = style.NewStyle().Foreground(sr.theme.Border).Bold(true).Italic(true).Render(sr.renderInlineMarkdown(boldVal))
+				} else {
+					styled = style.NewStyle().Foreground(sr.theme.Primary).Bold(true).Render(sr.renderInlineMarkdown(boldVal))
+				}
 				result.WriteString(styled)
 				i = j + 2
 				continue
@@ -409,7 +503,12 @@ func (sr *StreamRenderer) renderInlineMarkdown(text string) string {
 			}
 			if j < n {
 				italicVal := string(runes[i+1 : j])
-				styled := style.NewStyle().Italic(true).Render(sr.renderInlineMarkdown(italicVal))
+				var styled string
+				if sr.inThinking {
+					styled = style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render(sr.renderInlineMarkdown(italicVal))
+				} else {
+					styled = style.NewStyle().Italic(true).Render(sr.renderInlineMarkdown(italicVal))
+				}
 				result.WriteString(styled)
 				i = j + 1
 				continue

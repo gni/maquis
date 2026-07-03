@@ -69,6 +69,7 @@ cat
 
 func TestRunExtensionValidation(t *testing.T) {
 	a := &agent.Agent{
+		Config:        &config.Config{},
 		WorkspaceRoot: "/workspace/maquis",
 	}
 	var buf bytes.Buffer

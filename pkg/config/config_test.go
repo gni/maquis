@@ -27,8 +27,8 @@ func TestConfigProviders(t *testing.T) {
 		t.Fatalf("expected Providers map to be initialized")
 	}
 
-	if len(cfg.Providers) != 0 {
-		t.Errorf("expected Providers map to be empty, got %d items", len(cfg.Providers))
+	if len(cfg.Providers) != 1 {
+		t.Errorf("expected Providers map to contain default provider, got %d items", len(cfg.Providers))
 	}
 
 	// 2. Add some providers
@@ -57,8 +57,8 @@ func TestConfigProviders(t *testing.T) {
 		t.Fatalf("failed to reload config: %v", err)
 	}
 
-	if len(cfgReloaded.Providers) != 2 {
-		t.Errorf("expected 2 providers after reload, got %d", len(cfgReloaded.Providers))
+	if len(cfgReloaded.Providers) != 3 {
+		t.Errorf("expected 3 providers after reload, got %d", len(cfgReloaded.Providers))
 	}
 
 	pOpenAI, ok := cfgReloaded.Providers["openai"]

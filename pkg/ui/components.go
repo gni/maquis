@@ -267,7 +267,7 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 
 			lang := "plaintext"
 			if k == "command" {
-				lang = "bash"
+				lang = "ls"
 			} else if pathVal, ok := m["path"].(string); ok {
 				ext := filepath.Ext(pathVal)
 				if len(ext) > 1 {
@@ -371,7 +371,7 @@ func extractToolTarget(toolName string, argsJSON string) string {
 	}
 
 	// 1. Command execution tools (bash, run_command, exec, etc.)
-	if strings.Contains(toolName, "bash") || strings.Contains(toolName, "command") || strings.Contains(toolName, "run") || strings.Contains(toolName, "exec") {
+	if strings.Contains(toolName, "ls") || strings.Contains(toolName, "command") || strings.Contains(toolName, "run") || strings.Contains(toolName, "exec") {
 		if c := getString("CommandLine"); c != "" {
 			return c
 		}
@@ -487,7 +487,7 @@ func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON stri
 	fmt.Fprintln(w, title)
 }
 
-func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, newlineCount int) {
+func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, wasStreamed bool) {
 	var finalDot string
 	if toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
 		if !isError {
@@ -503,93 +503,13 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	pathVal := extractToolTarget(toolName, argsJSON)
-
-	finalTitle := FormatToolTitle(finalDot, toolName, pathVal, theme)
-
-	_, termH := getTerminalSize()
-	if termH <= 0 {
-		termH = 24
-	}
-	if newlineCount > termH-6 {
-		newlineCount = -2
-	}
-
-	var pp *PromptPreservingWriter
-	curr := w
-	for {
-		if p, ok := curr.(*PromptPreservingWriter); ok {
-			pp = p
-			break
-		}
-		if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
-			curr = unwrapper.Unwrap()
-		} else {
-			break
-		}
-	}
-
-	if pp != nil {
-		if newlineCount == -2 {
-			fmt.Fprintln(w, finalTitle)
-		} else if newlineCount >= 0 {
-			if newlineCount > 0 {
-				// Move cursor to the header line on the terminal, clear and overwrite
-				fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine-newlineCount)
-				fmt.Fprint(pp.inner, finalTitle)
-
-				// Clear intermediate argument lines
-				for i := 1; i <= newlineCount; i++ {
-					fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine-newlineCount+i)
-				}
-
-				// Update pp's tracked position to the line right below the header
-				pp.SetPrintLine(pp.printLine - newlineCount + 1)
-				pp.SetPrintCol(1)
-			} else {
-				fmt.Fprintf(pp.inner, "\x1b[%d;1H\x1b[2K", pp.printLine)
-				fmt.Fprint(pp.inner, finalTitle)
-				pp.SetPrintCol(len(stripAnsi(finalTitle)) + 1)
-			}
-		}
-	} else {
-		if newlineCount == -2 {
-			fmt.Fprintln(w, finalTitle)
-		} else if newlineCount >= 0 {
-			if newlineCount > 0 {
-				// Move cursor up to the header line
-				fmt.Fprintf(w, "\x1b[%dA\r", newlineCount)
-			} else {
-				fmt.Fprint(w, "\r")
-			}
-			// Clear line and print final header
-			fmt.Fprint(w, "\x1b[2K")
-			fmt.Fprint(w, finalTitle)
-
-			if newlineCount > 0 {
-				// Move down and clear all the intermediate streamed argument/parameter lines
-				for i := 1; i <= newlineCount; i++ {
-					fmt.Fprint(w, "\n\x1b[2K")
-				}
-				// Move cursor back up to position it directly below the completed header
-				if newlineCount > 1 {
-					fmt.Fprintf(w, "\x1b[%dA\r", newlineCount-1)
-				} else {
-					fmt.Fprint(w, "\r")
-				}
-			} else {
-				fmt.Fprint(w, "\r\n")
-			}
-		}
-	}
-
 	fmt.Fprintln(w)
 
 	borderColor := theme.Success
-	title := "tool output"
+	title := fmt.Sprintf("  %s Output", finalDot)
 	if isError {
 		borderColor = theme.Error
-		title = "tool error"
+		title = fmt.Sprintf("  %s Error", finalDot)
 	}
 
 	titleStyle := style.NewStyle().
@@ -680,11 +600,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	isQuietTitle := !isError
-
-	if !isQuietTitle {
-		fmt.Fprintln(w, titleStyle.Render(title+":"))
-	}
+	fmt.Fprintln(w, titleStyle.Render(title))
 
 	body = strings.TrimRight(body, "\r\n")
 	lines := strings.Split(body, "\n")
@@ -800,7 +716,7 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	if path != "" {
 		relPath := path
 		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill"
-		if toolName != "bash" && !isNonFilePathTool {
+		if toolName != "ls" && !isNonFilePathTool {
 			wd, err := os.Getwd()
 			if err == nil {
 				if rel, err := filepath.Rel(wd, path); err == nil {
@@ -952,6 +868,21 @@ func DrawStaticPromptSeparatorWithSpinnerLocked(w io.Writer, showThinking bool, 
 	_, _ = w.Write(buf.Bytes())
 }
 
+func renderReasoningMarkdownContent(w io.Writer, content string, theme UITheme) {
+	lines := strings.Split(content, "\n")
+	sr := &StreamRenderer{
+		theme:      theme,
+		w:          w,
+		inThinking: true,
+	}
+	for i, line := range lines {
+		sr.printReasoningLine(line)
+		if i < len(lines)-1 {
+			fmt.Fprintln(w)
+		}
+	}
+}
+
 func renderMarkdownContent(w io.Writer, content string, theme UITheme) {
 	lines := strings.Split(content, "\n")
 	sr := &StreamRenderer{
@@ -1067,10 +998,11 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			fmt.Fprintln(w, divider)
 
 			hasPrintedAnything := false
-			if msg.ReasoningContent != "" && cfg.ShowThinking {
-				dimStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-				fmt.Fprintln(w, dimStyle.Render(strings.TrimRight(msg.ReasoningContent, "\r\n")))
-				fmt.Fprintln(w)
+			if msg.ReasoningContent != "" {
+				if cfg.ShowThinking {
+					renderReasoningMarkdownContent(w, strings.TrimRight(msg.ReasoningContent, "\r\n"), theme)
+					fmt.Fprintln(w)
+				}
 
 				iconStyle := style.NewStyle().Foreground(theme.Success)
 				labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
@@ -1107,23 +1039,37 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						}
 						
 						isWriteTool := tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace")
-						
-						if len(tc.Function.Arguments) > 0 && isWriteTool {
-							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, -2)
+						path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
+						var symbol string
+						if isWriteTool {
+							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
 						} else {
-							path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
-							var symbol string
-							if isWriteTool {
-								symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
-							} else {
-								symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
-							}
-							title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
-							fmt.Fprintln(w, title)
+							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+						}
+						title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
+						fmt.Fprintln(w, title)
+
+						if len(tc.Function.Arguments) > 0 && isWriteTool {
+							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, true)
 						}
 						
-						cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
-						fmt.Fprintln(w, cancelStyle.Render("  [Operation Cancelled]"))
+						ui := getUI()
+						isGen := false
+						if ui != nil {
+							isGen = ui.State.IsGenerating
+						}
+						
+						if i == len(messages)-1 && isGen {
+							runningStyle := style.NewStyle().Foreground(theme.Secondary).Italic(true)
+							if ui != nil && ui.CollapseResults {
+								fmt.Fprintln(w, runningStyle.Render("  [Running... (collapsed)]"))
+							} else {
+								fmt.Fprintln(w, runningStyle.Render("  [Running...]"))
+							}
+						} else {
+							cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
+							fmt.Fprintln(w, cancelStyle.Render("  [Operation Cancelled]"))
+						}
 						hasPrintedAnything = true
 					}
 				}
@@ -1151,7 +1097,18 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			}
 			
 			isError := strings.HasPrefix(msg.Content, "Error:") || strings.HasPrefix(msg.Content, "error:") || strings.Contains(msg.Content, "command failed:")
-			RenderToolOutput(w, msg.Content, isError, cfg.CollapseResults, theme, toolName, argsJSON, -2)
+
+			// Reconstruct the full-width header for the history redraw since it's not saved in the tool string itself
+			symbol := style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+			isWriteTool := toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace")
+			if isWriteTool {
+				symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+			}
+			path := extractToolTarget(toolName, argsJSON)
+			title := FormatToolTitle(symbol, toolName, path, theme)
+			fmt.Fprintln(w, title)
+
+			RenderToolOutput(w, msg.Content, isError, cfg.CollapseResults, theme, toolName, argsJSON, false)
 		} else if msg.Role == "error" {
 			if lastRole != "" {
 				fmt.Fprintln(w)

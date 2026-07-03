@@ -17,6 +17,7 @@ type AgentUIImpl struct {
 	Config             *config.Config
 	Theme              style.UITheme
 	SessionID          string
+	ppWriter           *PromptPreservingWriter
 
 	ActiveCancelFunc   context.CancelFunc
 	PasteLinesOffset   int
@@ -141,6 +142,12 @@ func (ui *AgentUIImpl) RenderToolHeader(w io.Writer, theme style.UITheme, toolNa
 	RenderToolHeader(w, theme, toolName, toolArgs)
 }
 
-func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int) {
-	RenderToolOutput(w, output, isError, collapseResults, theme, toolName, toolArgs, highlightLines)
+func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, wasStreamed bool) {
+	RenderToolOutput(w, output, isError, collapseResults, theme, toolName, toolArgs, wasStreamed)
+}
+
+func (ui *AgentUIImpl) SetCursorHidden(hidden bool) {
+	if ui.ppWriter != nil {
+		ui.ppWriter.SetRestoreCursorToPrompt(!hidden)
+	}
 }

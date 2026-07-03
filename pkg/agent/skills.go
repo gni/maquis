@@ -123,7 +123,7 @@ func (a *Agent) GetSystemPrompt() string {
 	if a.Config.CompactPrompt {
 		thinkingGuidelines := fmt.Sprintf("\n\nThinking Guidelines:\n"+
 			"- Workspace root: `%s`. Read, edit, or list files inside this workspace directory tree.\n"+
-			"- Use the 'explore' tool to find definitions of classes, functions, or methods quickly without reading full files.\n"+
+
 			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
 			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
 			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
@@ -142,10 +142,9 @@ func (a *Agent) GetSystemPrompt() string {
 
 	thinkingGuidelines := fmt.Sprintf("\n\nThinking/Reasoning Guidelines:\n"+
 		"- You are running in the workspace directory: `%s`. Any relative file paths you access or create must resolve relative to this directory. You must only read, edit, write, or list files inside this workspace directory tree.\n"+
-		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using 'ls' or similar listing tool) to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
+		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using bash 'ls') to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
 		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
-		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
-		"- Use the 'explore' tool to find the exact signature and body of classes, functions, or methods. This is much faster and token-efficient than using 'search' (grep) and 'read' on entire files.\n"+
+		"- For direct shell commands and read/write/edit tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
 		"- Before editing or modifying a file, you MUST read the file (or the relevant part of it) first to ensure your edits match the current content exactly and avoid \"oldText block not found\" errors.\n"+
 		"- When asked to write, create, or implement code, files, or applications, you MUST actually write the code to files on disk in the workspace using the 'write' tool, rather than just printing the code blocks in your chat response.\n"+
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max) and strictly restricted to immediate technical execution planning. Avoid conversational monologues, introspective reflections, or debating choices in thoughts.\n"+

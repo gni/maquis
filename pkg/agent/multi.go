@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -44,7 +45,7 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 	if ma.BaseAgent != nil && ma.BaseAgent.Config != nil && ma.BaseAgent.Config.CompactPrompt {
 		thinkingGuidelines := fmt.Sprintf("\n\nThinking Guidelines:\n"+
 			"- Workspace root: `%s`. Read, edit, or list files inside this workspace directory tree.\n"+
-			"- Use the 'explore' tool to find definitions of classes, functions, or methods quickly without reading full files.\n"+
+
 			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
 			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
 			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
@@ -59,10 +60,9 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 
 	thinkingGuidelines := fmt.Sprintf("\n\nThinking/Reasoning Guidelines:\n"+
 		"- You are running in the workspace directory: `%s`. Any relative file paths you access or create must resolve relative to this directory. You must only read, edit, write, or list files inside this workspace directory tree.\n"+
-		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using 'ls' or similar listing tool) to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
+		"- Before building, creating, or generating a new codebase, project, or application, you MUST list the workspace directory contents first (using bash 'ls') to inspect the folder structure and verify if an existing project or related files already exist, planning your actions accordingly to avoid overwriting or conflicting with existing files.\n"+
 		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
-		"- For direct shell commands and read/write/list/grep/find file tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
-		"- Use the 'explore' tool to find the exact signature and body of classes, functions, or methods. This is much faster and token-efficient than using 'search' (grep) and 'read' on entire files.\n"+
+		"- For direct shell commands and read/write/edit tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
 		"- Before editing or modifying a file, you MUST read the file first to ensure your edits match the current content exactly.\n"+
 		"- When searching files, listing directories, reading code, or executing shell commands (such as find, grep, wc, ls, etc.), you MUST ALWAYS exclude or ignore dependency and build directories (such as node_modules, venv, .venv, .git, build, dist, target, and tmp) unless the user explicitly requests them.\n"+
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max).\n"+
@@ -132,15 +132,17 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 }
 
 // NewMultiAgent creates a new MultiAgent node.
-func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAgent *Agent, skillName string) *MultiAgent {
+func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAgent *Agent, skillNames []string) *MultiAgent {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var skills []tool.Skill
-	if skillName != "" {
-		for _, s := range baseAgent.ActiveSkills {
-			if s.Name == skillName {
-				skills = append(skills, s)
-				break
+	if len(skillNames) > 0 {
+		for _, sn := range skillNames {
+			for _, s := range baseAgent.ActiveSkills {
+				if s.Name == sn {
+					skills = append(skills, s)
+					break
+				}
 			}
 		}
 	} else {
@@ -153,7 +155,7 @@ func NewMultiAgent(name string, systemPrompt string, parent *MultiAgent, baseAge
 		SystemPrompt: systemPrompt,
 		Parent:       parent,
 		Skills:       skills,
-		HasAllSkills: skillName == "",
+		HasAllSkills: len(skillNames) == 0,
 		Input:        make(chan db.Message, 100),
 		Output:       make(chan db.Message, 100),
 		Subagents:    make(map[string]*MultiAgent),
@@ -357,11 +359,8 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 						}
 					}
 
-					ma.HistoryMu.RLock()
-					pTok, cTok := ma.BaseAgent.GetGlobalTokens(ma.History, nil)
-					ma.HistoryMu.RUnlock()
 
-					ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, pTok, cTok, 0, ma.BaseAgent.Config.ContextWindowLimit, true, 0, activeTasks, ma.BaseAgent.Config.ShowTokens)
+					ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, -1, -1, 0, ma.BaseAgent.Config.ContextWindowLimit, true, 0, activeTasks, ma.BaseAgent.Config.ShowTokens)
 					ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
 					ma.BaseAgent.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
 				}
@@ -380,6 +379,9 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return db.Message{}, ctx.Err()
+		}
+		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+			ma.BaseAgent.UI.SetCursorHidden(true)
 		}
 		ma.HistoryMu.RLock()
 		historyCopy := make([]db.Message, len(ma.History))
@@ -400,6 +402,13 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			close(chunkChan)
 		}()
 
+		if ma.BaseAgent != nil {
+			ma.BaseAgent.CurrentStreamMu.Lock()
+			ma.BaseAgent.CurrentStreamBuffer = new(bytes.Buffer)
+			ma.BaseAgent.CurrentStreamMu.Unlock()
+			teeWriter := io.MultiWriter(writer, ma.BaseAgent.CurrentStreamBuffer)
+			writer = teeWriter
+		}
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
 		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
@@ -409,7 +418,20 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		}
 
 		var responseHeaderStarted bool
+		var subagentCompletionTokens int
+		var subagentGenStart time.Time
+		var lastDraw time.Time
+
 		for chunk := range chunkChan {
+			if subagentGenStart.IsZero() {
+				subagentGenStart = time.Now()
+				lastDraw = subagentGenStart
+			}
+
+			if chunk.Type == "reasoning" || chunk.Type == "text" {
+				subagentCompletionTokens++
+			}
+
 			if chunk.Type == "reasoning" {
 				if ma.BaseAgent.Config.ShowThinking {
 					if !responseHeaderStarted {
@@ -438,8 +460,54 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 					sr.WriteToolCall(chunk.Content)
 				}
 			}
+
+			now := time.Now()
+			if now.Sub(lastDraw) >= 100*time.Millisecond && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+				elapsed := now.Sub(subagentGenStart).Seconds()
+				var tps float64
+				if elapsed > 0 {
+					tps = float64(subagentCompletionTokens) / elapsed
+				}
+
+				activeTasks := 0
+				for _, t := range ma.BaseAgent.ListTasks() {
+					if t.Status == "running" {
+						activeTasks++
+					}
+				}
+
+				ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, -1, -1, subagentCompletionTokens, ma.BaseAgent.Config.ContextWindowLimit, true, tps, activeTasks, ma.BaseAgent.Config.ShowTokens)
+				ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
+				lastDraw = now
+			}
 		}
 		sr.Flush()
+		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
+			ma.BaseAgent.UI.SetCursorHidden(false)
+		}
+
+		if ma.BaseAgent != nil && !subagentGenStart.IsZero() {
+			elapsed := time.Since(subagentGenStart).Seconds()
+			var finalTps float64
+			if elapsed > 0 {
+				finalTps = float64(subagentCompletionTokens) / elapsed
+			}
+
+			activeTasks := 0
+			for _, t := range ma.BaseAgent.ListTasks() {
+				if t.Status == "running" {
+					activeTasks++
+				}
+			}
+			ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, -1, -1, subagentCompletionTokens, ma.BaseAgent.Config.ContextWindowLimit, false, finalTps, activeTasks, ma.BaseAgent.Config.ShowTokens)
+			ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
+		}
+		
+		if ma.BaseAgent != nil {
+			ma.BaseAgent.CurrentStreamMu.Lock()
+			ma.BaseAgent.CurrentStreamBuffer = nil
+			ma.BaseAgent.CurrentStreamMu.Unlock()
+		}
 
 		err := <-errChan
 		if err != nil {
@@ -473,12 +541,10 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		firstTitleLine := sr.GetToolTitleLineNumber(0)
 		wasStreamed := firstTitleLine != -1
 
-		var startLine int
-		if wasStreamed {
-			startLine = firstTitleLine
-		}
-
 		for idx, tc := range assistantMsg.ToolCalls {
+			var startLine int
+			_ = startLine
+
 			if ctx.Err() != nil {
 				return db.Message{}, ctx.Err()
 			}
@@ -487,50 +553,6 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 
 			if wasStreamed {
 				startLine = sr.GetToolTitleLineNumber(idx)
-				nextTitleLine := ncw.count
-				if idx < len(assistantMsg.ToolCalls)-1 {
-					nextTitleLine = sr.GetToolTitleLineNumber(idx + 1)
-				}
-				linesToClear := nextTitleLine - startLine
-				if linesToClear > 0 && !isSubagent {
-					type promptWriter interface {
-						Unwrap() io.Writer
-						GetPrintLine() int
-						SetPrintLine(int)
-						SetPrintCol(int)
-					}
-					var pp promptWriter
-					curr := writer
-					for {
-						if p, ok := curr.(promptWriter); ok {
-							pp = p
-							break
-						}
-						if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
-							curr = unwrapper.Unwrap()
-						} else {
-							break
-						}
-					}
-					if pp != nil {
-						physicalStart := pp.GetPrintLine() - (ncw.count - startLine)
-						physicalEnd := physicalStart + linesToClear - 1
-						if physicalStart < 1 {
-							physicalStart = 1
-						}
-						if physicalEnd > pp.GetPrintLine() {
-							physicalEnd = pp.GetPrintLine()
-						}
-						for line := physicalStart; line <= physicalEnd; line++ {
-							fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H\x1b[2K", line)
-						}
-						fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H", physicalStart)
-						pp.SetPrintLine(physicalStart)
-						pp.SetPrintCol(1)
-					}
-					ncw.count = startLine
-					ncw.col = 0
-				}
 			} else {
 				prefixStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 				fmt.Fprintf(ncw, "%s [%s] calling tool:\n",
@@ -547,8 +569,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 
 			// If it's a subagent tool, update the tool header to green BEFORE executing it.
 			if isSubagent && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-				linesToGoBack := ncw.count - startLine
-				ma.BaseAgent.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+				ma.BaseAgent.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
 			}
 
 			mac := &multiAgentContext{
@@ -571,11 +592,10 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 
 			countBefore := ncw.count
-			linesToGoBack := ncw.count - startLine
 
 			if !isSubagent {
 				if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-					ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+					ma.BaseAgent.UI.RenderToolOutput(ncw, output, toolErr != nil, ma.BaseAgent.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
 				} else {
 					fmt.Fprintln(ncw, output)
 				}
@@ -666,6 +686,10 @@ func (s *subagentExecutor) Execute(ctx tool.AgentContext, arguments string) (str
 				return "", err
 			}
 			if task.Status == "completed" {
+				if len(task.Response) > 10000 {
+					truncatedResponse := task.Response[:10000] + fmt.Sprintf("\n\n... [Response truncated: subagent returned %d characters. To prevent context overflow, output is capped at 10000 characters. If you need the full detailed report, please instruct the subagent to write its response directly to a file on disk.]", len(task.Response))
+					return truncatedResponse, nil
+				}
 				return task.Response, nil
 			}
 			if task.Status == "failed" {
@@ -828,7 +852,7 @@ func (mam *MultiAgentManager) getAgentsDir() (string, error) {
 	return filepath.Join(home, ".maquis", "agents"), nil
 }
 
-func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, parentName string, skillName string) error {
+func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, parentName string, skillNames []string) error {
 	mam.mu.Lock()
 	defer mam.mu.Unlock()
 
@@ -845,20 +869,26 @@ func (mam *MultiAgentManager) SpawnAgent(name string, systemPrompt string, paren
 		parent = p
 	}
 
-	if skillName != "" {
-		found := false
-		for _, s := range mam.BaseAgent.ActiveSkills {
-			if s.Name == skillName {
-				found = true
-				break
+	if mam.BaseAgent != nil {
+		mam.BaseAgent.ReloadSkills()
+	}
+
+	if len(skillNames) > 0 {
+		for _, sn := range skillNames {
+			found := false
+			for _, s := range mam.BaseAgent.ActiveSkills {
+				if s.Name == sn {
+					found = true
+					break
+				}
 			}
-		}
-		if !found {
-			return fmt.Errorf("reference skill '%s' not found in active skills", skillName)
+			if !found {
+				return fmt.Errorf("reference skill '%s' not found in active skills", sn)
+			}
 		}
 	}
 
-	ma := NewMultiAgent(name, systemPrompt, parent, mam.BaseAgent, skillName)
+	ma := NewMultiAgent(name, systemPrompt, parent, mam.BaseAgent, skillNames)
 	ma.Manager = mam
 	mam.Agents[name] = ma
 
@@ -1256,18 +1286,9 @@ func (mam *MultiAgentManager) LoadSavedAgents() error {
 			}
 		}
 
-		var skillName string
-		if len(def.SkillNames) > 0 {
-			skillName = def.SkillNames[0]
-		}
-
-		err := mam.SpawnAgent(name, def.SystemPrompt, def.ParentName, skillName)
+		err := mam.SpawnAgent(name, def.SystemPrompt, def.ParentName, def.SkillNames)
 		if err != nil {
 			return err
-		}
-
-		for i := 1; i < len(def.SkillNames); i++ {
-			_ = mam.LoadAgentSkill(name, def.SkillNames[i])
 		}
 
 		spawned[name] = true
@@ -1309,9 +1330,12 @@ func (s *spawnSubagentTool) Definition() tool.Tool {
 						Type:        "string",
 						Description: "The specific role, instructions, and goals for this subagent.",
 					},
-					"skill_name": {
-						Type:        "string",
-						Description: "Optional name of a reference skill to assign.",
+					"skill_names": {
+						Type:        "array",
+						Description: "Optional list of specific reference skills to assign.",
+						Items: &tool.SchemaProp{
+							Type: "string",
+						},
 					},
 				},
 				Required: []string{"name", "system_prompt"},
@@ -1322,9 +1346,9 @@ func (s *spawnSubagentTool) Definition() tool.Tool {
 
 func (s *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (string, error) {
 	var args struct {
-		Name         string `json:"name"`
-		SystemPrompt string `json:"system_prompt"`
-		SkillName    string `json:"skill_name"`
+		Name         string   `json:"name"`
+		SystemPrompt string   `json:"system_prompt"`
+		SkillNames   []string `json:"skill_names"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
@@ -1335,7 +1359,7 @@ func (s *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (st
 		parentName = mac.ma.Name
 	}
 
-	err := s.mam.SpawnAgent(args.Name, args.SystemPrompt, parentName, args.SkillName)
+	err := s.mam.SpawnAgent(args.Name, args.SystemPrompt, parentName, args.SkillNames)
 	if err != nil {
 		return "", err
 	}
@@ -1545,4 +1569,92 @@ func (s *swarmAuditTool) Execute(ctx tool.AgentContext, arguments string) (strin
 	}
 
 	return sb.String(), nil
+}
+func (mam *MultiAgentManager) ClearAllAgents() {
+	mam.mu.Lock()
+	for _, ma := range mam.Agents {
+		ma.CancelActiveTurn()
+	}
+	mam.Agents = make(map[string]*MultiAgent)
+	mam.mu.Unlock()
+
+	// Wipe all JSON state files
+	home, err := os.UserHomeDir()
+	if err == nil {
+		os.RemoveAll(filepath.Join(home, ".maquis", "agents"))
+	}
+
+	// Unregister tools from the base agent
+	if mam.BaseAgent != nil {
+		mam.BaseAgent.Registry.UnregisterPrefix("subagent__")
+
+		mam.BaseAgent.SpawnedAgentsMu.Lock()
+		mam.BaseAgent.SpawnedAgents = make(map[string]bool)
+		mam.BaseAgent.SpawnedAgentsMu.Unlock()
+	}
+}
+
+func (mam *MultiAgentManager) RenderStats(w io.Writer, baseMessages []db.Message, theme style.UITheme) {
+	headerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+	titleStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+	valueStyle := style.NewStyle().Foreground(theme.Text)
+
+	calcTokens := func(history []db.Message) (int, int) {
+		var prompt, completion int
+		for _, m := range history {
+			if m.Role == "assistant" {
+				if m.PromptTokens > 0 {
+					prompt += m.PromptTokens
+				} else {
+					prompt += (len(m.Content) + len(m.ReasoningContent)) / 4
+				}
+				if m.CompletionTokens > 0 {
+					completion += m.CompletionTokens
+				} else {
+					completion += (len(m.Content) + len(m.ReasoningContent)) / 4
+				}
+			}
+		}
+		return prompt, completion
+	}
+
+	fmt.Fprintln(w, headerStyle.Render("╭───────────────────────────────────────────────────────────────────────────────────────────────────╮"))
+	fmt.Fprintln(w, headerStyle.Render("│  SWARM TOKEN UTILIZATION & COST STATS                                                             │"))
+	fmt.Fprintln(w, headerStyle.Render("├───────────────────────────────────────────────────────────────────────────────────────────────────┤"))
+
+	baseP, baseC := calcTokens(baseMessages)
+	fmt.Fprintf(w, "  %s:\n", titleStyle.Render("Base Agent (Main)"))
+	fmt.Fprintf(w, "    Prompt Tokens:      %s\n", valueStyle.Render(fmt.Sprintf("%d", baseP)))
+	fmt.Fprintf(w, "    Completion Tokens:  %s\n", valueStyle.Render(fmt.Sprintf("%d", baseC)))
+	fmt.Fprintf(w, "    Total Cost (Est):   %s\n\n", valueStyle.Render(fmt.Sprintf("%d", baseP+baseC)))
+
+	mam.mu.RLock()
+	var names []string
+	for name := range mam.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ma := mam.Agents[name]
+		ma.HistoryMu.RLock()
+		subP, subC := calcTokens(ma.History)
+		ma.HistoryMu.RUnlock()
+
+		// Truncate system prompt for clean display
+		role := ma.SystemPrompt
+		if len(role) > 60 {
+			role = role[:57] + "..."
+		}
+		role = strings.ReplaceAll(role, "\n", " ")
+
+		fmt.Fprintf(w, "  %s:\n", titleStyle.Render("Subagent: "+name))
+		fmt.Fprintf(w, "    Role/Goal:          %s\n", valueStyle.Render(role))
+		fmt.Fprintf(w, "    Prompt Tokens:      %s\n", valueStyle.Render(fmt.Sprintf("%d", subP)))
+		fmt.Fprintf(w, "    Completion Tokens:  %s\n", valueStyle.Render(fmt.Sprintf("%d", subC)))
+		fmt.Fprintf(w, "    Total Cost (Est):   %s\n\n", valueStyle.Render(fmt.Sprintf("%d", subP+subC)))
+	}
+	mam.mu.RUnlock()
+
+	fmt.Fprintln(w, headerStyle.Render("╰───────────────────────────────────────────────────────────────────────────────────────────────────╯"))
 }

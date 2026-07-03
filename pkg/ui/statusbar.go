@@ -43,10 +43,10 @@ func getTerminalSize() (int, int) {
 func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {
 	getUI().StateMu.Lock()
 	getUI().State.Model = model
-	if promptTokens >= getUI().State.PromptTokens {
+	if promptTokens >= 0 {
 		getUI().State.PromptTokens = promptTokens
 	}
-	if completionTokens >= getUI().State.CompletionTokens {
+	if completionTokens >= 0 {
 		getUI().State.CompletionTokens = completionTokens
 	}
 	getUI().State.CurrentCompletionTokens = currentCompletionTokens
@@ -120,17 +120,29 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
  
 	newStatusBarText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
 
+	indicator := "▼"
+	if getUI().CollapseResults {
+		indicator = "▸"
+	}
+	deltaKey := newStatusBarText + indicator
+
 	// Line-Level Delta Rendering check
-	if newStatusBarText == getUI().LastStatusBarText && height == getUI().LastH {
+	if deltaKey == getUI().LastStatusBarText && height == getUI().LastH {
 		return
 	}
-	getUI().LastStatusBarText = newStatusBarText
+	getUI().LastStatusBarText = deltaKey
 
 	// Draw separator line at height-1
 	fmt.Fprintf(&buf, "\x1b[%d;1H", height-1)
 	fmt.Fprint(&buf, "\x1b[2K")
 	borderStyle := style.NewStyle().Foreground(theme.Border)
-	borderLine := borderStyle.Render(strings.Repeat("─", width-1))
+	collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+	
+	dashesCount := (width - 1) - 2 // space + indicator
+	if dashesCount < 1 {
+		dashesCount = 1
+	}
+	borderLine := borderStyle.Render(strings.Repeat("─", dashesCount)) + " " + collapseStyle.Render(indicator)
 	fmt.Fprint(&buf, borderLine)
  
 	// Draw status bar content at height
@@ -226,18 +238,6 @@ func formatRight(theme UITheme, width int) string {
 	}
 	modelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 
-	collapseStr := ""
-	if getUI().CollapseResults {
-		collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-		if width < 40 {
-			collapseStr = collapseStyle.Render("c") + " "
-		} else if width < 60 {
-			collapseStr = collapseStyle.Render("[c]") + " "
-		} else {
-			collapseStr = collapseStyle.Render("[collapsed]") + " "
-		}
-	}
-
 	taskStr := ""
 	if getUI().State.ActiveTasksCount > 0 {
 		taskStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
@@ -251,15 +251,15 @@ func formatRight(theme UITheme, width int) string {
 	}
 
 	if width < 45 {
-		return collapseStr + taskStr
+		return taskStr
 	} else if width < 65 {
 		modelName := getUI().State.Model
 		if len(modelName) > 10 {
 			modelName = modelName[:10] + "..."
 		}
-		return collapseStr + taskStr + modelStyle.Render(modelName) + " "
+		return taskStr + modelStyle.Render(modelName) + " "
 	} else {
-		return collapseStr + taskStr + modelStyle.Render(getUI().State.Model) + " "
+		return taskStr + modelStyle.Render(getUI().State.Model) + " "
 	}
 }
 

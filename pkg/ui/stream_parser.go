@@ -44,7 +44,7 @@ type jsonStreamParser struct {
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "grep" || p.activeToolName == "find" || p.activeToolName == "bash" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
 }
 
 type parserWriter struct {
@@ -144,6 +144,14 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 						fmt.Fprintln(pw)
 					}
+					if p.isContent {
+						if p.lineBuffer.Len() > 0 {
+							lang := p.guessedLang
+							if lang == "" { lang = "plaintext" }
+							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
+							p.lineBuffer.Reset()
+						}
+					}
 					if p.isContent || p.isOldText || p.isNewText {
 						fmt.Fprintln(pw)
 					}
@@ -195,7 +203,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				isContentKey := (p.currentKey == "command" && p.activeToolName != "bash")
+				isContentKey := (p.currentKey == "command" && p.activeToolName != "ls")
 				if isContentKey {
 					p.isContent = true
 					p.guessedLang = ""
@@ -207,7 +215,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					}
 					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
-				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "bash") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
+				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "ls") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
 					p.isPath = true
 					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
 				} else if p.currentKey == "oldText" {
@@ -294,70 +302,4 @@ func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme)
 	// Disabled: Relative downward/upward cursor jumps (\x1b[%dB) corrupt
 	// absolute positioning if the terminal wrapped or scrolled off-screen.
 	// If the LLM sends 'path' late, the title will just remain generically generic.
-}
-
-func getNewlineCount(w io.Writer) int {
-	if n, ok := w.(interface{ GetCount() int }); ok {
-		return n.GetCount()
-	}
-	return 0
-}
-
-type newlineCounterWriter struct {
-	io.Writer
-	count int
-	col   int
-	inEsc bool
-	inCSI bool
-}
-
-func (n *newlineCounterWriter) Write(p []byte) (int, error) {
-	termW, _ := getTerminalSize()
-	if termW <= 0 {
-		termW = 80
-	}
-
-	for _, b := range p {
-		if n.inEsc {
-			if b == '[' {
-				n.inCSI = true
-				n.inEsc = false
-			} else {
-				n.inEsc = false
-			}
-			continue
-		}
-		if b == '\x1b' {
-			n.inEsc = true
-			continue
-		}
-		if n.inCSI {
-			if b >= 0x40 && b <= 0x7E {
-				n.inCSI = false
-			}
-			continue
-		}
-
-		if b == '\n' {
-			n.count++
-			n.col = 0
-		} else if b == '\r' {
-			n.col = 0
-		} else if (b >= 32 && b < 127) || b >= 0xC0 {
-			n.col++
-			if n.col >= termW {
-				n.count++
-				n.col = 0
-			}
-		}
-	}
-	return n.Writer.Write(p)
-}
-
-func (n *newlineCounterWriter) GetCount() int {
-	return n.count
-}
-
-func (n *newlineCounterWriter) Unwrap() io.Writer {
-	return n.Writer
 }

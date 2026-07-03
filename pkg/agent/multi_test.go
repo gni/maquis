@@ -29,7 +29,7 @@ func TestMultiAgentSpawnSkills(t *testing.T) {
 	mam := NewMultiAgentManager(baseAgent, &buf, theme)
 
 	// Test case 1: Spawning generic agent (empty skillName)
-	err := mam.SpawnAgent("generic_bob", "You are bob", "", "")
+	err := mam.SpawnAgent("generic_bob", "You are bob", "", nil)
 	if err != nil {
 		t.Fatalf("failed to spawn generic agent: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestMultiAgentSpawnSkills(t *testing.T) {
 	}
 
 	// Test case 2: Spawning with a specific skill
-	err = mam.SpawnAgent("git_alice", "You are alice", "", "git_guru")
+	err = mam.SpawnAgent("git_alice", "You are alice", "", []string{"git_guru"})
 	if err != nil {
 		t.Fatalf("failed to spawn git_alice: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestMultiAgentSpawnSkills(t *testing.T) {
 	}
 
 	// Test case 3: Spawning with non-existent skill should fail
-	err = mam.SpawnAgent("bad_agent", "You are bad", "", "non_existent_skill")
+	err = mam.SpawnAgent("bad_agent", "You are bad", "", []string{"non_existent_skill"})
 	if err == nil {
 		t.Fatalf("expected error when spawning with non-existent skill, got nil")
 	}
@@ -114,13 +114,13 @@ func TestMultiAgentPersistence(t *testing.T) {
 	mam.agentsDir = tempDir
 
 	// Spawn parent agent
-	err := mam.SpawnAgent("parent_agent", "System Prompt Parent", "", "git_guru")
+	err := mam.SpawnAgent("parent_agent", "System Prompt Parent", "", []string{"git_guru"})
 	if err != nil {
 		t.Fatalf("failed to spawn parent: %v", err)
 	}
 
 	// Spawn subagent under parent
-	err = mam.SpawnAgent("sub_agent", "System Prompt Sub", "parent_agent", "git_guru")
+	err = mam.SpawnAgent("sub_agent", "System Prompt Sub", "parent_agent", []string{"git_guru"})
 	if err != nil {
 		t.Fatalf("failed to spawn sub: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestMultiAgentToolRegistration(t *testing.T) {
 	mam := NewMultiAgentManager(baseAgent, &buf, theme)
 
 	// Spawn independent agent (no parent)
-	err := mam.SpawnAgent("bob", "You are bob", "", "")
+	err := mam.SpawnAgent("bob", "You are bob", "", nil)
 	if err != nil {
 		t.Fatalf("failed to spawn bob: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestSwarmAuditTool(t *testing.T) {
 	mam := NewMultiAgentManager(baseAgent, &buf, theme)
 	mam.agentsDir = tempDir
 
-	err := mam.SpawnAgent("bob", "You are bob", "", "")
+	err := mam.SpawnAgent("bob", "You are bob", "", nil)
 	if err != nil {
 		t.Fatalf("failed to spawn bob: %v", err)
 	}

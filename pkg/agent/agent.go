@@ -41,7 +41,8 @@ type AgentUI interface {
 	DrawStatsLine(w io.Writer, theme style.UITheme, spinnerFrame string, statsText string)
 	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)
 	RenderToolHeader(w io.Writer, theme style.UITheme, toolName string, toolArgs string)
-	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, highlightLines int)
+	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, wasStreamed bool)
+	SetCursorHidden(hidden bool)
 }
 
 type Agent struct {
@@ -62,6 +63,9 @@ type Agent struct {
 	NextTaskId     int
 	StreamingTask  string
 
+	CurrentStreamBuffer *bytes.Buffer
+	CurrentStreamMu     sync.Mutex
+
 	ThinkingSupported      bool
 	ThinkingSupportChecked bool
 
@@ -80,6 +84,9 @@ type Agent struct {
 
 	SystemEvents           chan string
 	PendingSystemEvent     string
+
+	ClearAgentsFunc        func()
+	MultiAgentManager      *MultiAgentManager
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -112,14 +119,9 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewReadTool())
 	a.Registry.Register(tool.NewWriteTool())
 	a.Registry.Register(tool.NewEditTool())
-	a.Registry.Register(tool.NewGrepTool())
-	a.Registry.Register(tool.NewFindTool())
-	a.Registry.Register(tool.NewLsTool())
 	a.Registry.Register(tool.NewLoadSkillTool())
 	a.Registry.Register(tool.NewTaskStatusTool())
 	a.Registry.Register(tool.NewTaskKillTool())
-	a.Registry.Register(tool.NewGitDiffTool())
-	a.Registry.Register(tool.NewExploreTool())
 
 	// Only register local executable plugins from the "plugins" directory in the workspace
 	if !a.Config.DisableLocalPlugins {

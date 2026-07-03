@@ -2,7 +2,6 @@ package ui
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -290,28 +289,7 @@ func TestDrawStaticStatsLine(t *testing.T) {
 	}
 }
 
-type mockNewlineCounter struct {
-	io.Writer
-	count int
-}
 
-func (m *mockNewlineCounter) GetCount() int {
-	return m.count
-}
-
-func TestGetNewlineCount(t *testing.T) {
-	var buf bytes.Buffer
-	m := &mockNewlineCounter{Writer: &buf, count: 42}
-	got := getNewlineCount(m)
-	if got != 42 {
-		t.Errorf("expected getNewlineCount to return 42, got %d", got)
-	}
-
-	gotNull := getNewlineCount(&buf)
-	if gotNull != 0 {
-		t.Errorf("expected getNewlineCount for non-counter writer to return 0, got %d", gotNull)
-	}
-}
 
 func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
 	a := &agent.Agent{

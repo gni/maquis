@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -187,7 +188,12 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			close(chunkChan)
 		}()
 
-		ncw := &newlineCounterWriter{Writer: writerToUse}
+		a.CurrentStreamMu.Lock()
+		a.CurrentStreamBuffer = new(bytes.Buffer)
+		a.CurrentStreamMu.Unlock()
+		
+		teeWriter := io.MultiWriter(writerToUse, a.CurrentStreamBuffer)
+		ncw := &newlineCounterWriter{Writer: teeWriter}
 		var sr StreamRenderer
 		if a.UI != nil {
 			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking, a.Config.StreamWrites, "maquis")
@@ -284,6 +290,10 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		sr.Flush()
 		stopTicker()
+		
+		a.CurrentStreamMu.Lock()
+		a.CurrentStreamBuffer = nil
+		a.CurrentStreamMu.Unlock()
 
 		streamErr := <-streamErrChan
 
@@ -407,6 +417,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		wasStreamed := firstTitleLine != -1
 
 		var startLine int
+		_ = startLine
 
 		for idx, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
@@ -417,67 +428,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 			if wasStreamed {
 				startLine = sr.GetToolTitleLineNumber(idx)
-				nextTitleLine := ncw.count
-				if idx < len(assistantMsg.ToolCalls)-1 {
-					nextTitleLine = sr.GetToolTitleLineNumber(idx + 1)
-				}
-				linesToClear := nextTitleLine - startLine
-				if linesToClear > 0 && !isSubagent {
-					type promptWriter interface {
-						Unwrap() io.Writer
-						GetPrintLine() int
-						SetPrintLine(int)
-						SetPrintCol(int)
-					}
-					var pp promptWriter
-					curr := writerToUse
-					for {
-						if p, ok := curr.(promptWriter); ok {
-							pp = p
-							break
-						}
-						if unwrapper, ok := curr.(interface{ Unwrap() io.Writer }); ok {
-							curr = unwrapper.Unwrap()
-						} else {
-							break
-						}
-					}
-					if pp != nil {
-						physicalStart := pp.GetPrintLine() - (ncw.count - startLine)
-						physicalEnd := physicalStart + linesToClear - 1
-						if physicalStart < 1 {
-							physicalStart = 1
-						}
-						if physicalEnd > pp.GetPrintLine() {
-							physicalEnd = pp.GetPrintLine()
-						}
-						for line := physicalStart; line <= physicalEnd; line++ {
-							fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H\x1b[2K", line)
-						}
-						fmt.Fprintf(pp.Unwrap(), "\x1b[%d;1H", physicalStart)
-						pp.SetPrintLine(physicalStart)
-						pp.SetPrintCol(1)
-					}
-					ncw.count = startLine
-					ncw.col = 0
-				}
-
-				// Render the executing tool header over the cleared space
-				countBefore := ncw.count
-				if a.UI != nil {
-					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
-				} else {
-					fmt.Fprintf(ncw, "tool call: %s %s\n", tc.Function.Name, tc.Function.Arguments)
-				}
-				countAfter := ncw.count
-				shift := (countAfter - countBefore) - linesToClear
-				if shift != 0 && sr != nil {
-					sr.ShiftToolTitleLineNumbers(idx+1, shift)
-				}
-
 			} else {
 				startLine = ncw.count
-				// Render the tool header
+				// Render the tool header only if it wasn't already streamed
 				if a.UI != nil {
 					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
 				} else {
@@ -513,8 +466,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				// This way, the subagent outputs its results below the green header, and we don't
 				// overwrite/duplicate the output after it completes.
 				if isSubagent && a.UI != nil {
-					linesToGoBack := ncw.count - startLine
-					a.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+					a.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
 				}
 
 				// Execute the tool call
@@ -583,9 +535,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				// Render the tool output
 				countBefore := ncw.count
 				if !isSubagent {
-					linesToGoBack := ncw.count - startLine
 					if a.UI != nil {
-						a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+						a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
 					} else {
 						fmt.Fprintln(ncw, toolOutput)
 					}
@@ -597,7 +548,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 
 				// Update agent state
-				isReadOnlyTool := tc.Function.Name == "read" || tc.Function.Name == "ls" || tc.Function.Name == "grep" || tc.Function.Name == "find"
+				isReadOnlyTool := tc.Function.Name == "read"
 				isPrevEdit := a.lastToolWasEdit
 				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
 					a.lastToolOutput = toolOutput
@@ -623,9 +574,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				a.lastToolIsError = true
 
 				countBefore := ncw.count
-				linesToGoBack := ncw.count - startLine
 				if a.UI != nil {
-					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, linesToGoBack)
+					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
 				} else {
 					fmt.Fprintln(ncw, toolOutput)
 				}
@@ -731,7 +681,7 @@ func (f *fallbackStreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff in
 func (f *fallbackStreamRenderer) GetReasoningDuration() float64                    { return 0 }
 
 func isReadOnly(toolName string) bool {
-	return toolName == "read" || toolName == "ls" || toolName == "grep" || toolName == "find" || toolName == "task_status"
+	return toolName == "read" || toolName == "task_status"
 }
 
 func getTerminalSize() (int, int) {
