@@ -171,3 +171,65 @@ func TestMarkdownStylesAreAppliedBeforeStreamCompletion(t *testing.T) {
 		t.Fatalf("realtime Markdown cleared an existing row: %q", raw)
 	}
 }
+
+func TestStreamedNumberedListDoesNotOverwriteAtExactTerminalWidth(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	var terminal bytes.Buffer
+	writer := NewPromptPreservingWriter(&terminal, 30)
+	renderer := NewStreamRenderer(writer, UITheme{}, false, false, "test")
+
+	// The rendered numbered-list prefix occupies five columns. Ending the
+	// provider chunk after another 75 ASCII characters lands exactly on the
+	// fallback 80-column terminal margin.
+	renderer.Write("1. " + strings.Repeat("a", 75))
+	if got := writer.GetPrintCol(); got != 80 {
+		t.Fatalf("exact-width chunk cursor column = %d, want pending wrap at column 80", got)
+	}
+	if got := writer.GetScrollCount(); got != 0 {
+		t.Fatalf("exact-width chunk scrolled %d time(s) before receiving another character", got)
+	}
+	terminal.Reset()
+
+	renderer.Write("continued")
+
+	raw := terminal.String()
+	if strings.Contains(raw, "\x1b[25;1Hcontinued") {
+		t.Fatalf("next stream chunk reused and overwrote the full list row: %q", raw)
+	}
+	if !strings.Contains(raw, "\r\ncontinued") {
+		t.Fatalf("pending terminal wrap was not materialized before the next chunk: %q", raw)
+	}
+	if got := writer.GetPrintCol(); got != 10 {
+		t.Fatalf("continued chunk cursor column = %d, want 10", got)
+	}
+	if got := writer.GetScrollCount(); got != 1 {
+		t.Fatalf("continued chunk scrolled %d time(s), want exactly 1", got)
+	}
+}
+
+func TestExactWidthChunkFollowedByExplicitNewlineDoesNotCreateBlankRow(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	var terminal bytes.Buffer
+	writer := NewPromptPreservingWriter(&terminal, 30)
+	if _, err := writer.Write([]byte(strings.Repeat("a", 80))); err != nil {
+		t.Fatalf("write exact-width chunk: %v", err)
+	}
+	terminal.Reset()
+
+	if _, err := writer.Write([]byte("\nnext")); err != nil {
+		t.Fatalf("write newline continuation: %v", err)
+	}
+
+	raw := terminal.String()
+	if !strings.Contains(raw, "\x1b[25;80H\nnext") {
+		t.Fatalf("explicit newline did not continue from the pending margin: %q", raw)
+	}
+	if strings.Contains(raw, "\r\n\nnext") {
+		t.Fatalf("pending wrap and explicit newline produced a blank row: %q", raw)
+	}
+	if got := writer.GetScrollCount(); got != 1 {
+		t.Fatalf("explicit newline scrolled %d time(s), want exactly 1", got)
+	}
+}

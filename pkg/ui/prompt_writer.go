@@ -32,6 +32,8 @@ type PromptPreservingWriter struct {
 	needsReposition       bool
 	scrollCount           int
 	restoreCursorToPrompt bool
+	autoWrapPending       bool
+	autoWrapDetached      bool
 }
 
 func (p *PromptPreservingWriter) getScrollBottom() int {
@@ -74,6 +76,9 @@ func (p *PromptPreservingWriter) SetCursorHidden(hidden bool) {
 	} else {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.getPromptRow(), p.promptCol)
 		p.cursorAtPrompt = true
+		if p.autoWrapPending {
+			p.autoWrapDetached = true
+		}
 	}
 	TerminalMu.Unlock()
 }
@@ -87,6 +92,9 @@ func (p *PromptPreservingWriter) SetRestoreCursorToPrompt(restore bool) {
 	} else {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
 		p.cursorAtPrompt = false
+	}
+	if p.autoWrapPending {
+		p.autoWrapDetached = true
 	}
 	TerminalMu.Unlock()
 }
@@ -102,6 +110,8 @@ func (p *PromptPreservingWriter) ForceReposition() {
 	p.cursorAtPrompt = true
 	p.printLine = p.getScrollBottom()
 	p.printCol = 1
+	p.autoWrapPending = false
+	p.autoWrapDetached = false
 	TerminalMu.Unlock()
 }
 
@@ -136,9 +146,29 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.cursorAtPrompt = false
 		p.needsReposition = false
+		if p.autoWrapPending {
+			p.autoWrapDetached = true
+		}
 	} else if !p.restoreCursorToPrompt && p.needsReposition {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.needsReposition = false
+		if p.autoWrapPending {
+			p.autoWrapDetached = true
+		}
+	}
+
+	// A VT terminal keeps the cursor on the last column with an internal
+	// auto-wrap-pending flag. Moving the cursor to the prompt cancels that
+	// terminal flag. Materialize the delayed wrap before the next printable
+	// chunk so it cannot overwrite column one of the completed row.
+	if p.autoWrapPending && p.autoWrapDetached && firstTerminalActionIsGraphic(data, p.ansiState) {
+		if _, err := fmt.Fprint(p.inner, "\r\n"); err != nil {
+			return 0, err
+		}
+		p.advancePrintLine()
+		p.printCol = 1
+		p.autoWrapPending = false
+		p.autoWrapDetached = false
 	}
 
 	// Write the actual content. The terminal's scrolling region (set to 1..height-6)
@@ -157,6 +187,9 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 			fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 			p.cursorAtPrompt = false
 		}
+		if p.autoWrapPending {
+			p.autoWrapDetached = true
+		}
 	}
 
 	return n, err
@@ -168,7 +201,6 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	s := string(data)
 	termW, _ := getTerminalSize()
-	scrollBottom := p.getScrollBottom()
 
 	for _, r := range s {
 		switch p.ansiState {
@@ -179,29 +211,40 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 				switch r {
 				case '\n':
 					p.printCol = 1
-					if p.printLine < scrollBottom {
-						p.printLine++
-					} else {
-						p.scrollCount++
-					}
+					p.autoWrapPending = false
+					p.autoWrapDetached = false
+					p.advancePrintLine()
 				case '\r':
 					p.printCol = 1
+					p.autoWrapPending = false
+					p.autoWrapDetached = false
 				case '\b':
+					p.autoWrapPending = false
+					p.autoWrapDetached = false
 					if p.printCol > 1 {
 						p.printCol--
 					}
 				case '\t':
-					p.printCol = ((p.printCol - 1) / 8 * 8) + 8 + 1
+					p.autoWrapPending = false
+					p.autoWrapDetached = false
+					nextCol := ((p.printCol-1)/8*8 + 8) + 1
+					if termW > 0 && nextCol > termW {
+						nextCol = termW
+					}
+					p.printCol = nextCol
 				default:
 					if r >= 32 && r != '\uFFFD' {
+						if p.autoWrapPending {
+							p.advancePrintLine()
+							p.printCol = 1
+							p.autoWrapPending = false
+							p.autoWrapDetached = false
+						}
 						p.printCol++
 						if termW > 0 && p.printCol > termW {
-							p.printCol = 1
-							if p.printLine < scrollBottom {
-								p.printLine++
-							} else {
-								p.scrollCount++
-							}
+							p.printCol = termW
+							p.autoWrapPending = true
+							p.autoWrapDetached = false
 						}
 					}
 				}
@@ -224,20 +267,15 @@ func (p *PromptPreservingWriter) trackPosition(data []byte) {
 			}
 		}
 	}
+}
 
-	// Clamp printCol based on terminal width to handle auto-wrap correctly
-	width := getRealTerminalWidth()
-	if width <= 0 {
-		width = 80
+func (p *PromptPreservingWriter) advancePrintLine() {
+	scrollBottom := p.getScrollBottom()
+	if p.printLine < scrollBottom {
+		p.printLine++
+		return
 	}
-	if p.printCol > width {
-		p.printCol = ((p.printCol - 1) % width) + 1
-		if p.printLine < scrollBottom {
-			p.printLine++
-		} else {
-			p.scrollCount++
-		}
-	}
+	p.scrollCount++
 }
 
 func (p *PromptPreservingWriter) Height() int {
@@ -271,6 +309,8 @@ func (p *PromptPreservingWriter) SetPrintLine(line int) {
 	defer TerminalMu.Unlock()
 	p.printLine = line
 	p.needsReposition = true
+	p.autoWrapPending = false
+	p.autoWrapDetached = false
 }
 
 func (p *PromptPreservingWriter) SetPrintCol(col int) {
@@ -278,6 +318,48 @@ func (p *PromptPreservingWriter) SetPrintCol(col int) {
 	defer TerminalMu.Unlock()
 	p.printCol = col
 	p.needsReposition = true
+	p.autoWrapPending = false
+	p.autoWrapDetached = false
+}
+
+func firstTerminalActionIsGraphic(data []byte, initialANSIState int) bool {
+	state := initialANSIState
+	for _, r := range string(data) {
+		switch state {
+		case 0:
+			if r == '\x1b' {
+				state = 1
+				continue
+			}
+			switch r {
+			case '\n', '\r', '\b':
+				return false
+			case '\t':
+				return true
+			default:
+				if r >= 32 && r != '\uFFFD' {
+					return true
+				}
+			}
+		case 1:
+			if r == '[' {
+				state = 2
+			} else if r == ']' {
+				state = 3
+			} else {
+				state = 0
+			}
+		case 2:
+			if r >= 0x40 && r <= 0x7E {
+				state = 0
+			}
+		case 3:
+			if r == '\a' || r == '\\' {
+				state = 0
+			}
+		}
+	}
+	return false
 }
 
 // ReplaceScrollLineBack atomically replaces one visible line without changing
