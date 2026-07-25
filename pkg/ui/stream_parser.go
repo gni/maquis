@@ -5,8 +5,6 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
-
-	"maquis/pkg/ui/style"
 )
 
 type jsonStreamParser struct {
@@ -23,10 +21,6 @@ type jsonStreamParser struct {
 	path       string
 	lineBuffer strings.Builder
 
-	// Fields for diff streaming in edit tool
-	isOldText bool
-	isNewText bool
-
 	// Field for language auto-detection
 	guessedLang string
 
@@ -39,6 +33,7 @@ type jsonStreamParser struct {
 
 	needsLeadingNewline  bool
 	toolTitleLineNumbers []int
+	toolBodyStreamed     []bool
 	activeToolIndex      int
 	streamWrites         bool
 }
@@ -91,10 +86,16 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						if unescaped == "\n" {
 							if p.guessedLang == "" && p.path != "" {
 								ext := filepath.Ext(p.path)
-								if len(ext) > 1 { p.guessedLang = ext[1:] } else { p.guessedLang = "plaintext" }
+								if len(ext) > 1 {
+									p.guessedLang = ext[1:]
+								} else {
+									p.guessedLang = "plaintext"
+								}
 							}
 							lang := p.guessedLang
-							if lang == "" { lang = "plaintext" }
+							if lang == "" {
+								lang = "plaintext"
+							}
 							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 							fmt.Fprint(pw, "\n")
 							p.lineBuffer.Reset()
@@ -103,19 +104,6 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					} else if p.isPath {
 						p.path += unescaped
-						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(unescaped))
-					} else if p.isOldText {
-						if unescaped == "\n" {
-							fmt.Fprint(pw, "\n")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(unescaped))
-						}
-					} else if p.isNewText {
-						if unescaped == "\n" {
-							fmt.Fprint(pw, "\n")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(unescaped))
-						}
 					}
 				} else {
 					p.buf.WriteString(unescaped)
@@ -142,24 +130,23 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.pathPrinted = true
 							p.updateStreamTitleWithPath(w, theme)
 						}
-						fmt.Fprintln(pw)
 					}
 					if p.isContent {
 						if p.lineBuffer.Len() > 0 {
 							lang := p.guessedLang
-							if lang == "" { lang = "plaintext" }
+							if lang == "" {
+								lang = "plaintext"
+							}
 							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 							p.lineBuffer.Reset()
 						}
 					}
-					if p.isContent || p.isOldText || p.isNewText {
+					if p.isContent {
 						fmt.Fprintln(pw)
 					}
 					p.inValue = false
 					p.isContent = false
 					p.isPath = false
-					p.isOldText = false
-					p.isNewText = false
 				}
 			} else {
 				if p.inValue {
@@ -168,10 +155,16 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						if char == '\n' {
 							if p.guessedLang == "" && p.path != "" {
 								ext := filepath.Ext(p.path)
-								if len(ext) > 1 { p.guessedLang = ext[1:] } else { p.guessedLang = "plaintext" }
+								if len(ext) > 1 {
+									p.guessedLang = ext[1:]
+								} else {
+									p.guessedLang = "plaintext"
+								}
 							}
 							lang := p.guessedLang
-							if lang == "" { lang = "plaintext" }
+							if lang == "" {
+								lang = "plaintext"
+							}
 							_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 							fmt.Fprint(pw, "\n")
 							p.lineBuffer.Reset()
@@ -180,19 +173,6 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					} else if p.isPath {
 						p.path += charStr
-						fmt.Fprint(pw, style.NewStyle().Foreground(theme.Highlight).Render(charStr))
-					} else if p.isOldText {
-						if charStr == "\n" {
-							fmt.Fprint(pw, "\n")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Error).Render(charStr))
-						}
-					} else if p.isNewText {
-						if charStr == "\n" {
-							fmt.Fprint(pw, "\n")
-						} else {
-							fmt.Fprint(pw, style.NewStyle().Foreground(theme.Success).Render(charStr))
-						}
 					}
 				} else {
 					p.buf.WriteByte(char)
@@ -207,6 +187,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				if isContentKey {
 					p.isContent = true
 					p.guessedLang = ""
+					p.markBodyStreamed()
 					if !p.titlePrinted {
 						p.printStreamTitle(w, theme)
 						if p.outputBuf.Len() > 0 {
@@ -214,43 +195,14 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							p.outputBuf.Reset()
 						}
 					}
-					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
+					fmt.Fprintf(pw, "▸ %s: ", p.currentKey)
 				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "ls") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
 					p.isPath = true
-					fmt.Fprintf(pw, "  ▸ %s: ", p.currentKey)
-				} else if p.currentKey == "oldText" {
-					if p.streamWrites {
-						p.isOldText = true
-						if !p.titlePrinted {
-							p.printStreamTitle(w, theme)
-							if p.outputBuf.Len() > 0 {
-								fmt.Fprint(w, p.outputBuf.String())
-								p.outputBuf.Reset()
-							}
-						}
-						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
-					} else {
-						p.isOldText = true
-					}
-				} else if p.currentKey == "newText" {
-					if p.streamWrites {
-						p.isNewText = true
-						p.guessedLang = ""
-						if !p.titlePrinted {
-							p.printStreamTitle(w, theme)
-							if p.outputBuf.Len() > 0 {
-								fmt.Fprint(w, p.outputBuf.String())
-								p.outputBuf.Reset()
-							}
-						}
-						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
-					} else {
-						p.isNewText = true
-					}
 				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") {
 					if p.streamWrites {
 						p.isContent = true
 						p.guessedLang = ""
+						p.markBodyStreamed()
 						if !p.titlePrinted {
 							p.printStreamTitle(w, theme)
 							if p.outputBuf.Len() > 0 {
@@ -259,14 +211,14 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 							}
 						}
 						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
-					} else {
-						p.isContent = true
 					}
 				}
 			} else if char == '}' || char == ']' {
 				if p.isContent && p.lineBuffer.Len() > 0 {
 					lang := p.guessedLang
-					if lang == "" { lang = "plaintext" }
+					if lang == "" {
+						lang = "plaintext"
+					}
 					_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 					fmt.Fprint(pw, "\n")
 					p.lineBuffer.Reset()
@@ -274,12 +226,12 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inValue = false
 				p.isContent = false
 				p.isPath = false
-				p.isOldText = false
-				p.isNewText = false
 			} else if char == ',' {
 				if p.isContent && p.lineBuffer.Len() > 0 {
 					lang := p.guessedLang
-					if lang == "" { lang = "plaintext" }
+					if lang == "" {
+						lang = "plaintext"
+					}
 					_ = HighlightWithoutTrailingNewline(pw, p.lineBuffer.String(), lang, theme.ChromaStyle)
 					fmt.Fprint(pw, "\n")
 					p.lineBuffer.Reset()
@@ -287,19 +239,69 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inValue = false
 				p.isContent = false
 				p.isPath = false
-				p.isOldText = false
-				p.isNewText = false
 			}
 		}
 	}
 }
 
 func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
+	if p.titlePrinted {
+		return
+	}
 	p.titlePrinted = true
+	p.ensureTrackingIndex()
+	p.toolTitleLineNumbers[p.activeToolIndex] = getNewlineCount(w)
+
+	symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
+	fmt.Fprintln(w, FormatToolTitle(symbol, p.activeToolName, p.path, theme))
 }
 
 func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme) {
-	// Disabled: Relative downward/upward cursor jumps (\x1b[%dB) corrupt
-	// absolute positioning if the terminal wrapped or scrolled off-screen.
-	// If the LLM sends 'path' late, the title will just remain generically generic.
+	p.ensureTrackingIndex()
+	line := p.toolTitleLineNumbers[p.activeToolIndex]
+	symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
+	replaceTrackedStreamLine(w, line, FormatToolTitle(symbol, p.activeToolName, p.path, theme))
+}
+
+func (p *jsonStreamParser) ensureTrackingIndex() {
+	for len(p.toolTitleLineNumbers) <= p.activeToolIndex {
+		p.toolTitleLineNumbers = append(p.toolTitleLineNumbers, -1)
+	}
+	for len(p.toolBodyStreamed) <= p.activeToolIndex {
+		p.toolBodyStreamed = append(p.toolBodyStreamed, false)
+	}
+}
+
+func (p *jsonStreamParser) markBodyStreamed() {
+	p.ensureTrackingIndex()
+	p.toolBodyStreamed[p.activeToolIndex] = true
+}
+
+func getNewlineCount(w io.Writer) int {
+	for w != nil {
+		if counter, ok := w.(interface{ GetCount() int }); ok {
+			return counter.GetCount()
+		}
+		unwrapper, ok := w.(interface{ Unwrap() io.Writer })
+		if !ok {
+			break
+		}
+		w = unwrapper.Unwrap()
+	}
+	return -1
+}
+
+func replaceTrackedStreamLine(w io.Writer, line int, content string) bool {
+	if line < 0 {
+		return false
+	}
+	currentLine := getNewlineCount(w)
+	if currentLine < line {
+		return false
+	}
+	writer := findPromptPreservingWriter(w)
+	if writer == nil {
+		return false
+	}
+	return writer.ReplaceScrollLineBack(currentLine-line, content)
 }

@@ -28,9 +28,18 @@ type StreamRenderer interface {
 	StartToolCall(toolName string, toolCallIndex int)
 	WriteToolCall(content string)
 	GetToolTitleLineNumber(index int) int
-	ShiftToolTitleLineNumbers(startIdx int, diff int)
+	DidStreamToolBody(index int) bool
+	CompleteToolCall(index int, toolName string, toolArgs string, isError bool)
 	GetReasoningDuration() float64
 }
+
+type SubagentCancellationDecision uint8
+
+const (
+	SubagentCancellationContinue SubagentCancellationDecision = iota
+	SubagentCancellationSkipCurrent
+	SubagentCancellationStopAll
+)
 
 type AgentUI interface {
 	DrawStatusBar(w io.Writer, theme style.UITheme)
@@ -40,14 +49,16 @@ type AgentUI interface {
 	UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool)
 	DrawStatsLine(w io.Writer, theme style.UITheme, spinnerFrame string, statsText string)
 	AskForApproval(w io.Writer, theme style.UITheme) (bool, bool)
+	AskForSubagentCancellation(w io.Writer, theme style.UITheme, agentName string) SubagentCancellationDecision
 	RenderToolHeader(w io.Writer, theme style.UITheme, toolName string, toolArgs string)
-	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, wasStreamed bool)
+	RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, bodyWasStreamed bool)
 	SetCursorHidden(hidden bool)
 }
 
 type Agent struct {
 	UI             AgentUI
 	LLMProvider    LLMProvider
+	LLMProviderMu  sync.RWMutex
 	Config         *config.Config
 	ConfigPath     string
 	HttpClient     *http.Client
@@ -58,10 +69,10 @@ type Agent struct {
 	Registry       *tool.ToolRegistry
 	WorkspaceRoot  string
 
-	Tasks          map[string]*Task
-	TasksMu        sync.Mutex
-	NextTaskId     int
-	StreamingTask  string
+	Tasks         map[string]*Task
+	TasksMu       sync.Mutex
+	NextTaskId    int
+	StreamingTask string
 
 	CurrentStreamBuffer *bytes.Buffer
 	CurrentStreamMu     sync.Mutex
@@ -69,24 +80,24 @@ type Agent struct {
 	ThinkingSupported      bool
 	ThinkingSupportChecked bool
 
-	CurrentWriter          io.Writer
-	CurrentContext         context.Context
+	CurrentWriter  io.Writer
+	CurrentContext context.Context
 
 	lastToolOutput         string
 	lastToolIsError        bool
 	lastToolWasEdit        bool
 	lastGenerationDuration time.Duration
 
-	TurnStartTime          time.Time
+	TurnStartTime time.Time
 
-	SpawnedAgents          map[string]bool
-	SpawnedAgentsMu        sync.RWMutex
+	SpawnedAgents   map[string]bool
+	SpawnedAgentsMu sync.RWMutex
 
-	SystemEvents           chan string
-	PendingSystemEvent     string
+	SystemEvents       chan string
+	PendingSystemEvent string
 
-	ClearAgentsFunc        func()
-	MultiAgentManager      *MultiAgentManager
+	ClearAgentsFunc   func()
+	MultiAgentManager *MultiAgentManager
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -97,9 +108,9 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	absWorkspace, _ := filepath.Abs(cwd)
 
 	a := &Agent{
-		Config:         cfg,
-		ConfigPath:     configPath,
-		HttpClient:     httpClient,
+		Config:     cfg,
+		ConfigPath: configPath,
+		HttpClient: httpClient,
 		LLMProvider: &OpenAICompatibleProvider{
 			Config:     cfg,
 			HttpClient: httpClient,
@@ -130,6 +141,37 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	}
 
 	return a
+}
+
+// ApplyConfig replaces the live configuration and refreshes the built-in LLM
+// provider so the next request uses the new endpoint, credentials, and model.
+func (a *Agent) ApplyConfig(cfg *config.Config) {
+	if a == nil || cfg == nil {
+		return
+	}
+
+	a.LLMProviderMu.Lock()
+	defer a.LLMProviderMu.Unlock()
+
+	a.Config = cfg
+	switch provider := a.LLMProvider.(type) {
+	case nil:
+		a.LLMProvider = &OpenAICompatibleProvider{
+			Config:     cfg,
+			HttpClient: a.HttpClient,
+		}
+	case *OpenAICompatibleProvider:
+		httpClient := provider.HttpClient
+		if httpClient == nil {
+			httpClient = a.HttpClient
+		}
+		a.LLMProvider = &OpenAICompatibleProvider{
+			Config:     cfg,
+			HttpClient: httpClient,
+		}
+	}
+	a.ThinkingSupported = false
+	a.ThinkingSupportChecked = false
 }
 
 func (a *Agent) GetWorkspaceRoot() string {
@@ -311,8 +353,8 @@ func (a *Agent) compressHistory(
 	}
 
 	newMessages := make([]db.Message, 0, len(*messages))
-	newMessages = append(newMessages, (*messages)[0]) // Keep system prompt
-	newMessages = append(newMessages, summaryMsg)     // Add summary
+	newMessages = append(newMessages, (*messages)[0])           // Keep system prompt
+	newMessages = append(newMessages, summaryMsg)               // Add summary
 	newMessages = append(newMessages, (*messages)[keepIdx:]...) // Add latest messages
 
 	if sessionID != "" {

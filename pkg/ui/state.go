@@ -23,6 +23,8 @@ func getUI() *AgentUIImpl {
 // TerminalMu protects terminal output operations.
 var TerminalMu sync.Mutex
 
+
+
 // IsInteractive indicates if the interactive REPL session is currently running.
 var IsInteractive bool
 

@@ -15,21 +15,61 @@ import (
 	"maquis/pkg/ui/style"
 )
 
+func cloneProviderConfig(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+
+	cloned := *cfg
+	cloned.Providers = make(map[string]config.ProviderConfig, len(cfg.Providers))
+	for name, provider := range cfg.Providers {
+		cloned.Providers[name] = provider
+	}
+	return &cloned
+}
+
+func commitProviderConfig(a *agent.Agent, next *config.Config) error {
+	if a == nil || next == nil {
+		return fmt.Errorf("provider configuration is unavailable")
+	}
+	if next.ActiveProvider == "" {
+		if _, ok := next.Providers["default"]; ok {
+			next.ActiveProvider = "default"
+		}
+	}
+	if next.ActiveProvider != "" {
+		if err := next.ActivateProvider(next.ActiveProvider); err != nil {
+			return err
+		}
+	}
+	if err := config.SaveConfig(a.ConfigPath, next); err != nil {
+		return fmt.Errorf("save provider configuration: %w", err)
+	}
+	a.ApplyConfig(next)
+	return nil
+}
+
 func HandleProviderCommand(
 	a *agent.Agent,
 	parts []string,
 	messages *[]db.Message,
 	theme UITheme,
 	w io.Writer,
-	rlInput io.Reader,
+	kiReader *keyInterceptorReader,
 ) {
-	calcHistoryTokens := func() (int, int) {
-		return a.GetGlobalTokens(*messages, nil)
+	calcHistoryTokens := func() (int, int, bool) {
+		var mam *agent.MultiAgentManager
+		if kiReader != nil {
+			mam = kiReader.mam
+		}
+		return calculateActiveTokenUsage(a, *messages, activeToolAllowlist(kiReader), mam)
 	}
 
 	if len(parts) < 2 {
-		var input io.Reader = rlInput
-		if input == nil {
+		var input io.Reader
+		if kiReader != nil {
+			input = kiReader
+		} else {
 			input = os.Stdin
 			if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
 				defer tty.Close()
@@ -46,27 +86,18 @@ func HandleProviderCommand(
 		newConfig, errInteractive := RunInteractiveProviderConfig(a.Config, theme, input, output, a.ConfigPath)
 		InitStatusBar(os.Stderr)
 		if errInteractive == nil && newConfig != nil {
-			a.Config = newConfig
-			_ = config.SaveConfig(a.ConfigPath, a.Config)
+			if err := commitProviderConfig(a, newConfig); err != nil {
+				fmt.Fprintf(w, "error: %v\n", err)
+			}
+		} else if errInteractive != nil {
+			fmt.Fprintf(w, "error: provider configuration failed: %v\n", errInteractive)
 		}
 
-		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H")
-		if len(a.McpStartErrors) > 0 {
-			RenderMCPStartupErrors(w, a.McpStartErrors, theme)
+		if kiReader != nil {
+			redrawScreen(w, a, kiReader, kiReader.rl)
+		} else {
+			redrawScreen(w, a, nil, nil)
 		}
-		PrintBanner(w, a)
-
-		if errInteractive != nil {
-			fmt.Fprintln(w, "interactive provider config cancelled.")
-		} else if newConfig != nil {
-			fmt.Fprintf(w, "provider configuration updated and saved to %s\n", a.ConfigPath)
-		}
-
-		PrintSessionHistory(w, *messages, theme, a.Config)
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-		DrawStatusBar(os.Stderr, theme)
 		return
 	}
 
@@ -89,16 +120,20 @@ func HandleProviderCommand(
 		if len(parts) > 5 {
 			model = strings.Join(parts[5:], " ")
 		}
-		if a.Config.Providers == nil {
-			a.Config.Providers = make(map[string]config.ProviderConfig)
+		next := cloneProviderConfig(a.Config)
+		if next.Providers == nil {
+			next.Providers = make(map[string]config.ProviderConfig)
 		}
-		a.Config.Providers[name] = config.ProviderConfig{
+		next.Providers[name] = config.ProviderConfig{
 			Name:     name,
 			Endpoint: endpoint,
 			ApiKey:   apiKey,
 			Model:    model,
 		}
-		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		if err := commitProviderConfig(a, next); err != nil {
+			fmt.Fprintf(w, "error: %v\n", err)
+			return
+		}
 		fmt.Fprintf(w, "Provider '%s' added successfully. To use it, run: /provider select %s\n", name, name)
 	case "select", "use":
 		if len(parts) < 3 {
@@ -106,25 +141,32 @@ func HandleProviderCommand(
 			return
 		}
 		name := parts[2]
-		if name == "none" || name == "default" {
-			a.Config.ActiveProvider = ""
-			_ = config.SaveConfig(a.ConfigPath, a.Config)
+		next := cloneProviderConfig(a.Config)
+		if name == "none" {
+			if _, ok := next.Providers["default"]; ok {
+				name = "default"
+			} else {
+				name = ""
+			}
+		}
+		if name != "" {
+			if _, ok := next.Providers[name]; !ok {
+				fmt.Fprintf(w, "error: provider '%s' not found.\n", name)
+				return
+			}
+		}
+		next.ActiveProvider = name
+		if err := commitProviderConfig(a, next); err != nil {
+			fmt.Fprintf(w, "error: %v\n", err)
+			return
+		}
+		if name == "" || name == "default" {
 			fmt.Fprintln(w, "Switched to default endpoint settings.")
-			pTok, cTok := calcHistoryTokens()
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-			DrawStatusBar(os.Stderr, theme)
-			return
+		} else {
+			fmt.Fprintf(w, "Switched active provider to '%s' (Endpoint: %s, Model: %s).\n", name, a.Config.Endpoint, a.Config.Model)
 		}
-		if _, ok := a.Config.Providers[name]; !ok {
-			fmt.Fprintf(w, "error: provider '%s' not found.\n", name)
-			return
-		}
-		a.Config.ActiveProvider = name
-		a.Config.SyncActiveProvider()
-		_ = config.SaveConfig(a.ConfigPath, a.Config)
-		fmt.Fprintf(w, "Switched active provider to '%s' (Endpoint: %s, Model: %s).\n", name, a.Config.Endpoint, a.Config.Model)
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	case "model":
 		if len(parts) < 3 {
@@ -132,16 +174,20 @@ func HandleProviderCommand(
 			return
 		}
 		model := strings.Join(parts[2:], " ")
-		a.Config.Model = model
-		a.Config.UpdateActiveProvider()
-		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		next := cloneProviderConfig(a.Config)
+		next.Model = model
+		next.UpdateActiveProvider()
+		if err := commitProviderConfig(a, next); err != nil {
+			fmt.Fprintf(w, "error: %v\n", err)
+			return
+		}
 		if a.Config.ActiveProvider != "" {
 			fmt.Fprintf(w, "Updated model for provider '%s' to '%s'.\n", a.Config.ActiveProvider, model)
 		} else {
 			fmt.Fprintf(w, "Updated model to '%s'.\n", model)
 		}
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	case "remove", "delete":
 		if len(parts) < 3 {
@@ -149,18 +195,27 @@ func HandleProviderCommand(
 			return
 		}
 		name := parts[2]
-		if _, ok := a.Config.Providers[name]; !ok {
+		next := cloneProviderConfig(a.Config)
+		if _, ok := next.Providers[name]; !ok {
 			fmt.Fprintf(w, "error: provider '%s' not found.\n", name)
 			return
 		}
-		delete(a.Config.Providers, name)
-		if a.Config.ActiveProvider == name {
-			a.Config.ActiveProvider = ""
+		delete(next.Providers, name)
+		if next.ActiveProvider == name {
+			next.ActiveProvider = ""
+			if name != "default" {
+				if _, ok := next.Providers["default"]; ok {
+					next.ActiveProvider = "default"
+				}
+			}
 		}
-		_ = config.SaveConfig(a.ConfigPath, a.Config)
+		if err := commitProviderConfig(a, next); err != nil {
+			fmt.Fprintf(w, "error: %v\n", err)
+			return
+		}
 		fmt.Fprintf(w, "Provider '%s' removed.\n", name)
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	default:
 		fmt.Fprintf(w, "unknown subcommand '%s'.\n", sub)
@@ -249,15 +304,19 @@ func RunInteractiveProviderConfig(
 	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
 	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
 
-	cloned := *cfg
+	clonedConfig := cloneProviderConfig(cfg)
+	if clonedConfig == nil {
+		return nil, fmt.Errorf("provider configuration is unavailable")
+	}
+	cloned := *clonedConfig
 
 	itemsProvider := func() []*settingItem {
 		var items []*settingItem
 		items = []*settingItem{
 			{
-				id:          "active_provider",
-				name:        "active provider",
-				value:       func() string {
+				id:   "active_provider",
+				name: "active provider",
+				value: func() string {
 					if cloned.ActiveProvider == "" {
 						return "none (default)"
 					}
@@ -294,12 +353,11 @@ func RunInteractiveProviderConfig(
 
 		for _, pn := range pNames {
 			pName := pn
-			cfgProv := cloned.Providers[pName]
 
 			items = append(items, &settingItem{
 				id:          "prov_endpoint_" + pName,
 				name:        "provider: " + pName,
-				value:       func() string { return cfgProv.Endpoint },
+				value:       func() string { return cloned.Providers[pName].Endpoint },
 				description: fmt.Sprintf("Base API endpoint URL for '%s'", pName),
 				onEdit: func(newVal string) error {
 					if newVal == "" {
@@ -313,10 +371,10 @@ func RunInteractiveProviderConfig(
 			})
 
 			items = append(items, &settingItem{
-				id:          "prov_key_" + pName,
-				name:        "  api key",
+				id:   "prov_key_" + pName,
+				name: "  api key",
 				value: func() string {
-					key := cfgProv.ApiKey
+					key := cloned.Providers[pName].ApiKey
 					if key == "" {
 						return "(not set)"
 					}
@@ -389,6 +447,11 @@ func RunInteractiveProviderConfig(
 	err = runSettingsMenuLoop(rlInput, rlOutput, theme, "endpoint providers config", itemsProvider, nil)
 	if err != nil {
 		return nil, err
+	}
+	if cloned.ActiveProvider != "" {
+		if err := cloned.ActivateProvider(cloned.ActiveProvider); err != nil {
+			return nil, err
+		}
 	}
 	return &cloned, nil
 }

@@ -14,10 +14,10 @@ import (
 
 	"maquis/pkg/ui/style"
 
+	"github.com/alecthomas/chroma/v2/quick"
 	"maquis/pkg/agent"
 	"maquis/pkg/config"
 	"maquis/pkg/db"
-	"github.com/alecthomas/chroma/v2/quick"
 )
 
 func PrintBanner(w io.Writer, a *agent.Agent) {
@@ -151,6 +151,8 @@ func RenderHelp(w io.Writer, theme UITheme) {
 
 	fmt.Fprintln(w, headerStyle.Render("keyboard shortcuts:"))
 	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+A"), descStyle.Render("move to the beginning of the prompt"))
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+Left / Ctrl+Right"), descStyle.Render("move backward or forward by one prompt word"))
 	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+O"), descStyle.Render("toggle tool results collapsing (collapsed vs. full)"))
 	fmt.Fprintln(w)
 
@@ -345,7 +347,6 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 	return sb.String()
 }
 
-
 func extractToolTarget(toolName string, argsJSON string) string {
 	if argsJSON == "" {
 		return ""
@@ -473,13 +474,39 @@ func extractToolTarget(toolName string, argsJSON string) string {
 	return ""
 }
 
-func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
-	var symbol string
-	if toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
-		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
-	} else {
-		symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
+type toolRenderStatus uint8
+
+const (
+	toolStatusPending toolRenderStatus = iota
+	toolStatusSuccess
+	toolStatusError
+)
+
+func isWriteLikeTool(toolName string) bool {
+	return toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace")
+}
+
+func renderToolSymbol(toolName string, status toolRenderStatus, theme UITheme) string {
+	color := theme.Highlight
+	if status == toolStatusSuccess {
+		color = theme.Success
+	} else if status == toolStatusError {
+		color = theme.Error
 	}
+
+	symbol := "▸"
+	if isWriteLikeTool(toolName) {
+		symbol = "◆"
+	} else if status == toolStatusSuccess {
+		symbol = "✔"
+	} else if status == toolStatusError {
+		symbol = "✖"
+	}
+	return style.NewStyle().Foreground(color).Bold(true).Render(symbol)
+}
+
+func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
+	symbol := renderToolSymbol(toolName, toolStatusPending, theme)
 
 	pathVal := extractToolTarget(toolName, argsJSON)
 
@@ -487,23 +514,17 @@ func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON stri
 	fmt.Fprintln(w, title)
 }
 
-func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, wasStreamed bool) {
-	var finalDot string
-	if toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
-		if !isError {
-			finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("◆")
-		} else {
-			finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("◆")
-		}
-	} else {
-		if !isError {
-			finalDot = style.NewStyle().Foreground(theme.Success).Bold(true).Render("✔")
-		} else {
-			finalDot = style.NewStyle().Foreground(theme.Error).Bold(true).Render("✖")
-		}
+func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, theme UITheme, toolName string, argsJSON string, bodyWasStreamed bool) {
+	status := toolStatusSuccess
+	if isError {
+		status = toolStatusError
 	}
+	finalDot := renderToolSymbol(toolName, status, theme)
+	inlineSuccessfulOutput := !isError
 
-	fmt.Fprintln(w)
+	if !inlineSuccessfulOutput {
+		fmt.Fprintln(w)
+	}
 
 	borderColor := theme.Success
 	title := fmt.Sprintf("  %s Output", finalDot)
@@ -570,7 +591,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 					}
 				}
 
-				if strings.Contains(toolName, "write") || strings.Contains(toolName, "replace") {
+				if isWriteLikeTool(toolName) && !bodyWasStreamed {
 					if err != nil {
 						body = argsJSON
 						lang = "json"
@@ -600,7 +621,9 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	fmt.Fprintln(w, titleStyle.Render(title))
+	if !inlineSuccessfulOutput {
+		fmt.Fprintln(w, titleStyle.Render(title))
+	}
 
 	body = strings.TrimRight(body, "\r\n")
 	lines := strings.Split(body, "\n")
@@ -614,7 +637,7 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		fmt.Fprintln(w, renderedLine)
 	}
 
-	if collapse && len(lines) > 0 {
+	if collapse && !isError && len(lines) > 0 {
 		collapsedCount := len(lines)
 		collapsedMsg := fmt.Sprintf("  ... [%d lines collapsed. Press Ctrl+O or type /expand to view output] ...", collapsedCount)
 		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Border).Italic(true).Render(collapsedMsg))
@@ -712,6 +735,22 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 	pathStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
 
+	width, _ := getTerminalSize()
+	if width <= 0 {
+		width = 80
+	}
+	targetWidth := width - 2
+
+	path = strings.Join(strings.FieldsFunc(path, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t'
+	}), " ")
+	path = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, path)
+
 	var innerTitle string
 	if path != "" {
 		relPath := path
@@ -724,8 +763,14 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 				}
 			}
 		}
-		if (toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__")) && len(relPath) > 60 {
-			relPath = relPath[:57] + "..."
+		symbolLen := utf8.RuneCountInString(stripAnsi(symbol))
+		maxPathRunes := targetWidth - symbolLen - utf8.RuneCountInString(toolName) - 12
+		if maxPathRunes < 8 {
+			maxPathRunes = 8
+		}
+		pathRunes := []rune(relPath)
+		if len(pathRunes) > maxPathRunes {
+			relPath = string(pathRunes[:maxPathRunes-3]) + "..."
 		}
 		innerTitle = fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
 	} else {
@@ -733,11 +778,6 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	}
 
 	borderStyle := style.NewStyle().Foreground(theme.Border)
-	width, _ := getTerminalSize()
-	if width <= 0 {
-		width = 80
-	}
-	targetWidth := width - 2
 	innerLen := utf8.RuneCountInString(stripAnsi(innerTitle))
 	dashesCount := targetWidth - 5 - innerLen
 	if dashesCount < 3 {
@@ -747,7 +787,6 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	return fmt.Sprintf("%s%s %s", borderStyle.Render("─── "), innerTitle, borderStyle.Render(dashes))
 }
 
-
 func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
@@ -756,7 +795,7 @@ func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEf
 	if showThinking {
 		thinkingText = reasoningEffort
 	}
-	
+
 	statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
 	prefixCombined := borderStyle.Render("─── prompt ")
 
@@ -814,13 +853,10 @@ func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, 
 		}
 	}
 	textToDraw := statsText
-	if textToDraw == "" && spinnerFrame == "" {
-		textToDraw = getUI().LastStatsText
-	}
 	getUI().StateMu.Unlock()
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[2K", height-4-getUI().PasteLinesOffset)
+	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H", height-4-getUI().PasteLinesOffset)
 
 	if spinnerFrame != "" {
 		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
@@ -833,6 +869,11 @@ func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, 
 		fmt.Fprint(&buf, textToDraw)
 	}
 
+	if spinnerFrame == "" && textToDraw == "" {
+		fmt.Fprint(&buf, "\x1b[2K")
+	} else {
+		fmt.Fprint(&buf, "\x1b[K")
+	}
 	fmt.Fprint(&buf, "\x1b8")
 	_, _ = w.Write(buf.Bytes())
 }
@@ -866,6 +907,137 @@ func DrawStaticPromptSeparatorWithSpinnerLocked(w io.Writer, showThinking bool, 
 	fmt.Fprint(&buf, "\x1b8")
 
 	_, _ = w.Write(buf.Bytes())
+}
+
+type PromptLayout struct {
+	TotalRows   int
+	ExtraOffset int
+	CursorRow   int
+	CursorCol   int
+}
+
+func normalizeHistoryInput(input string, pos int) (string, int) {
+	if !strings.Contains(input, "↵") {
+		return input, pos
+	}
+
+	runes := []rune(input)
+	var newRunes []rune
+	newPos := pos
+
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '↵' {
+			if len(newRunes) > 0 && newRunes[len(newRunes)-1] == ' ' {
+				newRunes = newRunes[:len(newRunes)-1]
+				if i < pos {
+					newPos--
+				}
+			}
+			newRunes = append(newRunes, '\n')
+			if i+1 < len(runes) && runes[i+1] == ' ' {
+				i++
+				if i < pos {
+					newPos--
+				}
+			}
+		} else {
+			newRunes = append(newRunes, runes[i])
+		}
+		i++
+	}
+
+	if newPos < 0 {
+		newPos = 0
+	}
+	if newPos > len(newRunes) {
+		newPos = len(newRunes)
+	}
+
+	return string(newRunes), newPos
+}
+
+// CalculatePromptLayout computes the exact physical terminal rows and cursor position
+// for a given prompt input string (including multi-line and wrapped text) at a given terminal width.
+func CalculatePromptLayout(promptPrefix string, inputLine string, pos int, termWidth int) PromptLayout {
+	inputLine, pos = normalizeHistoryInput(inputLine, pos)
+
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+
+	prefixRunes := utf8.RuneCountInString(stripAnsi(promptPrefix))
+	lines := strings.Split(inputLine, "\n")
+
+	totalRows := 0
+	cursorRow := 0
+	cursorCol := 1
+	posFound := false
+	currentRuneCount := 0
+
+	for lineIdx, lineStr := range lines {
+		lineRunes := []rune(lineStr)
+		lineLen := len(lineRunes)
+
+		startColOffset := 0
+		if lineIdx == 0 {
+			startColOffset = prefixRunes
+		}
+
+		lineTotalRunes := startColOffset + lineLen
+		rowsForLine := (lineTotalRunes + termWidth - 1) / termWidth
+		if rowsForLine < 1 {
+			rowsForLine = 1
+		}
+
+		if !posFound {
+			if pos <= currentRuneCount+lineLen {
+				offsetInLine := pos - currentRuneCount
+				if lineIdx == 0 {
+					offsetInLine += prefixRunes
+				}
+				rem := offsetInLine % termWidth
+				if rem == 0 && offsetInLine > 0 {
+					cursorCol = termWidth
+					cursorRow = totalRows + (offsetInLine / termWidth) - 1
+				} else {
+					cursorCol = rem + 1
+					cursorRow = totalRows + (offsetInLine / termWidth)
+				}
+				posFound = true
+			} else {
+				currentRuneCount += lineLen + 1 // +1 for \n
+			}
+		}
+
+		totalRows += rowsForLine
+	}
+
+	if !posFound {
+		totalRunes := prefixRunes + utf8.RuneCountInString(inputLine)
+		cursorRow = totalRows - 1
+		if cursorRow < 0 {
+			cursorRow = 0
+		}
+		rem := totalRunes % termWidth
+		if rem == 0 && totalRunes > 0 {
+			cursorCol = termWidth
+		} else {
+			cursorCol = rem + 1
+		}
+	}
+
+	extraOffset := totalRows - 1
+	if extraOffset < 0 {
+		extraOffset = 0
+	}
+
+	return PromptLayout{
+		TotalRows:   totalRows,
+		ExtraOffset: extraOffset,
+		CursorRow:   cursorRow,
+		CursorCol:   cursorCol,
+	}
 }
 
 func renderReasoningMarkdownContent(w io.Writer, content string, theme UITheme) {
@@ -1053,11 +1225,12 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 				hasPrintedAnything = true
 			}
 
-			if msg.Content != "" {
+			assistantContent := agent.StripFallbackToolMarkup(msg.Content)
+			if strings.TrimSpace(assistantContent) != "" {
 				if hasPrintedAnything {
 					fmt.Fprintln(w)
 				}
-				renderMarkdownContent(w, msg.Content, theme)
+				renderMarkdownContent(w, assistantContent, theme)
 				fmt.Fprintln(w)
 				hasPrintedAnything = true
 			}
@@ -1076,7 +1249,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						if hasPrintedAnything {
 							fmt.Fprintln(w)
 						}
-						
+
 						isWriteTool := tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace")
 						path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
 						var symbol string
@@ -1089,15 +1262,15 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						fmt.Fprintln(w, title)
 
 						if len(tc.Function.Arguments) > 0 && isWriteTool {
-							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, true)
+							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, false)
 						}
-						
+
 						ui := getUI()
 						isGen := false
 						if ui != nil {
 							isGen = ui.State.IsGenerating
 						}
-						
+
 						if i == len(messages)-1 && isGen {
 							runningStyle := style.NewStyle().Foreground(theme.Secondary).Italic(true)
 							if ui != nil && ui.CollapseResults {
@@ -1134,15 +1307,15 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			if toolName == "" {
 				toolName = msg.Name
 			}
-			
+
 			isError := strings.HasPrefix(msg.Content, "Error:") || strings.HasPrefix(msg.Content, "error:") || strings.Contains(msg.Content, "command failed:")
 
 			// Reconstruct the full-width header for the history redraw since it's not saved in the tool string itself
-			symbol := style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
-			isWriteTool := toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace")
-			if isWriteTool {
-				symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
+			status := toolStatusSuccess
+			if isError {
+				status = toolStatusError
 			}
+			symbol := renderToolSymbol(toolName, status, theme)
 			path := extractToolTarget(toolName, argsJSON)
 			title := FormatToolTitle(symbol, toolName, path, theme)
 			fmt.Fprintln(w, title)
@@ -1152,20 +1325,7 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			if lastRole != "" {
 				fmt.Fprintln(w)
 			}
-			termW, _ := getTerminalSize()
-			errStyle := style.NewStyle().
-				Border(style.RoundedBorder()).
-				BorderForeground(theme.Error).
-				Padding(1, 2).
-				Margin(0, 0).
-				MaxWidth(termW)
-			
-			titleStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
-			bodyStyle := style.NewStyle().Foreground(theme.Text)
-			
-			content := fmt.Sprintf("%s\n\n%s", titleStyle.Render("error during generation:"), bodyStyle.Render(msg.Content))
-			fmt.Fprint(w, errStyle.Render(content))
-			fmt.Fprintln(w)
+			RenderGenerationError(w, msg.Content, theme)
 		}
 		lastRole = msg.Role
 	}

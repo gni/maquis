@@ -14,25 +14,26 @@ import (
 
 // AgentUIImpl implements agent.AgentUI and encapsulates the state of the TUI.
 type AgentUIImpl struct {
-	Config             *config.Config
-	Theme              style.UITheme
-	SessionID          string
-	ppWriter           *PromptPreservingWriter
+	Config    *config.Config
+	Theme     style.UITheme
+	SessionID string
+	ppWriter  *PromptPreservingWriter
 
-	ActiveCancelFunc   context.CancelFunc
-	PasteLinesOffset   int
-	PasteCounter       int
-	ActiveInputReader  io.Reader
-	InApprovalPrompt   bool
-	State                 StatusBarState
-	LastH              int
-	Enabled            bool
-	ScrollRegionOffset int
-	CollapseResults    bool
-	LastStatsText      string
-	LastStatusBarText  string
-	IsInteractive      bool
-	TriggerRedraw      func()
+	ActiveCancelFunc     context.CancelFunc
+	PasteLinesOffset     int
+	PasteCounter         int
+	ActiveInputReader    io.Reader
+	InApprovalPrompt     bool
+	State                StatusBarState
+	LastH                int
+	LastPasteLinesOffset int
+	Enabled              bool
+	ScrollRegionOffset   int
+	CollapseResults      bool
+	LastStatsText        string
+	LastStatusBarText    string
+	IsInteractive        bool
+	TriggerRedraw        func()
 
 	StateMu    sync.Mutex
 	TerminalMu sync.Mutex
@@ -138,12 +139,16 @@ func (ui *AgentUIImpl) AskForApproval(w io.Writer, theme style.UITheme) (bool, b
 	return AskForApproval(w, theme)
 }
 
+func (ui *AgentUIImpl) AskForSubagentCancellation(w io.Writer, theme style.UITheme, agentName string) agent.SubagentCancellationDecision {
+	return AskForSubagentCancellation(w, theme, agentName)
+}
+
 func (ui *AgentUIImpl) RenderToolHeader(w io.Writer, theme style.UITheme, toolName string, toolArgs string) {
 	RenderToolHeader(w, theme, toolName, toolArgs)
 }
 
-func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, wasStreamed bool) {
-	RenderToolOutput(w, output, isError, collapseResults, theme, toolName, toolArgs, wasStreamed)
+func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool, collapseResults bool, theme style.UITheme, toolName string, toolArgs string, bodyWasStreamed bool) {
+	RenderToolOutput(w, output, isError, collapseResults, theme, toolName, toolArgs, bodyWasStreamed)
 }
 
 func (ui *AgentUIImpl) SetCursorHidden(hidden bool) {

@@ -146,6 +146,12 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	totalChars := 0
 
 	for _, msg := range messages {
+		if strings.HasPrefix(msg.Content, "[user manually executed slash command:") {
+			continue
+		}
+		if msg.Role == "assistant" {
+			msg.Content = StripFallbackToolMarkup(msg.Content)
+		}
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			var validTCs []db.ToolCall
 			for _, tc := range msg.ToolCalls {
@@ -198,14 +204,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		apiMessages = validMessages
 	}
 
-	var finalTools []tool.Tool
-	if p.Config.CompactPrompt {
-		for _, t := range tools {
-			finalTools = append(finalTools, compressToolDefinition(t))
-		}
-	} else {
-		finalTools = tools
-	}
+	finalTools := prepareToolDefinitions(tools, p.Config.CompactPrompt)
 
 	reqBody := ChatCompletionRequest{
 		Model:       p.Config.Model,
@@ -302,8 +301,20 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 
 	reader := bufio.NewReader(resp.Body)
 	var textBuilder strings.Builder
+	var rawTextBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	var toolCallsMap = make(map[int]*db.ToolCall)
+	textFilter := newFallbackToolTextFilter(func(text string) {
+		textBuilder.WriteString(text)
+		chunkChan <- StreamChunk{Type: "text", Content: text}
+	})
+	emitText := func(text string) {
+		if text == "" {
+			return
+		}
+		rawTextBuilder.WriteString(text)
+		textFilter.Write(text)
+	}
 
 	var promptTokens, completionTokens int
 	var generationStart time.Time
@@ -321,20 +332,14 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 					reasoningBuilder.WriteString(streamBuffer)
 					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
 				} else {
-					textBuilder.WriteString(streamBuffer)
-					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+					emitText(streamBuffer)
 				}
 				streamBuffer = ""
 			}
-			
-			if promptTokens == 0 {
-				promptTokens = 1 // Prevent div by zero
-			}
+			textFilter.Flush()
+
 			if completionTokens == 0 {
-				completionTokens = (len(textBuilder.String()) + len(reasoningBuilder.String())) / 4
-				if completionTokens == 0 {
-					completionTokens = 1
-				}
+				completionTokens = (rawTextBuilder.Len() + reasoningBuilder.Len()) / 4
 			}
 
 			partialMsg := &db.Message{
@@ -344,7 +349,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 				PromptTokens:     promptTokens,
 				CompletionTokens: completionTokens,
 			}
-			
+
 			// Append tool calls to partial msg
 			if len(toolCallsMap) > 0 {
 				maxIdx := -1
@@ -359,7 +364,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 					}
 				}
 			} else {
-				fallbackCalls := ParseFallbackToolCalls(partialMsg.Content)
+				fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
 				if len(fallbackCalls) > 0 {
 					partialMsg.ToolCalls = fallbackCalls
 				}
@@ -381,16 +386,14 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 						reasoningBuilder.WriteString(streamBuffer)
 						chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
 					} else {
-						textBuilder.WriteString(streamBuffer)
-						chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+						emitText(streamBuffer)
 					}
 					streamBuffer = ""
 				}
-				
-				if promptTokens == 0 { promptTokens = 1 }
+				textFilter.Flush()
+
 				if completionTokens == 0 {
-					completionTokens = (len(textBuilder.String()) + len(reasoningBuilder.String())) / 4
-					if completionTokens == 0 { completionTokens = 1 }
+					completionTokens = (rawTextBuilder.Len() + reasoningBuilder.Len()) / 4
 				}
 
 				partialMsg := &db.Message{
@@ -400,11 +403,13 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 					PromptTokens:     promptTokens,
 					CompletionTokens: completionTokens,
 				}
-				
+
 				if len(toolCallsMap) > 0 {
 					maxIdx := -1
 					for idx := range toolCallsMap {
-						if idx > maxIdx { maxIdx = idx }
+						if idx > maxIdx {
+							maxIdx = idx
+						}
 					}
 					for i := 0; i <= maxIdx; i++ {
 						if tc, ok := toolCallsMap[i]; ok {
@@ -412,7 +417,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 						}
 					}
 				} else {
-					fallbackCalls := ParseFallbackToolCalls(partialMsg.Content)
+					fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
 					if len(fallbackCalls) > 0 {
 						partialMsg.ToolCalls = fallbackCalls
 					}
@@ -472,8 +477,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 					if idx != -1 {
 						preText := streamBuffer[:idx]
 						if preText != "" {
-							textBuilder.WriteString(preText)
-							chunkChan <- StreamChunk{Type: "text", Content: preText}
+							emitText(preText)
 						}
 						streamBuffer = streamBuffer[idx+len(tag):]
 						inThoughtMode = true
@@ -490,14 +494,12 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 						sendLen := len(streamBuffer) - prefixMatched
 						if sendLen > 0 {
 							preText := streamBuffer[:sendLen]
-							textBuilder.WriteString(preText)
-							chunkChan <- StreamChunk{Type: "text", Content: preText}
+							emitText(preText)
 							streamBuffer = streamBuffer[sendLen:]
 						}
 						break
 					}
-					textBuilder.WriteString(streamBuffer)
-					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+					emitText(streamBuffer)
 					streamBuffer = ""
 					break
 				} else {
@@ -544,8 +546,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 					reasoningBuilder.WriteString(streamBuffer)
 					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
 				} else {
-					textBuilder.WriteString(streamBuffer)
-					chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+					emitText(streamBuffer)
 				}
 				streamBuffer = ""
 			}
@@ -591,10 +592,10 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 			reasoningBuilder.WriteString(streamBuffer)
 			chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
 		} else {
-			textBuilder.WriteString(streamBuffer)
-			chunkChan <- StreamChunk{Type: "text", Content: streamBuffer}
+			emitText(streamBuffer)
 		}
 	}
+	textFilter.Flush()
 
 	var duration time.Duration
 	if !generationStart.IsZero() {
@@ -612,8 +613,9 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		}
 	}
 	if completionTokens == 0 {
-		completionTokens = (len(textBuilder.String()) + len(reasoningBuilder.String())) / 4
-		if completionTokens == 0 && (len(textBuilder.String()) + len(reasoningBuilder.String())) > 0 {
+		completionChars := rawTextBuilder.Len() + reasoningBuilder.Len()
+		completionTokens = completionChars / 4
+		if completionTokens == 0 && completionChars > 0 {
 			completionTokens = 1
 		}
 	}
@@ -640,7 +642,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		}
 	} else {
 		// Fallback parser: extract tool calls from text content if native tool calls are empty
-		fallbackCalls := ParseFallbackToolCalls(assistantMsg.Content)
+		fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
 		if len(fallbackCalls) > 0 {
 			assistantMsg.ToolCalls = fallbackCalls
 		}
@@ -657,20 +659,34 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 
 // Delegators on Agent struct to maintain backwards compatibility
 
-func (a *Agent) CheckThinkingSupport() bool {
+func (a *Agent) currentLLMProvider() LLMProvider {
+	a.LLMProviderMu.Lock()
+	defer a.LLMProviderMu.Unlock()
+
 	if a.LLMProvider == nil {
 		a.LLMProvider = &OpenAICompatibleProvider{
 			Config:     a.Config,
 			HttpClient: a.HttpClient,
 		}
-	} else {
-		if oai, ok := a.LLMProvider.(*OpenAICompatibleProvider); ok {
-			oai.Config = a.Config
+	} else if provider, ok := a.LLMProvider.(*OpenAICompatibleProvider); ok && provider.Config != a.Config {
+		httpClient := provider.HttpClient
+		if httpClient == nil {
+			httpClient = a.HttpClient
+		}
+		a.LLMProvider = &OpenAICompatibleProvider{
+			Config:     a.Config,
+			HttpClient: httpClient,
 		}
 	}
+
+	return a.LLMProvider
+}
+
+func (a *Agent) CheckThinkingSupport() bool {
+	provider := a.currentLLMProvider()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return a.LLMProvider.CheckThinkingSupport(ctx)
+	return provider.CheckThinkingSupport(ctx)
 }
 
 func (a *Agent) StreamChatCompletions(
@@ -679,20 +695,7 @@ func (a *Agent) StreamChatCompletions(
 	allowlist []string,
 	chunkChan chan<- StreamChunk,
 ) (*db.Message, error) {
-	if a.LLMProvider == nil {
-		a.LLMProvider = &OpenAICompatibleProvider{
-			Config:     a.Config,
-			HttpClient: a.HttpClient,
-		}
-	} else {
-		if oai, ok := a.LLMProvider.(*OpenAICompatibleProvider); ok {
-			if oai.Config != a.Config || (oai.Config != nil && (oai.Config.Endpoint != a.Config.Endpoint || oai.Config.Model != a.Config.Model)) {
-				oai.ThinkingSupportChecked = false
-				oai.ThinkingSupported = false
-			}
-			oai.Config = a.Config
-		}
-	}
+	provider := a.currentLLMProvider()
 
 	// Capture generation duration via context value
 	durationChan := make(chan time.Duration, 1)
@@ -704,7 +707,7 @@ func (a *Agent) StreamChatCompletions(
 	})
 
 	tools := a.Registry.GetAvailableTools(allowlist)
-	msg, err := a.LLMProvider.StreamChatCompletions(ctxWithCallback, messages, tools, chunkChan)
+	msg, err := provider.StreamChatCompletions(ctxWithCallback, messages, tools, chunkChan)
 
 	select {
 	case d := <-durationChan:
@@ -752,7 +755,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			}
 		}
 	case "write":
-		compressed.Function.Description = "Write file"
+		compressed.Function.Description = "Create or intentionally replace a complete file. Never use after an edit mismatch."
 		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 			prop.Description = "File path"
 			compressed.Function.Parameters.Properties["path"] = prop
@@ -762,13 +765,13 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["write_content"] = prop
 		}
 	case "edit":
-		compressed.Function.Description = "Edit file blocks"
+		compressed.Function.Description = "Replace exact unique blocks copied from the latest read. On mismatch, read again and retry a smaller block."
 		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 			prop.Description = "File path"
 			compressed.Function.Parameters.Properties["path"] = prop
 		}
 		if prop, ok := compressed.Function.Parameters.Properties["updates"]; ok {
-			prop.Description = "Replacements array"
+			prop.Description = "Exact replacements from current file content"
 			if prop.Items != nil {
 				itemsCopy := *prop.Items
 				itemsProps := make(map[string]tool.SchemaProp)
@@ -776,13 +779,13 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 					itemsProps[k] = v
 				}
 				itemsCopy.Properties = itemsProps
-				
+
 				if oldTextProp, ok := itemsCopy.Properties["oldText"]; ok {
-					oldTextProp.Description = "Target content"
+					oldTextProp.Description = "Exact unique current text copied from latest read"
 					itemsCopy.Properties["oldText"] = oldTextProp
 				}
 				if newTextProp, ok := itemsCopy.Properties["newText"]; ok {
-					newTextProp.Description = "Replacement content"
+					newTextProp.Description = "Complete replacement for oldText"
 					itemsCopy.Properties["newText"] = newTextProp
 				}
 				prop.Items = &itemsCopy
@@ -819,4 +822,15 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 		}
 	}
 	return compressed
+}
+
+func prepareToolDefinitions(tools []tool.Tool, compact bool) []tool.Tool {
+	if !compact {
+		return tools
+	}
+	prepared := make([]tool.Tool, 0, len(tools))
+	for _, definition := range tools {
+		prepared = append(prepared, compressToolDefinition(definition))
+	}
+	return prepared
 }

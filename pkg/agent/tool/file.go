@@ -157,7 +157,7 @@ func (t *writeTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "write",
-			Description: "Create a new file or overwrite an existing file with the specified content.",
+			Description: "Create a new file or intentionally replace a complete file. Never overwrite an existing file merely to recover from an edit oldText mismatch; read it again and retry a smaller exact edit.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -228,7 +228,7 @@ func (t *editTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "edit",
-			Description: "Edit a single file using exact search and replace text blocks. oldText must match exactly. oldText cannot be empty (to insert text, match the preceding/following line and include it in newText).",
+			Description: "Edit one file using exact, unique search-and-replace blocks copied from the latest read. If oldText is stale, read the file again and retry a smaller unique block instead of overwriting the whole file.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -303,6 +303,7 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 
 	var diffBuilder strings.Builder
+	contentChanged := false
 	for i := range edits {
 		edit := &edits[i]
 		if edit.OldText == "" {
@@ -382,7 +383,7 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 						}
 					}
 					actualEnd := matchEnd
-					for actualEnd < len(fileLines) && actualEnd-matchEnd < (len(cleanOldLines) - endIdx) {
+					for actualEnd < len(fileLines) && actualEnd-matchEnd < (len(cleanOldLines)-endIdx) {
 						if strings.TrimSpace(fileLines[actualEnd]) == "" {
 							actualEnd++
 						} else {
@@ -397,6 +398,10 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 
 		if indexOfOldText == -1 {
+			if replacementAlreadyApplied(content, edit.NewText) {
+				diffBuilder.WriteString(fmt.Sprintf("edit[%d]: requested replacement already present; file unchanged\n", i))
+				continue
+			}
 			return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s", i, args.Path)
 		}
 		occurrences := strings.Count(content, edit.OldText)
@@ -410,7 +415,11 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		numOldLines := len(oldLines)
 
 		allLines := strings.Split(content, "\n")
-		content = strings.Replace(content, edit.OldText, edit.NewText, 1)
+		updatedContent := strings.Replace(content, edit.OldText, edit.NewText, 1)
+		if updatedContent != content {
+			contentChanged = true
+		}
+		content = updatedContent
 
 		// Context before (3 lines)
 		contextStart := startLine - 3
@@ -445,16 +454,16 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 	}
 
-	err = os.WriteFile(safePath, []byte(content), 0644)
-	if err != nil {
-		return "", fmt.Errorf("failed to write modified content back: %w", err)
+	if contentChanged {
+		err = os.WriteFile(safePath, []byte(content), 0644)
+		if err != nil {
+			return "", fmt.Errorf("failed to write modified content back: %w", err)
+		}
+		ctx.ReloadSkills()
 	}
-	ctx.ReloadSkills()
 
 	return diffBuilder.String(), nil
 }
-
-
 
 func isBinary(data []byte) bool {
 	limit := len(data)
@@ -542,6 +551,16 @@ func normalizeSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+func replacementAlreadyApplied(content, newText string) bool {
+	trimmed := strings.TrimSpace(newText)
+	if trimmed == "" {
+		return false
+	}
+	if len(trimmed) < 16 && !strings.Contains(newText, "\n") {
+		return false
+	}
+	return strings.Count(content, newText) == 1
+}
 
 func hasIgnoredComponent(path string) bool {
 	path = filepath.Clean(path)

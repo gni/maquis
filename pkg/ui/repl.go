@@ -1,6 +1,6 @@
 package ui
-// [STDLIB-READ]: Mapping linux-amd64 file descriptors. Architecture: Byte-Buffered state loop, Max Matrix: 80x24 Strict, Mode: Raw syscall manipulation.
 
+// [STDLIB-READ]: Mapping linux-amd64 file descriptors. Architecture: Byte-Buffered state loop, Max Matrix: 80x24 Strict, Mode: Raw syscall manipulation.
 
 import (
 	"bytes"
@@ -20,12 +20,12 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"golang.org/x/term"
 	"maquis/pkg/agent"
 	"maquis/pkg/agent/tool"
 	"maquis/pkg/config"
 	"maquis/pkg/db"
 	"maquis/pkg/ui/style"
-	"golang.org/x/term"
 )
 
 func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (string, int, bool) {
@@ -161,7 +161,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 				}
 				for _, pk := range providerKeys {
 					if strings.HasPrefix(pk, provPrefix) {
-						matches = append(matches, subCmd + pk)
+						matches = append(matches, subCmd+pk)
 					}
 				}
 			} else {
@@ -241,6 +241,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 
 type customHistory struct {
 	entries []string
+	fullMap map[string]string
 }
 
 func Deduplicate(entries []string) []string {
@@ -257,10 +258,21 @@ func Deduplicate(entries []string) []string {
 }
 
 func (h *customHistory) Add(entry string) {
-	if entry == "" {
+	raw := strings.TrimSpace(entry)
+	if raw == "" {
 		return
 	}
-	h.entries = append(h.entries, entry)
+	if h.fullMap == nil {
+		h.fullMap = make(map[string]string)
+	}
+
+	display := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", " ↵ "), "\n", " ↵ ")
+	display = strings.TrimSpace(display)
+
+	h.fullMap[display] = raw
+	h.fullMap[raw] = raw
+
+	h.entries = append(h.entries, display)
 	h.entries = Deduplicate(h.entries)
 }
 
@@ -273,6 +285,16 @@ func (h *customHistory) At(idx int) string {
 		return ""
 	}
 	return h.entries[len(h.entries)-1-idx]
+}
+
+func (h *customHistory) GetFull(line string) string {
+	if h.fullMap == nil {
+		return line
+	}
+	if full, ok := h.fullMap[line]; ok && full != "" {
+		return full
+	}
+	return line
 }
 
 type crnlWriter struct {
@@ -312,10 +334,133 @@ type keyInterceptorReader struct {
 	pastedText       string
 	ctrlCInterrupted bool
 	mam              *agent.MultiAgentManager
+	allowedTools     []string
 	inputChan        chan byte
+	approvalChan     chan byte
+	approvalReader   *approvalByteReader
 	injectChan       chan byte
 	typeAheadBuffer  []byte
+	inBracketedPaste bool
 	isAtMainPrompt   bool
+	lastCtrlDTime    time.Time
+	pastedCodeBlocks map[string]string
+}
+
+type approvalByteReader struct {
+	input <-chan byte
+}
+
+func activeToolAllowlist(reader *keyInterceptorReader) []string {
+	if reader == nil {
+		return nil
+	}
+	return reader.allowedTools
+}
+
+func calculateActiveTokenUsage(
+	a *agent.Agent,
+	messages []db.Message,
+	allowedTools []string,
+	mam *agent.MultiAgentManager,
+) (int, int, bool) {
+	activeMessages := messages
+	if mam != nil && mam.ActiveAgent != nil {
+		mam.ActiveAgent.HistoryMu.RLock()
+		activeMessages = append([]db.Message(nil), mam.ActiveAgent.History...)
+		mam.ActiveAgent.HistoryMu.RUnlock()
+	}
+	return a.GetGlobalTokenUsage(activeMessages, allowedTools)
+}
+
+func (r *approvalByteReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	first, ok := <-r.input
+	if !ok {
+		return 0, io.EOF
+	}
+	p[0] = first
+	if first != 27 || len(p) == 1 {
+		return 1, nil
+	}
+
+	timer := time.NewTimer(15 * time.Millisecond)
+	defer timer.Stop()
+
+	n := 1
+	for n < len(p) && n < 3 {
+		select {
+		case next, channelOpen := <-r.input:
+			if !channelOpen {
+				return n, nil
+			}
+			p[n] = next
+			n++
+		case <-timer.C:
+			return n, nil
+		}
+	}
+	return n, nil
+}
+
+func (ki *keyInterceptorReader) BeginApprovalInput() io.Reader {
+	if ki.approvalChan == nil {
+		ki.approvalChan = make(chan byte, 1000)
+	}
+	ki.drainApprovalInput()
+	if ki.approvalReader == nil {
+		ki.approvalReader = &approvalByteReader{input: ki.approvalChan}
+	}
+	return ki.approvalReader
+}
+
+func (ki *keyInterceptorReader) EndApprovalInput() {
+	ki.drainApprovalInput()
+}
+
+func (ki *keyInterceptorReader) drainApprovalInput() {
+	if ki.approvalChan == nil {
+		return
+	}
+	for {
+		select {
+		case _, channelOpen := <-ki.approvalChan:
+			if !channelOpen {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+var promptNavigationKeyReplacer = strings.NewReplacer(
+	"\x1b[1;5D", "\x1b[1;3D",
+	"\x1b[1;5C", "\x1b[1;3C",
+	"\x1b[5D", "\x1b[1;3D",
+	"\x1b[5C", "\x1b[1;3C",
+	"\x1bO1;5D", "\x1b[1;3D",
+	"\x1bO1;5C", "\x1b[1;3C",
+)
+
+// normalizePromptNavigationKeys translates the Ctrl+Arrow sequences emitted
+// by common terminals into the word-navigation sequences understood by x/term.
+// Ctrl+A is already handled natively by x/term and passes through unchanged.
+func normalizePromptNavigationKeys(input []byte) []byte {
+	if !bytes.ContainsRune(input, '\x1b') {
+		return input
+	}
+	return []byte(promptNavigationKeyReplacer.Replace(string(input)))
+}
+
+func (ki *keyInterceptorReader) copyReadData(p, data []byte) int {
+	n := copy(p, data)
+	if n < len(data) {
+		ki.pasteRemaining = append([]byte(nil), data[n:]...)
+	}
+	return n
 }
 
 func (ki *keyInterceptorReader) Drain() {
@@ -344,23 +489,90 @@ func (ki *keyInterceptorReader) redrawTypeAhead() {
 	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
 	promptStr := promptStyle.Render(promptPrefix)
 
-	_, height := getTerminalSize()
+	termW, height := getTerminalSize()
 	if height <= 0 {
 		return
 	}
 
-	TerminalMu.Lock()
-	defer TerminalMu.Unlock()
-
 	getUI().StateMu.Lock()
 	typeAheadCopy := string(ki.typeAheadBuffer)
+	pasteLinesOffset := getUI().PasteLinesOffset
 	getUI().StateMu.Unlock()
 
-	fmt.Fprintf(ki.w, "\x1b7\x1b[%d;1H\x1b[2K%s%s\x1b8", height-2-getUI().PasteLinesOffset, promptStr, typeAheadCopy)
+	prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+	availableWidth := termW - prefixLen - 1
+	if availableWidth < 1 {
+		availableWidth = 1
+	}
+
+	inputRunes := []rune(typeAheadCopy)
+	if len(inputRunes) > availableWidth {
+		inputRunes = inputRunes[len(inputRunes)-availableWidth:]
+	}
+	displayInput := string(inputRunes)
+	cursorCol := prefixLen + len(inputRunes) + 1
+	if termW > 0 && cursorCol > termW {
+		cursorCol = termW
+	}
+
+	if ki.agent != nil && ki.agent.CurrentWriter != nil {
+		if writer, ok := ki.agent.CurrentWriter.(*PromptPreservingWriter); ok {
+			writer.SetPromptCol(cursorCol)
+		}
+	}
+
+	promptRow := height - 2 - pasteLinesOffset
+	if promptRow < 1 {
+		promptRow = 1
+	}
+
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	fmt.Fprintf(ki.w, "\x1b[%d;1H\x1b[2K%s%s\x1b[%d;%dH", promptRow, promptStr, displayInput, promptRow, cursorCol)
 }
 
 func (ki *keyInterceptorReader) printCancelMessage() {
-	fmt.Fprintln(ki.w, "\n\n[Operation Cancelled by User]")
+	output := ki.w
+	if ki.agent != nil {
+		if uiImpl, ok := ki.agent.UI.(*AgentUIImpl); ok && uiImpl.ppWriter != nil {
+			output = uiImpl.ppWriter
+		}
+	}
+	fmt.Fprintln(output, "\n[Operation Cancelled by User]")
+}
+
+func (ki *keyInterceptorReader) handleSubagentCancellation(rawInput <-chan byte, cancelParent context.CancelFunc, agentName string) {
+	output := ki.w
+	if ki.agent != nil && ki.agent.CurrentWriter != nil {
+		output = ki.agent.CurrentWriter
+	}
+	decision := askForSubagentCancellation(
+		output,
+		&approvalByteReader{input: rawInput},
+		GetConfiguredTheme(ki.agent.Config),
+		agentName,
+	)
+
+	switch decision {
+	case agent.SubagentCancellationContinue:
+		fmt.Fprintln(output, "\n[Subagent cancellation dismissed]")
+	case agent.SubagentCancellationSkipCurrent:
+		if ki.mam.CancelSubagentTurn(agentName) {
+			fmt.Fprintf(output, "\n[Skipped subagent: %s]\n", agentName)
+		} else {
+			fmt.Fprintf(output, "\n[Subagent already finished: %s]\n", agentName)
+		}
+	case agent.SubagentCancellationStopAll:
+		ki.mam.CancelAllActiveSubagents()
+		if cancelParent != nil {
+			cancelParent()
+		}
+		fmt.Fprintln(output, "\n\n[Operation Cancelled by User]")
+	}
+
+	getUI().StateMu.Lock()
+	ki.typeAheadBuffer = nil
+	getUI().StateMu.Unlock()
 }
 
 func (ki *keyInterceptorReader) handleCtrlO() {
@@ -372,7 +584,7 @@ func (ki *keyInterceptorReader) handleCtrlO() {
 		ki.agent.Config.CollapseResults = !ki.agent.Config.CollapseResults
 		_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 		SetCollapseStatus(ki.agent.Config.CollapseResults)
-		
+
 		redrawScreen(ki.w, ki.agent, ki, ki.rl)
 
 		if ki.agent.CurrentWriter != nil {
@@ -460,19 +672,56 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 	}
 
 	if bytes.Contains(p, []byte("\x1b[H")) || bytes.Contains(p, []byte("\x1b[1;1H")) {
-		cleaned := bytes.ReplaceAll(p, []byte("\x1b[2J\x1b[H"), nil)
-		cleaned = bytes.ReplaceAll(cleaned, []byte("\x1b[H\x1b[2J"), nil)
-		cleaned = bytes.ReplaceAll(cleaned, []byte("\x1b[2J"), nil)
-		cleaned = bytes.ReplaceAll(cleaned, []byte("\x1b[H"), nil)
-		cleaned = bytes.ReplaceAll(cleaned, []byte("\x1b[1;1H"), nil)
-		var err error
-		if len(cleaned) > 0 {
-			_, err = ki.writeToTerminal(cleaned)
-		}
-		if err != nil {
-			return 0, err
-		}
 		return len(p), nil
+	}
+
+	if ki.isAtMainPrompt && ki.rl != nil {
+		termW, height := getTerminalSize()
+		if height > 3 {
+			if termW <= 0 {
+				termW = 80
+			}
+			line, pos := getTerminalLine(ki.rl)
+			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			availWidth := termW - prefixLen - 1
+			if availWidth < 10 {
+				availWidth = 10
+			}
+
+			runes := []rune(line)
+			totalRunes := len(runes)
+
+			displayStr := line
+			cursorCol := prefixLen + pos + 1
+
+			if totalRunes > availWidth {
+				start := pos - (availWidth / 2)
+				if start < 0 {
+					start = 0
+				}
+				end := start + availWidth
+				if end > totalRunes {
+					end = totalRunes
+					start = end - availWidth
+					if start < 0 {
+						start = 0
+					}
+				}
+				displayStr = string(runes[start:end])
+				cursorCol = prefixLen + (pos - start) + 1
+			}
+
+			var buf bytes.Buffer
+			cursorVisibility := "\x1b[?25h"
+			if ki.agent != nil && ki.agent.CurrentWriter != nil {
+				if pw, ok := ki.agent.CurrentWriter.(*PromptPreservingWriter); ok && pw.cursorHidden {
+					cursorVisibility = "\x1b[?25l"
+				}
+			}
+			fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s%s\x1b[%d;%dH%s", height-2, promptStr, displayStr, height-2, cursorCol, cursorVisibility)
+			_, _ = ki.writeToTerminal(buf.Bytes())
+			return len(p), nil
+		}
 	}
 
 	return ki.writeToTerminal(p)
@@ -530,20 +779,16 @@ func (ki *keyInterceptorReader) redrawLayout() {
 	// Write clear-screen first
 	fmt.Fprint(cwFinal, "\x1b[r\x1b[H\x1b[J")
 
-	// Write padding BEFORE content to push it to the bottom
+	// Set scroll region BEFORE rendering content so text auto-scrolls within 1..scrollBottom
+	fmt.Fprintf(cwFinal, "\x1b[1;%dr\x1b[1;1H", scrollBottom)
+
+	// Write padding BEFORE content to push it to the bottom of the scroll region
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
 		fmt.Fprint(cwFinal, strings.Repeat("\n", padding))
 	}
 
 	fmt.Fprint(cwFinal, content)
-
-	// Ensure the cursor scrolls/moves down past the scrolling region bottom
-	// to align the last line of content at scrollBottom and prevent overlap with the status area.
-	extraNewlines := height - scrollBottom
-	if extraNewlines > 0 {
-		fmt.Fprint(cwFinal, strings.Repeat("\n", extraNewlines))
-	}
 
 	DrawStaticPromptSeparator(cwFinal, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 
@@ -559,19 +804,13 @@ func (ki *keyInterceptorReader) redrawLayout() {
 		}
 	}
 
-	pTok, cTok := 0, 0
 	activeMessagesForTokens := []db.Message{}
 	if ki.messages != nil {
 		activeMessagesForTokens = *ki.messages
 	}
-	if ki.mam != nil && ki.mam.ActiveAgent != nil {
-		ki.mam.ActiveAgent.HistoryMu.RLock()
-		activeMessagesForTokens = ki.mam.ActiveAgent.History
-		ki.mam.ActiveAgent.HistoryMu.RUnlock()
-	}
-	pTok, cTok = ki.agent.GetGlobalTokens(activeMessagesForTokens, nil)
+	pTok, cTok, estimated := calculateActiveTokenUsage(ki.agent, activeMessagesForTokens, activeToolAllowlist(ki), ki.mam)
 
-	UpdateStatus(ki.agent.Config.Model, pTok, cTok, 0, ki.agent.Config.ContextWindowLimit, false, 0, activeTasks, ki.agent.Config.ShowTokens)
+	UpdateStatus(ki.agent.Config.Model, pTok, cTok, 0, ki.agent.Config.ContextWindowLimit, false, 0, activeTasks, ki.agent.Config.ShowTokens, estimated)
 	DrawStatusBar(cwFinal, activeTheme)
 
 	fmt.Fprintf(cwFinal, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
@@ -615,6 +854,17 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 		p[0] = b
 		n = 1
 
+		if n == 1 && ki.inputChan != nil {
+			select {
+			case input, ok := <-ki.inputChan:
+				if ok {
+					p[n] = input
+					n++
+				}
+			case <-time.After(3 * time.Millisecond):
+			}
+		}
+
 		for n < len(p) {
 			hasEscape := false
 			for i := 0; i < n; i++ {
@@ -653,140 +903,51 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	done:
 	}
 
-	hasNewlines := false
-	for i := 0; i < n; i++ {
-		if p[i] == '\n' || p[i] == '\r' {
-			hasNewlines = true
-			break
+	wasBracketedPaste := bytes.Contains(p[:n], []byte("\x1b[200~")) || ki.inBracketedPaste
+	if wasBracketedPaste {
+		ki.inBracketedPaste = true
+		data := p[:n]
+		if idx := bytes.Index(data, []byte("\x1b[200~")); idx >= 0 {
+			data = data[idx+6:]
 		}
+		if idx := bytes.Index(data, []byte("\x1b[201~")); idx >= 0 {
+			data = data[:idx]
+			ki.inBracketedPaste = false
+		}
+		n = copy(p, data)
 	}
-	isMultilinePaste := (n > 1 && hasNewlines)
 
-	if isMultilinePaste {
-		var pasteBytes []byte
-		pasteBytes = append(pasteBytes, p[:n]...)
+	if !wasBracketedPaste {
+		n = ki.copyReadData(p, normalizePromptNavigationKeys(p[:n]))
+	}
 
-		if ki.inputChan != nil {
-			timer := time.NewTimer(10 * time.Millisecond)
-			defer timer.Stop()
-
-			for {
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(10 * time.Millisecond)
-
-				select {
-				case input, ok := <-ki.inputChan:
-					if ok {
-						pasteBytes = append(pasteBytes, input)
-					} else {
-						goto pasteDone
-					}
-				case <-timer.C:
-					goto pasteDone
-				}
-			}
-		pasteDone:
-		}
-
-		var normalized []byte
-		for i := 0; i < len(pasteBytes); i++ {
-			if pasteBytes[i] == '\r' {
-				if i+1 < len(pasteBytes) && pasteBytes[i+1] == '\n' {
+	if n > 1 {
+		var rawBytes []byte
+		for i := 0; i < n; i++ {
+			if p[i] == '\r' {
+				if i+1 < n && p[i+1] == '\n' {
 					i++
 				}
-				normalized = append(normalized, '\n')
+				rawBytes = append(rawBytes, '\n')
 			} else {
-				normalized = append(normalized, pasteBytes[i])
+				rawBytes = append(rawBytes, p[i])
 			}
 		}
+		rawStr := string(rawBytes)
+		lines := strings.Split(rawStr, "\n")
 
-		ki.pastedText += string(normalized)
-
-		if ki.w != nil {
-			promptPrefix := "\r\x1b[32m" + getPromptSymbol(ki.agent.Config) + "\x1b[0m"
-			if !ki.isAtMainPrompt {
-				promptPrefix = "\r"
+		if len(lines) > 3 || len(rawStr) > 180 {
+			if ki.pastedCodeBlocks == nil {
+				ki.pastedCodeBlocks = make(map[string]string)
 			}
-			typeAheadCopy := string(ki.typeAheadBuffer)
-
-			width, height := getTerminalSize()
-			if width <= 0 {
-				width = 80
-			}
-			maxPasteLines := height - 6
-			if maxPasteLines < 1 {
-				maxPasteLines = 1
-			}
-
-			lines := strings.Split(ki.pastedText, "\n")
-			newlinesCount := len(lines) - 1
-
-			if newlinesCount > 50 {
-				getUI().PasteCounter++
-				prefix := fmt.Sprintf("\x1b[90m[Pasted text #%d (+%d lines)]\x1b[0m", getUI().PasteCounter, newlinesCount)
-				lines = []string{prefix}
-				getUI().PasteLinesOffset = 0
-			} else {
-				physicalRowsNeeded := 0
-				firstLineIdx := 0
-
-				for i := len(lines) - 1; i >= 0; i-- {
-					l := len(stripAnsi(lines[i]))
-					if i == 0 {
-						l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
-					}
-					rows := (l + width - 1) / width
-					if l == 0 {
-						rows = 1
-					}
-
-					if physicalRowsNeeded+rows > maxPasteLines && i != len(lines)-1 {
-						firstLineIdx = i + 1
-						break
-					}
-					physicalRowsNeeded += rows
-				}
-
-				if firstLineIdx > 0 {
-					lines = lines[firstLineIdx:]
-					hidden := firstLineIdx
-					prefix := fmt.Sprintf("\x1b[90m... (%d lines hidden) ...\x1b[0m ", hidden)
-					lines[0] = prefix + lines[0]
-
-					// re-evaluate physical rows
-					physicalRowsNeeded = 0
-					for i := 0; i < len(lines); i++ {
-						l := len(stripAnsi(lines[i]))
-						if i == 0 {
-							l += len(stripAnsi(promptPrefix)) + len(stripAnsi(typeAheadCopy))
-						}
-						rows := (l + width - 1) / width
-						if l == 0 {
-							rows = 1
-						}
-						physicalRowsNeeded += rows
-					}
-				}
-
-				getUI().PasteLinesOffset = physicalRowsNeeded - 1
-				if getUI().PasteLinesOffset < 0 {
-					getUI().PasteLinesOffset = 0
-				}
-			}
-
-			visualPastedText := strings.Join(lines, "\n")
-			ki.redrawLayout()
-
-			cw := crnlWriter{w: ki.w}
-			_, _ = cw.Write([]byte(promptPrefix + typeAheadCopy + visualPastedText))
+			getUI().PasteCounter++
+			tagStr := fmt.Sprintf("[Pasted code #%d (+%d lines, %d chars)]", getUI().PasteCounter, len(lines)-1, len(rawStr))
+			ki.pastedCodeBlocks[tagStr] = rawStr
+			n = copy(p, []byte(tagStr))
+		} else {
+			normalizedStr := strings.ReplaceAll(rawStr, "\n", " ↵ ")
+			n = copy(p, []byte(normalizedStr))
 		}
-
-		return 0, nil
 	}
 
 	writeIdx := 0
@@ -857,8 +1018,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}
 
-	initialPromptTokens, initialCompletionTokens := a.GetGlobalTokens(messages, allowedTools)
-
 	activeTasks := 0
 	for _, t := range a.ListTasks() {
 		if t.Status == "running" {
@@ -866,6 +1025,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}
 
+	clearTerminalForStartup(os.Stderr)
 	SetScrollRegionOffset(3)
 	InitStatusBar(os.Stderr)
 	defer ShutdownStatusBar(os.Stderr)
@@ -899,14 +1059,16 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	_ = mam.LoadSavedAgents()
 
 	kiReader := &keyInterceptorReader{
-		r:          os.Stdin,
-		agent:      a,
-		theme:      theme,
-		w:          os.Stderr,
-		messages:   &messages,
-		mam:        mam,
-		inputChan:  make(chan byte, 1000),
-		injectChan: make(chan byte, 100),
+		r:            os.Stdin,
+		agent:        a,
+		theme:        theme,
+		w:            os.Stderr,
+		messages:     &messages,
+		mam:          mam,
+		allowedTools: allowedTools,
+		inputChan:    make(chan byte, 1000),
+		approvalChan: make(chan byte, 1000),
+		injectChan:   make(chan byte, 100),
 	}
 	getUI().ActiveInputReader = kiReader
 	defer func() { getUI().ActiveInputReader = nil }()
@@ -947,59 +1109,70 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			b, ok := <-rawChan
 			if !ok {
 				close(kiReader.inputChan)
+				close(kiReader.approvalChan)
 				return
 			}
 
 			getUI().StateMu.Lock()
 			cancelFunc := getUI().ActiveCancelFunc
+			inApproval := getUI().InApprovalPrompt
 			getUI().StateMu.Unlock()
 
-			if cancelFunc != nil {
-				getUI().StateMu.Lock()
-				inApproval := getUI().InApprovalPrompt
-				getUI().StateMu.Unlock()
-
-				if inApproval {
-					if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
+			if inApproval {
+				if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
+					if cancelFunc != nil {
 						cancelFunc()
+					}
+					kiReader.printCancelMessage()
+					getUI().StateMu.Lock()
+					kiReader.typeAheadBuffer = nil
+					getUI().StateMu.Unlock()
+					kiReader.approvalChan <- b
+					continue
+				}
+				if b == 27 { // Escape
+					select {
+					case next := <-rawChan:
+						kiReader.approvalChan <- b
+						kiReader.approvalChan <- next
+					case <-time.After(50 * time.Millisecond):
+						if cancelFunc != nil {
+							cancelFunc()
+						}
 						kiReader.printCancelMessage()
 						getUI().StateMu.Lock()
 						kiReader.typeAheadBuffer = nil
 						getUI().StateMu.Unlock()
-						kiReader.inputChan <- b
-						continue
+						kiReader.approvalChan <- b
 					}
-					if b == 27 { // Escape
-						select {
-						case next := <-rawChan:
-							kiReader.inputChan <- b
-							kiReader.inputChan <- next
-						case <-time.After(50 * time.Millisecond):
-							cancelFunc()
-							kiReader.printCancelMessage()
-							getUI().StateMu.Lock()
-							kiReader.typeAheadBuffer = nil
-							getUI().StateMu.Unlock()
-							kiReader.inputChan <- b
-						}
-						continue
-					}
-					if b == 15 { // Ctrl+O
-						kiReader.handleCtrlO()
-						continue
-					}
-					if b == 20 { // Ctrl+T
-						kiReader.handleCtrlT()
-						continue
-					}
-					if b == 18 { // Ctrl+R
-						kiReader.handleCtrlR()
-						continue
-					}
-					kiReader.inputChan <- b
 					continue
 				}
+				if b == 15 { // Ctrl+O
+					kiReader.handleCtrlO()
+					continue
+				}
+				if b == 20 { // Ctrl+T
+					kiReader.handleCtrlT()
+					continue
+				}
+				if b == 18 { // Ctrl+R
+					kiReader.handleCtrlR()
+					continue
+				}
+				kiReader.approvalChan <- b
+				continue
+			}
 
+			if b == 3 || b == 4 {
+				if kiReader.mam != nil {
+					if activeName, active := kiReader.mam.ActiveSubagentName(); active {
+						kiReader.handleSubagentCancellation(rawChan, cancelFunc, activeName)
+						continue
+					}
+				}
+			}
+
+			if cancelFunc != nil {
 				if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
 					cancelFunc()
 					kiReader.printCancelMessage()
@@ -1013,12 +1186,25 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					case next := <-rawChan:
 						kiReader.inputChan <- b
 						kiReader.inputChan <- next
+						if next == '[' || next == 'O' {
+							select {
+							case dir := <-rawChan:
+								kiReader.inputChan <- dir
+								time.Sleep(2 * time.Millisecond)
+								TerminalMu.Lock()
+								drawConsoleStaticControlsLocked(os.Stderr, kiReader.agent, kiReader, kiReader.rl, true)
+								TerminalMu.Unlock()
+							case <-time.After(20 * time.Millisecond):
+							}
+						}
 					case <-time.After(50 * time.Millisecond):
-						cancelFunc()
-						kiReader.printCancelMessage()
-						getUI().StateMu.Lock()
-						kiReader.typeAheadBuffer = nil
-						getUI().StateMu.Unlock()
+						if cancelFunc != nil {
+							cancelFunc()
+							kiReader.printCancelMessage()
+							getUI().StateMu.Lock()
+							kiReader.typeAheadBuffer = nil
+							getUI().StateMu.Unlock()
+						}
 					}
 					continue
 				}
@@ -1072,6 +1258,22 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 				kiReader.inputChan <- b
 			} else {
+				if b == 4 { // Ctrl+D at main prompt
+					line, _ := getTerminalLine(kiReader.rl)
+					if strings.TrimSpace(line) == "" {
+						now := time.Now()
+						if now.Sub(kiReader.lastCtrlDTime) < 3*time.Second {
+							kiReader.inputChan <- 4
+							return
+						} else {
+							kiReader.lastCtrlDTime = now
+							activeTheme := GetConfiguredTheme(a.Config)
+							hintStyle := style.NewStyle().Foreground(activeTheme.Border).Italic(true)
+							fmt.Fprintf(os.Stderr, "  %s", hintStyle.Render("(Press Ctrl+D again to exit)"))
+							continue
+						}
+					}
+				}
 				kiReader.inputChan <- b
 			}
 		}
@@ -1085,10 +1287,12 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		rl.SetSize(w, h)
 	}
 
+	initialPromptTokens, initialCompletionTokens, initialTokensEstimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
+
 	PrintBanner(ppWriter, a)
 
 	SetCollapseStatus(a.Config.CollapseResults)
-	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
+	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, initialTokensEstimated)
 	DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
 	getUI().StateMu.Lock()
 	savedStats := getUI().LastStatsText
@@ -1134,9 +1338,9 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			promptPrefix = fmt.Sprintf("[%s]%s", mam.ActiveAgent.Name, promptPrefix)
 		}
 		ppWriter.SetPromptCol(1 + utf8.RuneCountInString(promptPrefix))
-		rl.SetPrompt(promptPrefix)
+		rl.SetPrompt("")
 		TerminalMu.Lock()
-		drawConsoleStaticControlsLocked(os.Stderr, a, kiReader, rl, false)
+		drawConsoleStaticControlsLocked(os.Stderr, a, kiReader, rl, true)
 		TerminalMu.Unlock()
 
 		fmt.Fprint(os.Stderr, "\x1b[?25h")
@@ -1163,7 +1367,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		if height > 0 {
 			fmt.Fprintf(os.Stderr, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
-			
+
 			// Redraw prompt prefix so it doesn't disappear during stream
 			promptPrefix := getPromptSymbol(a.Config)
 			if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
@@ -1183,25 +1387,21 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		if kiReader.ctrlCInterrupted {
 			kiReader.ctrlCInterrupted = false
+			kiReader.currentInputLine = ""
 			kiReader.pastedText = ""
-			getUI().PasteLinesOffset = 0
-			InitStatusBar(os.Stderr)
-			fmt.Fprint(os.Stderr, "^C\n")
+			kiReader.pastedCodeBlocks = nil
+			getUI().StateMu.Lock()
+			kiReader.typeAheadBuffer = nil
+			getUI().StateMu.Unlock()
 			activeTasks := 0
 			for _, t := range a.ListTasks() {
 				if t.Status == "running" {
 					activeTasks++
 				}
 			}
-			activeMessagesForTokens := messages
-			if mam.ActiveAgent != nil {
-				mam.ActiveAgent.HistoryMu.RLock()
-				activeMessagesForTokens = mam.ActiveAgent.History
-				mam.ActiveAgent.HistoryMu.RUnlock()
-			}
-			pTok, cTok := a.GetGlobalTokens(activeMessagesForTokens, allowedTools)
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-			redrawScreen(os.Stderr, a, kiReader, rl)
+			pTok, cTok, estimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
+			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
+			refreshConsoleAfterPromptCancellation(os.Stderr, a, kiReader, rl)
 			continue
 		}
 
@@ -1211,6 +1411,14 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		kiReader.currentInputLine = ""
 		line = strings.ReplaceAll(line, "↵", "\n")
+		if kiReader.pastedCodeBlocks != nil {
+			for tag, code := range kiReader.pastedCodeBlocks {
+				if strings.Contains(line, tag) {
+					line = strings.ReplaceAll(line, tag, code)
+				}
+			}
+			kiReader.pastedCodeBlocks = nil
+		}
 
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -1218,7 +1426,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		if strings.HasPrefix(line, "/system_event ") {
 			eventMsg := strings.TrimPrefix(line, "/system_event ")
-			
+
 			// Draw a small, subtle indicator instead of the giant prompt block
 			eventStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 			fmt.Fprintf(ppWriter, "\n%s\n", eventStyle.Render("✦ "+eventMsg))
@@ -1231,9 +1439,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 			restore, err := setNonCanonical(fd)
 
-			ppWriter.SetCursorHidden(true)
 			a.RunAgentLoop(ctx, ppWriter, &messages, eventMsg, allowedTools, theme, false, currentSessionID)
-			ppWriter.SetCursorHidden(false)
 
 			if err == nil && restore != nil {
 				restore()
@@ -1367,58 +1573,14 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		var handled, quit bool
 		if isSlashCmd {
-			prevActiveAgent := ""
-			if mam.ActiveAgent != nil {
-				prevActiveAgent = mam.ActiveAgent.Name
-			}
-			prevSessionID := currentSessionID
+			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, os.Stderr, &currentSessionID, rl.History, mam, kiReader)
+			kiReader.Drain()
 
-			isMutatingOrInteractive := isMutatingOrInteractiveSlashCommand(line)
-			if !isMutatingOrInteractive {
-				var buf bytes.Buffer
-				cwBuf := crnlWriter{w: &buf}
-				handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cwBuf, &currentSessionID, rl.History, mam, kiReader)
-				kiReader.Drain()
-
-				if handled && !quit {
-					outputStr := tool.SanitizeUTF8(buf.Bytes())
-					contextMsg := fmt.Sprintf("[user manually executed slash command: `%s`]\n%s", strings.TrimSpace(line), outputStr)
-					messages = append(messages, db.Message{Role: "user", Content: contextMsg})
-					_ = db.SaveMessage(currentSessionID, messages[len(messages)-1])
-
-					redrawScreen(os.Stderr, a, kiReader, rl)
-					continue
+			if handled {
+				if quit {
+					break
 				}
-			} else {
-				ShutdownStatusBar(os.Stderr)
-				cw := crnlWriter{w: os.Stderr}
-				handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, cw, &currentSessionID, rl.History, mam, kiReader)
-				InitStatusBar(os.Stderr)
-				kiReader.Drain()
-
-				if handled && !quit {
-					currActiveAgent := ""
-					if mam.ActiveAgent != nil {
-						currActiveAgent = mam.ActiveAgent.Name
-					}
-					parts := strings.Fields(strings.TrimSpace(line))
-					cmdName := ""
-					if len(parts) > 0 {
-						cmdName = parts[0]
-					}
-					needsRedraw := currActiveAgent != prevActiveAgent ||
-						currentSessionID != prevSessionID ||
-						cmdName == "/collapse" || cmdName == "/expand" || cmdName == "/toggle" ||
-						cmdName == "/clear" || cmdName == "/rewind" ||
-						(cmdName == "/config" && len(parts) == 1) ||
-						(cmdName == "/session" && (len(parts) == 1 || (len(parts) > 1 && parts[1] == "explorer"))) ||
-						(cmdName == "/agent" && len(parts) == 1)
-
-					if needsRedraw {
-						redrawScreen(os.Stderr, a, kiReader, rl)
-						continue
-					}
-				}
+				continue
 			}
 		}
 
@@ -1466,7 +1628,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			getUI().ActiveCancelFunc = mam.ActiveAgent.CancelActiveTurn
 			getUI().StateMu.Unlock()
 
-			ppWriter.SetCursorHidden(true)
 			err := mam.SendMessage(mam.ActiveAgent.Name, line)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error sending message: %v\n", err)
@@ -1478,7 +1639,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				}
 				fmt.Fprint(ppWriter, "\n\n")
 			}
-			ppWriter.SetCursorHidden(false)
 
 			getUI().StateMu.Lock()
 			getUI().ActiveCancelFunc = nil
@@ -1493,9 +1653,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 			restore, err := setNonCanonical(fd)
 
-			ppWriter.SetCursorHidden(true)
 			a.RunAgentLoop(ctx, ppWriter, &messages, line, allowedTools, theme, false, currentSessionID)
-			ppWriter.SetCursorHidden(false)
 
 			if err == nil && restore != nil {
 				restore()
@@ -1512,19 +1670,20 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				activeTasks++
 			}
 		}
-		activeMessagesForTokens := messages
-		if mam.ActiveAgent != nil {
-			mam.ActiveAgent.HistoryMu.RLock()
-			activeMessagesForTokens = mam.ActiveAgent.History
-			mam.ActiveAgent.HistoryMu.RUnlock()
-		}
-		pTok, cTok := a.GetGlobalTokens(activeMessagesForTokens, allowedTools)
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
-		redrawScreen(os.Stderr, a, kiReader, rl)
+		pTok, cTok, estimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
+		refreshConsoleAfterTurn(os.Stderr, a, kiReader, rl)
 	}
 
 	ShutdownStatusBar(os.Stderr)
 	fmt.Fprintf(os.Stderr, "goodbye! to resume this session, run: ./maquis --session %s (or ./maquis --resume)\n", currentSessionID)
+}
+
+func clearTerminalForStartup(w io.Writer) {
+	// Reset any scrolling region left by an earlier process before erasing the
+	// complete visible viewport. This prevents shell and prior-session text
+	// from surviving above the TUI's bottom-aligned banner.
+	fmt.Fprint(w, "\x1b[r\x1b[2J\x1b[H")
 }
 
 func parseManualCommand(line string, enabled bool) (bool, string) {
@@ -1605,25 +1764,15 @@ func countWrappedLines(s string, termW int) int {
 }
 
 func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal, drawPrompt bool) {
-	_, height := getTerminalSize()
+	termW, height := getTerminalSize()
 	if height <= 3 {
 		return
 	}
+	if termW <= 0 {
+		termW = 80
+	}
 	activeTheme := GetConfiguredTheme(a.Config)
-	
-	// Draw Status Bar
-	DrawStatusBarLocked(w, activeTheme)
-	
-	// Draw Separator
-	DrawStaticPromptSeparatorLocked(w, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
 
-	// Draw Stats Line
-	getUI().StateMu.Lock()
-	savedStats := getUI().LastStatsText
-	getUI().StateMu.Unlock()
-	DrawStaticStatsLineLocked(w, activeTheme, "", savedStats)
-
-	// Build and draw Prompt/Input
 	promptPrefix := getPromptSymbol(a.Config)
 	if kiReader != nil && kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
 		promptPrefix = fmt.Sprintf("[%s]%s", kiReader.mam.ActiveAgent.Name, promptPrefix)
@@ -1635,43 +1784,162 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 	inApproval := getUI().InApprovalPrompt
 	getUI().StateMu.Unlock()
 
+	inputLine := ""
+	posOffset := 0
+	if drawPrompt {
+		if rl != nil {
+			inputLine, posOffset = getTerminalLine(rl)
+		} else if kiReader != nil {
+			inputLine = kiReader.currentInputLine
+			posOffset = len(inputLine)
+		}
+		if kiReader != nil && kiReader.pastedText != "" {
+			inputLine = inputLine + kiReader.pastedText
+			posOffset = len([]rune(inputLine))
+		}
+	}
+
+	inputLine = strings.ReplaceAll(inputLine, "\t", " ")
+	inputLine = strings.ReplaceAll(inputLine, "\r", "")
+	inputLine, posOffset = normalizeHistoryInput(inputLine, posOffset)
+
+	layout := CalculatePromptLayout(promptPrefix, inputLine, posOffset, termW)
+
+	getUI().StateMu.Lock()
+	oldOffset := getUI().PasteLinesOffset
+	getUI().PasteLinesOffset = layout.ExtraOffset
+	getUI().StateMu.Unlock()
+
+	maxOffset := oldOffset
+	if layout.ExtraOffset > maxOffset {
+		maxOffset = layout.ExtraOffset
+	}
+
+	promptStartRow := height - 2 - layout.ExtraOffset
+	if promptStartRow < 1 {
+		promptStartRow = 1
+	}
+
+	var clearBuf bytes.Buffer
+	for l := height - 4 - maxOffset; l <= height-2; l++ {
+		if l >= 1 {
+			fmt.Fprintf(&clearBuf, "\x1b[%d;1H\x1b[2K", l)
+		}
+	}
+	_, _ = w.Write(clearBuf.Bytes())
+
+	// Draw Status Bar at row height
+	DrawStatusBarLocked(w, activeTheme)
+
+	// Draw Separator at row height-3-PasteLinesOffset
+	DrawStaticPromptSeparatorLocked(w, a.Config.ShowThinking, a.Config.ReasoningEffort, activeTheme)
+
+	// Draw Stats Line at row height-4-PasteLinesOffset
+	getUI().StateMu.Lock()
+	savedStats := getUI().LastStatsText
+	getUI().StateMu.Unlock()
+	DrawStaticStatsLineLocked(w, activeTheme, "", savedStats)
+
 	if inApproval {
-		fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
+		fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K", promptStartRow)
 		fmt.Fprint(w, promptStyle.Render(" Approve tool execution? [y/N/a (always)]: "))
 	} else {
-		fmt.Fprintf(w, "\x1b[%d;1H\x1b[2K", height-2-getUI().PasteLinesOffset)
-		if drawPrompt {
-			fmt.Fprint(w, promptStr)
-			inputLine := ""
-			posOffset := 0
-			if kiReader != nil {
-				inputLine = kiReader.currentInputLine
-				posOffset = len(inputLine)
+		lines := strings.Split(inputLine, "\n")
+		var pBuf bytes.Buffer
+
+		if len(lines) > 1 {
+			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			indent := strings.Repeat(" ", prefixLen)
+			for i, line := range lines {
+				row := promptStartRow + i
+				if row > height-2 {
+					break
+				}
+				fmt.Fprintf(&pBuf, "\x1b[%d;1H\x1b[2K", row)
+				if i == 0 {
+					pBuf.WriteString(promptStr)
+				} else {
+					pBuf.WriteString(indent)
+				}
+				pBuf.WriteString(line)
 			}
-			if rl != nil {
-				line, pos := getTerminalLine(rl)
-				inputLine = line
-				posOffset = pos
+		} else {
+			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			availWidth := termW - prefixLen - 1
+			if availWidth < 10 {
+				availWidth = 10
 			}
-			fmt.Fprint(w, inputLine)
-			fmt.Fprintf(w, "\x1b[%d;%dH", height-2-getUI().PasteLinesOffset, 1+utf8.RuneCountInString(promptPrefix)+posOffset)
+
+			runes := []rune(inputLine)
+			totalRunes := len(runes)
+
+			displayStr := inputLine
+			if totalRunes > availWidth {
+				start := posOffset - (availWidth / 2)
+				if start < 0 {
+					start = 0
+				}
+				end := start + availWidth
+				if end > totalRunes {
+					end = totalRunes
+					start = end - availWidth
+					if start < 0 {
+						start = 0
+					}
+				}
+				displayStr = string(runes[start:end])
+			}
+
+			fmt.Fprintf(&pBuf, "\x1b[%d;1H\x1b[2K", promptStartRow)
+			pBuf.WriteString(promptStr)
+			if displayStr != "" {
+				pBuf.WriteString(displayStr)
+			}
 		}
+
+		cursorRow := promptStartRow + layout.CursorRow
+		if cursorRow > height-2 {
+			cursorRow = height - 2
+		}
+
+		if drawPrompt {
+			fmt.Fprintf(&pBuf, "\x1b[%d;%dH\x1b[?25h", cursorRow, layout.CursorCol)
+		} else {
+			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			promptCol := 1 + prefixLen
+			fmt.Fprintf(&pBuf, "\x1b[%d;%dH", promptStartRow, promptCol)
+		}
+
+		_, _ = w.Write(pBuf.Bytes())
 	}
 }
 
 func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	redrawScreenWithNotice(w, a, kiReader, rl, "")
+}
+
+func refreshConsoleAfterTurn(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+	drawConsoleStaticControlsLocked(w, a, kiReader, rl, true)
+}
+
+// refreshConsoleAfterPromptCancellation redraws only the fixed controls at the
+// bottom of the terminal. A full history repaint would erase live-only chat
+// presentation and discard terminal scrollback.
+func refreshConsoleAfterPromptCancellation(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
+	refreshConsoleAfterTurn(w, a, kiReader, rl)
+}
+
+func redrawScreenWithNotice(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal, notice string) {
 	TerminalMu.Lock()
 	defer TerminalMu.Unlock()
 
 	SetCollapseStatus(a.Config.CollapseResults)
 	activeTheme := GetConfiguredTheme(a.Config)
-	promptPrefix := getPromptSymbol(a.Config)
-	if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
-		promptPrefix = fmt.Sprintf("[%s]%s", kiReader.mam.ActiveAgent.Name, promptPrefix)
-	}
 
 	if rl != nil {
-		rl.SetPrompt(promptPrefix)
+		rl.SetPrompt("")
 	}
 
 	getUI().LastH = 0
@@ -1684,11 +1952,17 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	}
 
 	PrintBanner(cwBuf, a)
+	if notice != "" {
+		noticeStyle := style.NewStyle().Foreground(activeTheme.Success).Italic(true)
+		fmt.Fprintln(cwBuf, noticeStyle.Render(notice))
+		fmt.Fprintln(cwBuf)
+	}
+
 	activeMessages := []db.Message{}
-	if kiReader.messages != nil {
+	if kiReader != nil && kiReader.messages != nil {
 		activeMessages = *kiReader.messages
 	}
-	if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
+	if kiReader != nil && kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
 		kiReader.mam.ActiveAgent.HistoryMu.RLock()
 		activeMessages = kiReader.mam.ActiveAgent.History
 		kiReader.mam.ActiveAgent.HistoryMu.RUnlock()
@@ -1713,19 +1987,16 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 	// Write clear-screen first
 	fmt.Fprint(cwFinal, "\x1b[r\x1b[H\x1b[J")
 
-	// Write padding BEFORE content to push it to the bottom
+	// Set scroll region BEFORE rendering content so text auto-scrolls within 1..scrollBottom
+	fmt.Fprintf(cwFinal, "\x1b[1;%dr\x1b[1;1H", scrollBottom)
+
+	// Write padding BEFORE content to push it to the bottom of the scroll region
 	if linesCount < scrollBottom {
 		padding := scrollBottom - linesCount
 		fmt.Fprint(cwFinal, strings.Repeat("\n", padding))
 	}
 
 	fmt.Fprint(cwFinal, content)
-
-	// Ensure the cursor scrolls/moves down past the scrolling region bottom
-	extraNewlines := height - scrollBottom
-	if extraNewlines > 0 {
-		fmt.Fprint(cwFinal, strings.Repeat("\n", extraNewlines))
-	}
 
 	a.CurrentStreamMu.Lock()
 	if a.CurrentStreamBuffer != nil {
@@ -1743,19 +2014,17 @@ func redrawScreen(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		}
 	}
 
-	pTok, cTok := 0, 0
 	activeMessagesForTokens := []db.Message{}
-	if kiReader.messages != nil {
+	if kiReader != nil && kiReader.messages != nil {
 		activeMessagesForTokens = *kiReader.messages
 	}
-	if kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
-		kiReader.mam.ActiveAgent.HistoryMu.RLock()
-		activeMessagesForTokens = kiReader.mam.ActiveAgent.History
-		kiReader.mam.ActiveAgent.HistoryMu.RUnlock()
+	var mam *agent.MultiAgentManager
+	if kiReader != nil {
+		mam = kiReader.mam
 	}
-	pTok, cTok = a.GetGlobalTokens(activeMessagesForTokens, nil)
+	pTok, cTok, estimated := calculateActiveTokenUsage(a, activeMessagesForTokens, activeToolAllowlist(kiReader), mam)
 
-	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
+	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
 
 	drawConsoleStaticControlsLocked(cwFinal, a, kiReader, rl, true)
 

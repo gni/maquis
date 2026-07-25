@@ -8,24 +8,24 @@ import (
 	"strings"
 	"time"
 
-	"maquis/pkg/ui/style"
 	"golang.org/x/term"
+	"maquis/pkg/ui/style"
 )
 
 type StatusBarState struct {
-	Model                  string
-	PromptTokens           int
-	CompletionTokens       int
+	Model                   string
+	PromptTokens            int
+	CompletionTokens        int
 	CurrentCompletionTokens int // Used to calculate current t/s speed
-	ContextLimit           int
-	StartTime              time.Time
-	IsGenerating           bool
-	LastTps                float64
-	HasLastTps             bool
-	ActiveTasksCount       int
-	ShowTokens             bool
+	ContextLimit            int
+	StartTime               time.Time
+	IsGenerating            bool
+	TokenEstimate           bool
+	LastTps                 float64
+	HasLastTps              bool
+	ActiveTasksCount        int
+	ShowTokens              bool
 }
-
 
 func getTerminalSize() (int, int) {
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
@@ -40,7 +40,12 @@ func getTerminalSize() (int, int) {
 	return 80, 24
 }
 
-func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool) {
+func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool, tokenEstimate ...bool) {
+	estimated := isGenerating
+	if len(tokenEstimate) > 0 {
+		estimated = tokenEstimate[0]
+	}
+
 	getUI().StateMu.Lock()
 	getUI().State.Model = model
 	if promptTokens >= 0 {
@@ -52,6 +57,7 @@ func UpdateStatus(model string, promptTokens, completionTokens, currentCompletio
 	getUI().State.CurrentCompletionTokens = currentCompletionTokens
 	getUI().State.ContextLimit = contextLimit
 	getUI().State.IsGenerating = isGenerating
+	getUI().State.TokenEstimate = estimated
 	getUI().State.ActiveTasksCount = activeTasks
 	getUI().State.ShowTokens = showTokens
 	if tps > 0 {
@@ -90,8 +96,8 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
-	if height != getUI().LastH {
-		if getUI().LastH > 0 {
+	if height != getUI().LastH || getUI().PasteLinesOffset != getUI().LastPasteLinesOffset {
+		if getUI().LastH > 0 && height != getUI().LastH {
 			// Clear old status bar and separator lines to prevent duplicate trails on resize
 			clearStart := getUI().LastH - 4
 			if clearStart < 1 {
@@ -101,6 +107,7 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 		}
 		fmt.Fprintf(&buf, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
 		getUI().LastH = height
+		getUI().LastPasteLinesOffset = getUI().PasteLinesOffset
 		getUI().LastStatusBarText = "" // Force redraw of the actual text
 	}
 
@@ -109,15 +116,15 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 
 	leftPart := formatLeft(theme, width)
 	rightPart := formatRight(theme, width)
- 
+
 	leftLen := len(stripAnsi(leftPart))
 	rightLen := len(stripAnsi(rightPart))
- 
+
 	padding := (width - 1) - leftLen - rightLen
 	if padding < 1 {
 		padding = 1
 	}
- 
+
 	newStatusBarText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
 
 	indicator := "▼"
@@ -137,20 +144,20 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 	fmt.Fprint(&buf, "\x1b[2K")
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-	
+
 	dashesCount := (width - 1) - 2 // space + indicator
 	if dashesCount < 1 {
 		dashesCount = 1
 	}
 	borderLine := borderStyle.Render(strings.Repeat("─", dashesCount)) + " " + collapseStyle.Render(indicator)
 	fmt.Fprint(&buf, borderLine)
- 
+
 	// Draw status bar content at height
 	fmt.Fprintf(&buf, "\x1b[%d;1H", height)
 	fmt.Fprint(&buf, "\x1b[2K")
 
 	fmt.Fprint(&buf, newStatusBarText)
- 
+
 	// Restore cursor
 	fmt.Fprint(&buf, "\x1b8")
 
@@ -194,6 +201,11 @@ func formatLeft(theme UITheme, width int) string {
 	if totalTokens >= 1000 {
 		totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
 	}
+	pctStr := fmt.Sprintf("%.1f%%", pct)
+	if getUI().State.IsGenerating || getUI().State.TokenEstimate {
+		totStr = "~" + totStr
+		pctStr = "~" + pctStr
+	}
 
 	limitStr := fmt.Sprintf("%d", getUI().State.ContextLimit)
 	if getUI().State.ContextLimit >= 1000 {
@@ -204,7 +216,7 @@ func formatLeft(theme UITheme, width int) string {
 	if width < 70 {
 		ctxStr = fmt.Sprintf("%s/%s", totStr, limitStr)
 	} else {
-		ctxStr = fmt.Sprintf("%s/%s (%.1f%%)", totStr, limitStr, pct)
+		ctxStr = fmt.Sprintf("%s/%s (%s)", totStr, limitStr, pctStr)
 	}
 
 	if width < 40 {
@@ -262,4 +274,3 @@ func formatRight(theme UITheme, width int) string {
 		return taskStr + modelStyle.Render(getUI().State.Model) + " "
 	}
 }
-

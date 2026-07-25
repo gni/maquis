@@ -66,11 +66,11 @@ func runSettingsMenuLoop(rlInput io.Reader, rlOutput io.Writer, theme UITheme, t
 
 		searchLabelStyle := style.NewStyle().Foreground(theme.Text)
 		buf.WriteString(searchLabelStyle.Render("  search:  "))
-		
+
 		searchValStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 		buf.WriteString(searchValStyle.Render(searchQuery))
 		buf.WriteString("\n")
-		
+
 		underlineStyle := style.NewStyle().Foreground(theme.Border)
 		buf.WriteString(underlineStyle.Render("           ────────────────────"))
 		buf.WriteString("\n\n")
@@ -208,7 +208,105 @@ func runSettingsMenuLoop(rlInput io.Reader, rlOutput io.Writer, theme UITheme, t
 	}
 }
 
-func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
+type approvalInputController interface {
+	BeginApprovalInput() io.Reader
+	EndApprovalInput()
+}
+
+type choiceMenuOption struct {
+	label string
+	keys  string
+}
+
+func runChoiceMenu(input io.Reader, output io.Writer, theme UITheme, prompt string, options []choiceMenuOption, selected int) (int, bool) {
+	if len(options) == 0 {
+		return -1, true
+	}
+	if selected < 0 || selected >= len(options) {
+		selected = 0
+	}
+
+	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
+	activeStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+	firstRender := true
+	fmt.Fprint(output, "\x1b[?25l")
+	defer fmt.Fprint(output, "\x1b[?25h")
+
+	renderOption := func(index int) string {
+		if index == selected {
+			return fmt.Sprintf("  > %s", activeStyle.Render(options[index].label))
+		}
+		return fmt.Sprintf("    %s", options[index].label)
+	}
+
+	renderMenu := func() {
+		if firstRender {
+			fmt.Fprint(output, "\r\x1b[K", promptStyle.Render(prompt+"\r\n"))
+			for i := range options {
+				fmt.Fprint(output, "\r\x1b[K")
+				fmt.Fprintf(output, "%s\r\n", renderOption(i))
+			}
+			firstRender = false
+			return
+		}
+
+		if promptWriter := findPromptPreservingWriter(output); promptWriter != nil {
+			lines := make([]string, len(options))
+			for i := range options {
+				lines[i] = renderOption(i)
+			}
+			if promptWriter.ReplaceScrollBlockBack(len(options), lines) {
+				return
+			}
+		}
+
+		fmt.Fprintf(output, "\x1b[%dA", len(options)+1)
+		fmt.Fprint(output, "\r\x1b[K", promptStyle.Render(prompt+"\r\n"))
+		for i := range options {
+			fmt.Fprint(output, "\r\x1b[K")
+			fmt.Fprintf(output, "%s\r\n", renderOption(i))
+		}
+	}
+
+	renderMenu()
+	buf := make([]byte, 3)
+	for {
+		n, err := input.Read(buf)
+		if err != nil {
+			return selected, true
+		}
+		if n == 0 {
+			continue
+		}
+
+		if n == 3 && buf[0] == 27 && buf[1] == '[' {
+			switch buf[2] {
+			case 'A':
+				selected = (selected - 1 + len(options)) % len(options)
+			case 'B':
+				selected = (selected + 1) % len(options)
+			}
+			renderMenu()
+			continue
+		}
+
+		for _, char := range buf[:n] {
+			if char == '\r' || char == '\n' {
+				return selected, false
+			}
+			if char == 3 || char == 4 || char == 27 {
+				return selected, true
+			}
+			for index, option := range options {
+				if strings.ContainsRune(option.keys, rune(char)) {
+					return index, false
+				}
+			}
+		}
+	}
+}
+
+func runModalChoice(w io.Writer, theme UITheme, prompt string, options []choiceMenuOption, selected int) (int, bool) {
 	var input io.Reader = os.Stdin
 	var output io.Writer = os.Stdout
 	fd := int(os.Stdin.Fd())
@@ -223,12 +321,33 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	}
 
 	getUI().StateMu.Lock()
-	hasActiveReader := getUI().ActiveInputReader != nil
+	activeReader := getUI().ActiveInputReader
+	hasActiveReader := activeReader != nil
 	if hasActiveReader {
-		input = getUI().ActiveInputReader
+		input = activeReader
 		output = w
 	}
 	getUI().StateMu.Unlock()
+
+	var inputController approvalInputController
+	getUI().StateMu.Lock()
+	getUI().InApprovalPrompt = true
+	getUI().StateMu.Unlock()
+	if controller, ok := activeReader.(approvalInputController); ok {
+		inputController = controller
+		if approvalInput := controller.BeginApprovalInput(); approvalInput != nil {
+			input = approvalInput
+		}
+	}
+
+	defer func() {
+		if inputController != nil {
+			inputController.EndApprovalInput()
+		}
+		getUI().StateMu.Lock()
+		getUI().InApprovalPrompt = false
+		getUI().StateMu.Unlock()
+	}()
 
 	if !hasActiveReader && input == os.Stdin {
 		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -253,105 +372,41 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	// We only fallback if it's NOT a terminal AND no active reader
 	if !isTerm && !hasActiveReader {
 		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-		fmt.Fprint(output, promptStyle.Render(" approve tool execution? [y/n/a (always)]: "))
+		shortcutLabels := make([]string, 0, len(options))
+		for _, option := range options {
+			key := ""
+			if option.keys != "" {
+				key = string([]rune(option.keys)[0])
+			}
+			shortcutLabels = append(shortcutLabels, fmt.Sprintf("%s=%s", key, option.label))
+		}
+		fmt.Fprint(output, promptStyle.Render(fmt.Sprintf("%s [%s]: ", prompt, strings.Join(shortcutLabels, "/"))))
 		buf := make([]byte, 1)
-		input.Read(buf)
-		char := buf[0]
-		if char == 'y' || char == 'Y' {
-			return true, false
-		} else if char == 'a' || char == 'A' {
-			return true, true
-		}
-		return false, false
-	}
-
-	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-	activeStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
-	options := []string{"yes", "no", "always"}
-	selected := 0
-
-	firstRender := true
-	fmt.Fprint(output, "\x1b[?25l") // Hide cursor
-	defer fmt.Fprint(output, "\x1b[?25h") // Ensure cursor is restored
-
-	renderMenu := func() {
-		if firstRender {
-			fmt.Fprint(output, "\r\x1b[K", promptStyle.Render(" approve tool execution?\r\n"))
-			for i, opt := range options {
-				fmt.Fprint(output, "\r\x1b[K")
-				if i == selected {
-					fmt.Fprintf(output, "  > %s\r\n", activeStyle.Render(opt))
-				} else {
-					fmt.Fprintf(output, "    %s\r\n", opt)
-				}
-			}
-			firstRender = false
-		} else {
-			fmt.Fprintf(output, "\x1b[%dA", len(options)+1)
-			fmt.Fprint(output, "\r\x1b[K", promptStyle.Render(" approve tool execution?\r\n"))
-			for i, opt := range options {
-				fmt.Fprint(output, "\r\x1b[K")
-				if i == selected {
-					fmt.Fprintf(output, "  > %s\r\n", activeStyle.Render(opt))
-				} else {
-					fmt.Fprintf(output, "    %s\r\n", opt)
-				}
-			}
-		}
-	}
-
-	clearMenu := func() {
-		// Do nothing! We leave the menu on screen. 
-		// ncw.count has correctly counted the lines, so RenderToolOutput will erase it perfectly!
-	}
-
-	renderMenu()
-
-	buf := make([]byte, 3)
-	for {
 		n, err := input.Read(buf)
 		if err != nil || n == 0 {
-			continue
+			return selected, true
 		}
-		if n == 1 {
-			char := buf[0]
-			if char == '\r' || char == '\n' {
-				break
-			}
-			if char == 3 || char == 4 || char == 27 {
-				selected = 1 // default to no on esc/ctrl-c
-				break
-			}
-			if char == 'y' || char == 'Y' {
-				selected = 0
-				break
-			}
-			if char == 'n' || char == 'N' {
-				selected = 1
-				break
-			}
-			if char == 'a' || char == 'A' {
-				selected = 2
-				break
-			}
-		} else if n == 3 && buf[0] == 27 && buf[1] == '[' {
-			if buf[2] == 'A' { // up
-				selected--
-				if selected < 0 {
-					selected = len(options) - 1
-				}
-			} else if buf[2] == 'B' { // down
-				selected++
-				if selected >= len(options) {
-					selected = 0
-				}
+		for index, option := range options {
+			if strings.ContainsRune(option.keys, rune(buf[0])) {
+				return index, false
 			}
 		}
-		renderMenu()
+		return selected, true
 	}
 
-	clearMenu()
+	return runChoiceMenu(input, output, theme, prompt, options, selected)
+}
 
+func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
+	options := []choiceMenuOption{
+		{label: "yes", keys: "yY"},
+		{label: "no", keys: "nN"},
+		{label: "always", keys: "aA"},
+	}
+	selected, dismissed := runModalChoice(w, theme, " approve tool execution?", options, 0)
+	if dismissed {
+		return false, false
+	}
 	if selected == 0 {
 		return true, false
 	} else if selected == 2 {
@@ -359,6 +414,39 @@ func AskForApproval(w io.Writer, theme UITheme) (bool, bool) {
 	} else {
 		return false, false
 	}
+}
+
+func AskForSubagentCancellation(w io.Writer, theme UITheme, agentName string) agent.SubagentCancellationDecision {
+	return askForSubagentCancellation(w, nil, theme, agentName)
+}
+
+func askForSubagentCancellation(w io.Writer, input io.Reader, theme UITheme, agentName string) agent.SubagentCancellationDecision {
+	options := []choiceMenuOption{
+		{label: fmt.Sprintf("skip current agent (%s)", agentName), keys: "kK"},
+		{label: "stop completely", keys: "xX"},
+	}
+	var selected int
+	var dismissed bool
+	if input == nil {
+		selected, dismissed = runModalChoice(w, theme, " cancel active subagent?", options, 1)
+	} else {
+		getUI().StateMu.Lock()
+		getUI().InApprovalPrompt = true
+		getUI().StateMu.Unlock()
+		defer func() {
+			getUI().StateMu.Lock()
+			getUI().InApprovalPrompt = false
+			getUI().StateMu.Unlock()
+		}()
+		selected, dismissed = runChoiceMenu(input, w, theme, " cancel active subagent?", options, 1)
+	}
+	if dismissed {
+		return agent.SubagentCancellationContinue
+	}
+	if selected == 0 {
+		return agent.SubagentCancellationSkipCurrent
+	}
+	return agent.SubagentCancellationStopAll
 }
 
 func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, rlOutput io.Writer) (*config.Config, error) {
@@ -397,8 +485,6 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 	}
 
 	cloned := *cfg
-
-
 
 	var items []*settingItem
 	items = []*settingItem{
@@ -1177,9 +1263,9 @@ type sessionReader struct {
 
 func newSessionReader(rlInput io.Reader) *sessionReader {
 	sr := &sessionReader{
-		doneChan:  make(chan struct{}),
+		doneChan: make(chan struct{}),
 	}
-	
+
 	if cr, ok := rlInput.(interface{ GetInputChan() chan byte }); ok {
 		sr.chanInput = cr.GetInputChan()
 		return sr

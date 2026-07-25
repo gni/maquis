@@ -21,15 +21,21 @@ func HandleMCPCommand(
 	messages *[]db.Message,
 	theme UITheme,
 	w io.Writer,
-	rlInput io.Reader,
+	kiReader *keyInterceptorReader,
 ) {
-	calcHistoryTokens := func() (int, int) {
-		return a.GetGlobalTokens(*messages, nil)
+	calcHistoryTokens := func() (int, int, bool) {
+		var mam *agent.MultiAgentManager
+		if kiReader != nil {
+			mam = kiReader.mam
+		}
+		return calculateActiveTokenUsage(a, *messages, activeToolAllowlist(kiReader), mam)
 	}
 
 	if len(parts) < 2 {
-		var input io.Reader = rlInput
-		if input == nil {
+		var input io.Reader
+		if kiReader != nil {
+			input = kiReader
+		} else {
 			input = os.Stdin
 			if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
 				defer tty.Close()
@@ -46,21 +52,11 @@ func HandleMCPCommand(
 		newConfig, errInteractive := RunInteractiveMCPConfig(a.Config, theme, input, output, a.ConfigPath)
 		InitStatusBar(os.Stderr)
 		if errInteractive == nil && newConfig != nil {
-			a.Config = newConfig
+			a.ApplyConfig(newConfig)
 			_ = config.SaveConfig(a.ConfigPath, a.Config)
 		}
 
-		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H")
-		if len(a.McpStartErrors) > 0 {
-			RenderMCPStartupErrors(w, a.McpStartErrors, theme)
-		}
-		PrintBanner(w, a)
-
-		if errInteractive != nil {
-			fmt.Fprintln(w, "interactive mcp config cancelled.")
-		} else if newConfig != nil {
-			fmt.Fprintf(w, "mcp configuration updated and saved to %s\n", a.ConfigPath)
+		if errInteractive == nil && newConfig != nil {
 			// Restart MCP servers with the new config
 			a.StopMCPServers()
 			if len(a.Config.MCPServers) > 0 {
@@ -68,10 +64,11 @@ func HandleMCPCommand(
 			}
 		}
 
-		PrintSessionHistory(w, *messages, theme, a.Config)
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-		DrawStatusBar(os.Stderr, theme)
+		if kiReader != nil {
+			redrawScreen(w, a, kiReader, kiReader.rl)
+		} else {
+			redrawScreen(w, a, nil, nil)
+		}
 		return
 	}
 
@@ -79,7 +76,7 @@ func HandleMCPCommand(
 	switch sub {
 	case "list":
 		RenderMCPServers(w, a.Config, theme)
-		
+
 		// Show connection status
 		mcpStatuses := a.GetMCPServersStatus()
 		if len(a.Config.MCPServers) > 0 {
@@ -92,7 +89,7 @@ func HandleMCPCommand(
 			for _, name := range keys {
 				status, active := mcpStatuses[name]
 				cfg := a.Config.MCPServers[name]
-				
+
 				if cfg.Disabled {
 					status = "\x1b[31mdisabled\x1b[0m"
 				} else if !active {
@@ -138,9 +135,9 @@ func HandleMCPCommand(
 		if len(a.Config.MCPServers) > 0 {
 			_ = a.StartMCPServers(a.Config.MCPServers)
 		}
-		
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	case "enable", "disable":
 		if len(parts) < 3 {
@@ -156,7 +153,7 @@ func HandleMCPCommand(
 			fmt.Fprintf(w, "error: MCP server '%s' not found.\n", name)
 			return
 		}
-		
+
 		cfg.Disabled = (sub == "disable")
 		a.Config.MCPServers[name] = cfg
 		_ = config.SaveConfig(a.ConfigPath, a.Config)
@@ -168,8 +165,8 @@ func HandleMCPCommand(
 			_ = a.StartMCPServers(a.Config.MCPServers)
 		}
 
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	case "remove", "delete":
 		if len(parts) < 3 {
@@ -195,8 +192,8 @@ func HandleMCPCommand(
 			_ = a.StartMCPServers(a.Config.MCPServers)
 		}
 
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, theme)
 	case "tools":
 		mcpTools := a.GetMCPTools()
@@ -291,9 +288,9 @@ func RunInteractiveMCPConfig(
 		var items []*settingItem
 		items = []*settingItem{
 			{
-				id:          "selected_server",
-				name:        "selected mcp server",
-				value:       func() string {
+				id:   "selected_server",
+				name: "selected mcp server",
+				value: func() string {
 					if selectedServer == "" {
 						return "none"
 					}
@@ -344,9 +341,15 @@ func RunInteractiveMCPConfig(
 			})
 
 			items = append(items, &settingItem{
-				id:          "server_enabled",
-				name:        "status",
-				value:       func() string { if cloned.MCPServers[srvName].Disabled { return "\x1b[31mdisabled\x1b[0m" } else { return "\x1b[32menabled\x1b[0m" } },
+				id:   "server_enabled",
+				name: "status",
+				value: func() string {
+					if cloned.MCPServers[srvName].Disabled {
+						return "\x1b[31mdisabled\x1b[0m"
+					} else {
+						return "\x1b[32menabled\x1b[0m"
+					}
+				},
 				description: fmt.Sprintf("Toggle to enable or disable MCP server '%s'", srvName),
 				onToggle: func() {
 					curr := cloned.MCPServers[srvName]

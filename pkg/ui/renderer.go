@@ -9,49 +9,29 @@ import (
 	"sync"
 	"time"
 
-	"maquis/pkg/ui/style"
 	"github.com/alecthomas/chroma/v2/quick"
+	"maquis/pkg/ui/style"
 )
 
 type StreamRenderer struct {
-	mu               sync.Mutex
-	w                io.Writer
-	theme            UITheme
-	lineBuffer       strings.Builder
-	codeBuffer       strings.Builder
-	inCodeBlock      bool
-	inThinking       bool
-	codeLanguage     string
-	showThinking     bool
-	showFullThinking bool
-	reasoningStart    time.Time
-	reasoningText     strings.Builder
-	reasoningDuration float64
-	reasoningResetSequence string
-	spinnerFrame      int
-
-	// Streaming states for real-time text formatting
-	lineIsHeader bool
-	inBold       bool
-	inInlineCode bool
+	mu                        sync.Mutex
+	w                         io.Writer
+	theme                     UITheme
+	inCodeBlock               bool
+	inThinking                bool
+	showThinking              bool
+	reasoningStart            time.Time
+	reasoningHasText          bool
+	reasoningEndedWithNewline bool
+	reasoningDuration         float64
+	reasoningResetSequence    string
+	pendingThoughtTextGap     bool
 
 	lastEndedWithNewline bool
 	hasWrittenText       bool
 	hasWrittenThoughts   bool
 	parser               *jsonStreamParser
-	streamWrites         bool
-	agentName            string
-
-	lineStartLine        int
-	lineStartCol         int
-	lineStartScroll      int
-	hasLineStart         bool
-
-	reasoningLineBuffer      strings.Builder
-	reasoningLineStartLine   int
-	reasoningLineStartCol    int
-	reasoningLineStartScroll int
-	hasReasoningLineStart    bool
+	live                 *liveMarkdownRenderer
 }
 
 func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
@@ -68,27 +48,13 @@ func findPromptPreservingWriter(w io.Writer) *PromptPreservingWriter {
 	return nil
 }
 
-func clearScrollRegionLines(ppw *PromptPreservingWriter, startLine int, w io.Writer) {
-	scrollBottom := ppw.Height() - 5
-	if scrollBottom < 1 {
-		scrollBottom = 1
-	}
-	for l := startLine; l <= scrollBottom; l++ {
-		ppw.SetPrintLine(l)
-		ppw.SetPrintCol(1)
-		fmt.Fprint(w, "\x1b[2K")
-	}
-}
-
-func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool, agentName string) *StreamRenderer {
+func NewStreamRenderer(w io.Writer, theme UITheme, showThinking bool, streamWrites bool, _ string) *StreamRenderer {
 	sr := &StreamRenderer{
 		w:                    w,
 		theme:                theme,
 		showThinking:         showThinking,
-		showFullThinking:     true, // Thinking is always full/expanded
 		lastEndedWithNewline: true,
-		streamWrites:         streamWrites,
-		agentName:            agentName,
+		live:                 newLiveMarkdownRenderer(w, theme),
 	}
 	sr.parser = &jsonStreamParser{
 		streamWrites: streamWrites,
@@ -111,16 +77,17 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
-	if !sr.showThinking {
+	if !sr.showThinking || chunk == "" {
 		return
 	}
-	if len(chunk) > 0 {
-		sr.checkFirstWrite()
-	}
+	sr.checkFirstWrite()
+
 	if !sr.inThinking {
 		sr.inThinking = true
 		sr.reasoningStart = time.Now()
-		sr.reasoningText.Reset()
+		sr.reasoningHasText = false
+		sr.reasoningEndedWithNewline = false
+		sr.pendingThoughtTextGap = false
 
 		dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 		startSeq, resetSeq := dimStyle.GetSequence()
@@ -128,124 +95,10 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 		sr.reasoningResetSequence = resetSeq
 	}
 
-	if len(chunk) > 0 {
-		sr.hasWrittenThoughts = true
-	}
-
-	sr.reasoningText.WriteString(chunk)
-
-	for _, char := range chunk {
-		if char == '\n' {
-			line := sr.reasoningLineBuffer.String()
-			sr.reasoningLineBuffer.Reset()
-
-			trimmed := strings.TrimSpace(line)
-			if sr.inCodeBlock {
-				if strings.HasPrefix(trimmed, "```") {
-					sr.inCodeBlock = false
-				} else {
-					ppw := findPromptPreservingWriter(sr.w)
-					if ppw != nil && sr.hasReasoningLineStart {
-						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
-						adjustedLine := sr.reasoningLineStartLine - scrollDelta
-						if adjustedLine < 1 {
-							adjustedLine = 1
-						}
-						if ppw.GetPrintLine() == adjustedLine {
-							clearScrollRegionLines(ppw, adjustedLine, sr.w)
-							ppw.SetPrintLine(adjustedLine)
-							ppw.SetPrintCol(sr.reasoningLineStartCol)
-							fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render("  "+line))
-							fmt.Fprint(sr.w, "\n")
-						} else {
-							fmt.Fprint(sr.w, "\n")
-						}
-					} else {
-						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render("  "+line))
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-			} else {
-				if strings.HasPrefix(trimmed, "```") {
-					ppw := findPromptPreservingWriter(sr.w)
-					if ppw != nil && sr.hasReasoningLineStart {
-						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
-						adjustedLine := sr.reasoningLineStartLine - scrollDelta
-						if adjustedLine < 1 {
-							adjustedLine = 1
-						}
-						if ppw.GetPrintLine() == adjustedLine {
-							clearScrollRegionLines(ppw, adjustedLine, sr.w)
-							ppw.SetPrintLine(adjustedLine)
-							ppw.SetPrintCol(sr.reasoningLineStartCol)
-						}
-					}
-					sr.inCodeBlock = true
-				} else {
-					ppw := findPromptPreservingWriter(sr.w)
-					if ppw != nil && sr.hasReasoningLineStart {
-						scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
-						adjustedLine := sr.reasoningLineStartLine - scrollDelta
-						if adjustedLine < 1 {
-							adjustedLine = 1
-						}
-						if ppw.GetPrintLine() == adjustedLine {
-							clearScrollRegionLines(ppw, adjustedLine, sr.w)
-							ppw.SetPrintLine(adjustedLine)
-							ppw.SetPrintCol(sr.reasoningLineStartCol)
-							
-							termW, _ := getTerminalSize()
-							wrapLimit := termW - sr.reasoningLineStartCol - 1
-							if wrapLimit < 20 {
-								wrapLimit = 20
-							}
-							wrapped := wrapMarkdownLine(line, wrapLimit)
-							for idx, wl := range wrapped {
-								sr.printReasoningLine(wl)
-								if idx < len(wrapped)-1 {
-									fmt.Fprint(sr.w, "\n")
-								}
-							}
-							fmt.Fprint(sr.w, "\n")
-						} else {
-							fmt.Fprint(sr.w, "\n")
-						}
-					} else {
-						termW, _ := getTerminalSize()
-						wrapLimit := termW - 5
-						if wrapLimit < 20 {
-							wrapLimit = 20
-						}
-						wrapped := wrapMarkdownLine(line, wrapLimit)
-						for idx, wl := range wrapped {
-							sr.printReasoningLine(wl)
-							if idx < len(wrapped)-1 {
-								fmt.Fprint(sr.w, "\n")
-							}
-						}
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-			}
-			sr.hasReasoningLineStart = false
-		} else {
-			ppw := findPromptPreservingWriter(sr.w)
-			if ppw != nil {
-				if !sr.hasReasoningLineStart {
-					sr.reasoningLineStartLine = ppw.GetPrintLine()
-					sr.reasoningLineStartCol = ppw.GetPrintCol()
-					sr.reasoningLineStartScroll = ppw.GetScrollCount()
-					sr.hasReasoningLineStart = true
-				}
-			}
-			if sr.inCodeBlock {
-				fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Border).Italic(true).Render(string(char)))
-			} else {
-				fmt.Fprint(sr.w, string(char))
-			}
-			sr.reasoningLineBuffer.WriteRune(char)
-		}
-	}
+	sr.hasWrittenThoughts = true
+	sr.reasoningHasText = true
+	sr.reasoningEndedWithNewline = strings.HasSuffix(chunk, "\n")
+	fmt.Fprint(sr.w, chunk)
 }
 
 func (sr *StreamRenderer) EndThinking() {
@@ -255,73 +108,36 @@ func (sr *StreamRenderer) EndThinking() {
 }
 
 func (sr *StreamRenderer) endThinking() {
-	if sr.inThinking {
-		sr.inThinking = false
-
-		rem := sr.reasoningLineBuffer.String()
-		if rem != "" {
-			ppw := findPromptPreservingWriter(sr.w)
-			if ppw != nil && sr.hasReasoningLineStart {
-				scrollDelta := ppw.GetScrollCount() - sr.reasoningLineStartScroll
-				adjustedLine := sr.reasoningLineStartLine - scrollDelta
-				if adjustedLine < 1 {
-					adjustedLine = 1
-				}
-				if ppw.GetPrintLine() == adjustedLine {
-					clearScrollRegionLines(ppw, adjustedLine, sr.w)
-					ppw.SetPrintLine(adjustedLine)
-					ppw.SetPrintCol(sr.reasoningLineStartCol)
-					
-					termW, _ := getTerminalSize()
-					wrapLimit := termW - sr.reasoningLineStartCol - 1
-					if wrapLimit < 20 {
-						wrapLimit = 20
-					}
-					wrapped := wrapMarkdownLine(rem, wrapLimit)
-					for idx, wl := range wrapped {
-						sr.printReasoningLine(wl)
-						if idx < len(wrapped)-1 {
-							fmt.Fprint(sr.w, "\n")
-						}
-					}
-				}
-			} else {
-				termW, _ := getTerminalSize()
-				wrapLimit := termW - 5
-				if wrapLimit < 20 {
-					wrapLimit = 20
-				}
-				wrapped := wrapMarkdownLine(rem, wrapLimit)
-				for idx, wl := range wrapped {
-					sr.printReasoningLine(wl)
-					if idx < len(wrapped)-1 {
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-			}
-			sr.reasoningLineBuffer.Reset()
-		}
-		sr.hasReasoningLineStart = false
-
-		if sr.reasoningText.Len() > 0 {
-			if sr.reasoningResetSequence != "" {
-				fmt.Fprint(sr.w, sr.reasoningResetSequence)
-				sr.reasoningResetSequence = ""
-			}
-			fmt.Fprint(sr.w, "\n")
-
-			elapsed := time.Since(sr.reasoningStart).Seconds()
-			sr.reasoningDuration = elapsed
-			iconStyle := style.NewStyle().Foreground(sr.theme.Success)
-			labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
-
-			fmt.Fprintf(sr.w, "%s %s\n\n", 
-				iconStyle.Render("✔"),
-				labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
-			)
-			sr.lastEndedWithNewline = true
-		}
+	if !sr.inThinking {
+		return
 	}
+	sr.inThinking = false
+
+	if sr.reasoningResetSequence != "" {
+		fmt.Fprint(sr.w, sr.reasoningResetSequence)
+		sr.reasoningResetSequence = ""
+	}
+	if !sr.reasoningHasText {
+		return
+	}
+	if !sr.reasoningEndedWithNewline {
+		fmt.Fprint(sr.w, "\n")
+	}
+
+	elapsed := time.Since(sr.reasoningStart).Seconds()
+	sr.reasoningDuration = elapsed
+	iconStyle := style.NewStyle().Foreground(sr.theme.Success)
+	labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
+
+	fmt.Fprintf(sr.w, "%s %s\n",
+		iconStyle.Render("✔"),
+		labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
+	)
+	sr.reasoningHasText = false
+	sr.reasoningEndedWithNewline = true
+	sr.pendingThoughtTextGap = true
+	sr.lastEndedWithNewline = true
+	sr.live.ResetAtLineStart()
 }
 
 func (sr *StreamRenderer) Write(chunk string) {
@@ -329,121 +145,27 @@ func (sr *StreamRenderer) Write(chunk string) {
 	defer sr.mu.Unlock()
 	sr.endThinking()
 
-	if len(chunk) > 0 {
-		sr.checkFirstWrite()
-		sr.hasWrittenText = true
-		sr.lastEndedWithNewline = strings.HasSuffix(chunk, "\n")
+	if chunk == "" {
+		return
 	}
 
-	for _, char := range chunk {
-		if sr.inCodeBlock {
-			if char == '\n' {
-				line := sr.lineBuffer.String()
-				sr.lineBuffer.Reset()
-
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "```") {
-					sr.inCodeBlock = false
-				} else {
-					if strings.HasPrefix(trimmed, "`") {
-						fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(line+"\n"))
-					} else {
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-			} else {
-				sr.lineBuffer.WriteRune(char)
-				// Suppress real-time rendering if the line starts with a backtick (e.g. closing tag)
-				if !strings.HasPrefix(strings.TrimSpace(sr.lineBuffer.String()), "`") {
-					fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(string(char)))
-				}
-			}
-		} else {
-			if char == '\n' {
-				line := sr.lineBuffer.String()
-				sr.lineBuffer.Reset()
-
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "```") {
-					ppw := findPromptPreservingWriter(sr.w)
-					if ppw != nil && sr.hasLineStart {
-						scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
-						adjustedLine := sr.lineStartLine - scrollDelta
-						if adjustedLine < 1 {
-							adjustedLine = 1
-						}
-						if ppw.GetPrintLine() == adjustedLine {
-							clearScrollRegionLines(ppw, adjustedLine, sr.w)
-							ppw.SetPrintLine(adjustedLine)
-							ppw.SetPrintCol(sr.lineStartCol)
-						}
-					}
-					sr.inCodeBlock = true
-					sr.codeLanguage = strings.TrimPrefix(trimmed, "```")
-					if sr.codeLanguage == "" {
-						sr.codeLanguage = "plaintext"
-					}
-				} else {
-					ppw := findPromptPreservingWriter(sr.w)
-					if ppw != nil && sr.hasLineStart {
-						scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
-						adjustedLine := sr.lineStartLine - scrollDelta
-						if adjustedLine < 1 {
-							adjustedLine = 1
-						}
-						if ppw.GetPrintLine() == adjustedLine {
-							clearScrollRegionLines(ppw, adjustedLine, sr.w)
-							ppw.SetPrintLine(adjustedLine)
-							ppw.SetPrintCol(sr.lineStartCol)
-							
-							termW, _ := getTerminalSize()
-							wrapLimit := termW - sr.lineStartCol - 1
-							if wrapLimit < 20 {
-								wrapLimit = 20
-							}
-							wrapped := wrapMarkdownLine(line, wrapLimit)
-							for idx, wl := range wrapped {
-								sr.printNormalLine(wl)
-								if idx < len(wrapped)-1 {
-									fmt.Fprint(sr.w, "\n")
-								}
-							}
-							fmt.Fprint(sr.w, "\n")
-						} else {
-							fmt.Fprint(sr.w, "\n")
-						}
-					} else {
-						termW, _ := getTerminalSize()
-						wrapLimit := termW - 5
-						if wrapLimit < 20 {
-							wrapLimit = 20
-						}
-						wrapped := wrapMarkdownLine(line, wrapLimit)
-						for idx, wl := range wrapped {
-							sr.printNormalLine(wl)
-							if idx < len(wrapped)-1 {
-								fmt.Fprint(sr.w, "\n")
-							}
-						}
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-				sr.hasLineStart = false
-			} else {
-				ppw := findPromptPreservingWriter(sr.w)
-				if ppw != nil {
-					if !sr.hasLineStart {
-						sr.lineStartLine = ppw.GetPrintLine()
-						sr.lineStartCol = ppw.GetPrintCol()
-						sr.lineStartScroll = ppw.GetScrollCount()
-						sr.hasLineStart = true
-					}
-				}
-				fmt.Fprint(sr.w, string(char))
-				sr.lineBuffer.WriteRune(char)
-			}
-		}
+	if sr.pendingThoughtTextGap {
+		fmt.Fprint(sr.w, "\n")
+		sr.pendingThoughtTextGap = false
 	}
+	sr.checkFirstWrite()
+	sr.hasWrittenText = true
+	sr.live.Write(chunk)
+	sr.lastEndedWithNewline = sr.live.EndedWithNewline()
+}
+
+func (sr *StreamRenderer) finishLiveTextLocked() {
+	if sr.hasWrittenText {
+		sr.live.EnsureTrailingNewline()
+	} else {
+		sr.live.Flush()
+	}
+	sr.lastEndedWithNewline = sr.live.EndedWithNewline()
 }
 
 func (sr *StreamRenderer) Flush() {
@@ -454,7 +176,12 @@ func (sr *StreamRenderer) Flush() {
 
 func (sr *StreamRenderer) flushLocked() {
 	sr.endThinking()
+	sr.pendingThoughtTextGap = false
+	sr.finishLiveTextLocked()
+	sr.flushActiveToolLocked()
+}
 
+func (sr *StreamRenderer) flushActiveToolLocked() {
 	if sr.parser != nil && sr.parser.activeToolName != "" {
 		if !sr.parser.titlePrinted {
 			sr.parser.printStreamTitle(sr.w, sr.theme)
@@ -465,81 +192,19 @@ func (sr *StreamRenderer) flushLocked() {
 		}
 		if sr.parser.lineBuffer.Len() > 0 {
 			lang := sr.parser.guessedLang
-			if lang == "" { lang = "plaintext" }
+			if lang == "" {
+				lang = "plaintext"
+			}
 			_ = HighlightWithoutTrailingNewline(sr.w, sr.parser.lineBuffer.String(), lang, sr.theme.ChromaStyle)
 			fmt.Fprint(sr.w, "\n")
 			sr.parser.lineBuffer.Reset()
 		}
 	}
-
-	if sr.inCodeBlock {
-		rem := sr.lineBuffer.String()
-		sr.lineBuffer.Reset()
-		if rem != "" {
-			if !strings.HasPrefix(strings.TrimSpace(rem), "```") {
-				fmt.Fprint(sr.w, style.NewStyle().Foreground(sr.theme.Highlight).Render(rem+"\n"))
-			}
-		}
-		sr.inCodeBlock = false
-		sr.lastEndedWithNewline = true
-		return
-	}
-
-	rem := sr.lineBuffer.String()
-	if rem != "" {
-		ppw := findPromptPreservingWriter(sr.w)
-		if ppw != nil && sr.hasLineStart {
-			scrollDelta := ppw.GetScrollCount() - sr.lineStartScroll
-			adjustedLine := sr.lineStartLine - scrollDelta
-			if adjustedLine < 1 {
-				adjustedLine = 1
-			}
-			if ppw.GetPrintLine() == adjustedLine {
-				clearScrollRegionLines(ppw, adjustedLine, sr.w)
-				ppw.SetPrintLine(adjustedLine)
-				ppw.SetPrintCol(sr.lineStartCol)
-				
-				termW, _ := getTerminalSize()
-				wrapLimit := termW - sr.lineStartCol - 1
-				if wrapLimit < 20 {
-					wrapLimit = 20
-				}
-				wrapped := wrapMarkdownLine(rem, wrapLimit)
-				for idx, wl := range wrapped {
-					sr.printNormalLine(wl)
-					if idx < len(wrapped)-1 {
-						fmt.Fprint(sr.w, "\n")
-					}
-				}
-			}
-		} else {
-			termW, _ := getTerminalSize()
-			wrapLimit := termW - 5
-			if wrapLimit < 20 {
-				wrapLimit = 20
-			}
-			wrapped := wrapMarkdownLine(rem, wrapLimit)
-			for idx, wl := range wrapped {
-				sr.printNormalLine(wl)
-				if idx < len(wrapped)-1 {
-					fmt.Fprint(sr.w, "\n")
-				}
-			}
-		}
-		sr.lineBuffer.Reset()
-		sr.lastEndedWithNewline = strings.HasSuffix(rem, "\n")
-	}
-	sr.hasLineStart = false
-
-	if sr.hasWrittenText && !sr.lastEndedWithNewline {
-		fmt.Fprint(sr.w, "\n")
-		sr.lastEndedWithNewline = true
-	}
 }
 
 func (sr *StreamRenderer) printNormalLine(line string) {
 	trimmed := strings.TrimSpace(line)
-	
+
 	// 0. Handle delimiter: make a space instead of "----"
 	if trimmed == "----" {
 		fmt.Fprint(sr.w, " ")
@@ -695,16 +360,28 @@ func (sr *StreamRenderer) StartToolCall(toolName string, toolCallIndex int) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
+	sr.endThinking()
+	sr.pendingThoughtTextGap = false
+	sr.finishLiveTextLocked()
+
 	if sr.parser != nil {
-		sr.parser.activeToolName = toolName
+		if sr.parser.activeToolName != "" && sr.parser.activeToolIndex == toolCallIndex {
+			sr.parser.activeToolName = toolName
+			return
+		}
+		if sr.parser.activeToolName != "" {
+			sr.flushActiveToolLocked()
+		}
 		sr.parser.activeToolIndex = toolCallIndex
+		sr.parser.ensureTrackingIndex()
+		sr.parser.toolTitleLineNumbers[toolCallIndex] = -1
+		sr.parser.toolBodyStreamed[toolCallIndex] = false
+		sr.parser.activeToolName = toolName
 		sr.parser.titlePrinted = false
 		sr.parser.path = ""
 		sr.parser.pathPrinted = false
 		sr.parser.isContent = false
 		sr.parser.isPath = false
-		sr.parser.isOldText = false
-		sr.parser.isNewText = false
 		sr.parser.outputBuf.Reset()
 		sr.parser.lineBuffer.Reset()
 		sr.parser.inString = false
@@ -745,17 +422,27 @@ func (sr *StreamRenderer) GetToolTitleLineNumber(index int) int {
 	return sr.parser.toolTitleLineNumbers[index]
 }
 
-func (sr *StreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {
+func (sr *StreamRenderer) DidStreamToolBody(index int) bool {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 
-	if sr.parser != nil {
-		for i := startIdx; i < len(sr.parser.toolTitleLineNumbers); i++ {
-			if i >= 0 && i < len(sr.parser.toolTitleLineNumbers) {
-				sr.parser.toolTitleLineNumbers[i] += diff
-			}
-		}
+	return sr.parser != nil && index >= 0 && index < len(sr.parser.toolBodyStreamed) && sr.parser.toolBodyStreamed[index]
+}
+
+func (sr *StreamRenderer) CompleteToolCall(index int, toolName string, toolArgs string, isError bool) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	if sr.parser == nil || index < 0 || index >= len(sr.parser.toolTitleLineNumbers) {
+		return
 	}
+	status := toolStatusSuccess
+	if isError {
+		status = toolStatusError
+	}
+	symbol := renderToolSymbol(toolName, status, sr.theme)
+	target := extractToolTarget(toolName, toolArgs)
+	replaceTrackedStreamLine(sr.w, sr.parser.toolTitleLineNumbers[index], FormatToolTitle(symbol, toolName, target, sr.theme))
 }
 
 func (sr *StreamRenderer) GetReasoningDuration() float64 {

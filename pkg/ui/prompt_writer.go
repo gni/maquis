@@ -8,7 +8,6 @@ import (
 	"golang.org/x/term"
 )
 
-
 // PromptPreservingWriter wraps an io.Writer (typically os.Stderr) and ensures
 // that all streamed output is confined to the terminal's scrolling region
 // (rows 1 through height-5). After every write, the cursor is repositioned
@@ -35,15 +34,18 @@ type PromptPreservingWriter struct {
 	restoreCursorToPrompt bool
 }
 
-func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
-	scrollBottom := height - 5
+func (p *PromptPreservingWriter) getScrollBottom() int {
+	scrollBottom := p.height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
-	return &PromptPreservingWriter{
+	return scrollBottom
+}
+
+func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter {
+	p := &PromptPreservingWriter{
 		inner:                 w,
 		height:                height,
-		printLine:             scrollBottom,
 		printCol:              1,
 		promptCol:             3, // default to 3 (after "> ")
 		ansiState:             0,
@@ -52,6 +54,16 @@ func NewPromptPreservingWriter(w io.Writer, height int) *PromptPreservingWriter 
 		needsReposition:       true,
 		restoreCursorToPrompt: true,
 	}
+	p.printLine = p.getScrollBottom()
+	return p
+}
+
+func (p *PromptPreservingWriter) getPromptRow() int {
+	row := p.height - 2 - getUI().PasteLinesOffset
+	if row < 1 {
+		row = 1
+	}
+	return row
 }
 
 func (p *PromptPreservingWriter) SetCursorHidden(hidden bool) {
@@ -60,7 +72,7 @@ func (p *PromptPreservingWriter) SetCursorHidden(hidden bool) {
 	if hidden {
 		fmt.Fprintf(p.inner, "\x1b[?25l")
 	} else {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.getPromptRow(), p.promptCol)
 		p.cursorAtPrompt = true
 	}
 	TerminalMu.Unlock()
@@ -70,7 +82,7 @@ func (p *PromptPreservingWriter) SetRestoreCursorToPrompt(restore bool) {
 	TerminalMu.Lock()
 	p.restoreCursorToPrompt = restore
 	if restore {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.getPromptRow(), p.promptCol)
 		p.cursorAtPrompt = true
 	} else {
 		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
@@ -88,11 +100,7 @@ func (p *PromptPreservingWriter) SetPromptCol(col int) {
 func (p *PromptPreservingWriter) ForceReposition() {
 	TerminalMu.Lock()
 	p.cursorAtPrompt = true
-	scrollBottom := p.height - 5
-	if scrollBottom < 1 {
-		scrollBottom = 1
-	}
-	p.printLine = scrollBottom
+	p.printLine = p.getScrollBottom()
 	p.printCol = 1
 	TerminalMu.Unlock()
 }
@@ -111,10 +119,7 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 			diff := h - p.height
 			p.height = h
 			p.printLine += diff
-			scrollBottom := h - 5
-			if scrollBottom < 1 {
-				scrollBottom = 1
-			}
+			scrollBottom := p.getScrollBottom()
 			if p.printLine > scrollBottom {
 				p.printLine = scrollBottom
 			}
@@ -124,14 +129,6 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 			if diff != 0 {
 				p.needsReposition = true
 			}
-		}
-	}
-
-	if !p.cursorHidden {
-		if p.restoreCursorToPrompt {
-			fmt.Fprintf(p.inner, "\x1b[?25l")
-		} else {
-			fmt.Fprintf(p.inner, "\x1b[?25h")
 		}
 	}
 
@@ -151,13 +148,13 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	// Track the column position so we can restore it accurately next time.
 	p.trackPosition(data[:n])
 
-	// Restore cursor to the prompt input line (height-2, promptCol) or keep it at stream position
+	// Restore cursor to the prompt input line (height-2-PasteLinesOffset, promptCol) or keep it at stream position
 	if !p.cursorHidden {
 		if p.restoreCursorToPrompt {
-			fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.height-2, p.promptCol)
+			fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.getPromptRow(), p.promptCol)
 			p.cursorAtPrompt = true
 		} else {
-			fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
+			fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
 			p.cursorAtPrompt = false
 		}
 	}
@@ -170,14 +167,8 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 // On carriage return, printCol resets to 1 without scrolling.
 func (p *PromptPreservingWriter) trackPosition(data []byte) {
 	s := string(data)
-	termW, h := getTerminalSize()
-	scrollBottom := p.height - 5
-	if h > 0 {
-		scrollBottom = h - 5
-	}
-	if scrollBottom < 1 {
-		scrollBottom = 1
-	}
+	termW, _ := getTerminalSize()
+	scrollBottom := p.getScrollBottom()
 
 	for _, r := range s {
 		switch p.ansiState {
@@ -289,6 +280,40 @@ func (p *PromptPreservingWriter) SetPrintCol(col int) {
 	p.needsReposition = true
 }
 
+// ReplaceScrollLineBack atomically replaces one visible line without changing
+// the tracked stream position or repainting neighboring rows.
+func (p *PromptPreservingWriter) ReplaceScrollLineBack(linesBack int, content string) bool {
+	return p.ReplaceScrollBlockBack(linesBack, []string{content})
+}
+
+// ReplaceScrollBlockBack atomically repaints existing scroll-region rows
+// without advancing the output cursor or changing its tracked position.
+func (p *PromptPreservingWriter) ReplaceScrollBlockBack(linesBack int, lines []string) bool {
+	TerminalMu.Lock()
+	defer TerminalMu.Unlock()
+
+	if linesBack < 0 || len(lines) == 0 {
+		return false
+	}
+	startRow := p.printLine - linesBack
+	endRow := startRow + len(lines) - 1
+	if startRow < 1 || endRow > p.getScrollBottom() {
+		return false
+	}
+
+	if _, err := fmt.Fprint(p.inner, "\x1b7"); err != nil {
+		return false
+	}
+	for index, line := range lines {
+		if _, err := fmt.Fprintf(p.inner, "\x1b[%d;1H\x1b[2K%s", startRow+index, line); err != nil {
+			_, _ = fmt.Fprint(p.inner, "\x1b8")
+			return false
+		}
+	}
+	_, err := fmt.Fprint(p.inner, "\x1b8")
+	return err == nil
+}
+
 func getRealTerminalHeight() int {
 	if _, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
 		return h
@@ -314,5 +339,3 @@ func getRealTerminalWidth() int {
 	}
 	return 0
 }
-
-

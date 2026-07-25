@@ -12,7 +12,7 @@
   "context_window_limit": 128000,
   "compression_threshold": 0.8,
   "reasoning_effort": "low",
-  "stream_writes": true,
+  "stream_writes": false,
   "syntax_theme": "monokai",
   "max_completion_tokens": 128000,
   "compact_prompt": true

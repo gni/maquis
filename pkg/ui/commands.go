@@ -31,7 +31,7 @@ func HandleSlashCommand(
 	currentSessionID *string,
 	rlHistory term.History,
 	mam *agent.MultiAgentManager,
-	rlInput io.Reader,
+	kiReader *keyInterceptorReader,
 ) (bool, bool) {
 	trimmed := strings.TrimSpace(line)
 	isHelp := trimmed == "help" || trimmed == "h" || trimmed == "?" || trimmed == "/help" || trimmed == "/commands" || trimmed == "/h" || trimmed == "/?"
@@ -42,8 +42,8 @@ func HandleSlashCommand(
 	parts := strings.Fields(line)
 	cmdName := parts[0]
 
-	calcHistoryTokens := func() (int, int) {
-		return a.GetGlobalTokens(*messages, allowedTools)
+	calcHistoryTokens := func() (int, int, bool) {
+		return calculateActiveTokenUsage(a, *messages, allowedTools, mam)
 	}
 
 	switch cmdName {
@@ -58,17 +58,12 @@ func HandleSlashCommand(
 			a.Config.CollapseResults = !a.Config.CollapseResults
 		}
 		_ = config.SaveConfig(a.ConfigPath, a.Config)
-		pTok, cTok := calcHistoryTokens()
 		SetCollapseStatus(a.Config.CollapseResults)
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-
-		// Clear screen and redraw everything up to history
-		fmt.Fprint(w, "\x1b[H\x1b[J")
-		if len(a.McpStartErrors) > 0 {
-			RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
+		if kiReader != nil {
+			redrawScreen(w, a, kiReader, kiReader.rl)
+		} else {
+			redrawScreen(w, a, nil, nil)
 		}
-		PrintBanner(w, a)
-		PrintSessionHistory(w, *messages, *theme, a.Config)
 		return true, false
 	case "/task":
 		if len(parts) < 2 {
@@ -85,7 +80,7 @@ func HandleSlashCommand(
 			}
 			fmt.Fprintln(w, "background tasks:")
 			for _, t := range tasks {
-				fmt.Fprintf(w, "  - %s: %s (duration: %v, output size: %d bytes) - `%s`\n", 
+				fmt.Fprintf(w, "  - %s: %s (duration: %v, output size: %d bytes) - `%s`\n",
 					t.ID, t.Status, t.Duration.Round(time.Millisecond), t.BytesOut, t.Command)
 			}
 		case "view":
@@ -124,7 +119,18 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/help", "/h", "/commands", "?", "/?", "help", "h":
-		RenderHelp(w, *theme)
+		var helpBuf strings.Builder
+		RenderHelp(&helpBuf, *theme)
+		msgContent := fmt.Sprintf("[user manually executed slash command: `/help`]\n%s", strings.TrimSpace(helpBuf.String()))
+		*messages = append(*messages, db.Message{Role: "user", Content: msgContent})
+		if currentSessionID != nil && *currentSessionID != "" {
+			_ = db.SaveMessage(*currentSessionID, (*messages)[len(*messages)-1])
+		}
+		if kiReader != nil {
+			redrawScreen(w, a, kiReader, kiReader.rl)
+		} else {
+			redrawScreen(w, a, nil, nil)
+		}
 		return true, false
 	case "/config", "/set":
 		if len(parts) > 1 {
@@ -237,11 +243,11 @@ func HandleSlashCommand(
 
 			_ = config.SaveConfig(a.ConfigPath, a.Config)
 			fmt.Fprintf(w, "config updated. saved to %s\n", a.ConfigPath)
-			pTok, cTok := calcHistoryTokens()
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+			pTok, cTok, estimated := calcHistoryTokens()
+			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 			DrawStatusBar(w, *theme)
 		} else {
-			var input io.Reader = rlInput
+			var input io.Reader = kiReader
 			if input == nil {
 				input = os.Stdin
 				if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -259,32 +265,20 @@ func HandleSlashCommand(
 			newConfig, errInteractive := RunInteractiveConfig(a.Config, *theme, input, output)
 			InitStatusBar(os.Stderr)
 			if errInteractive == nil && newConfig != nil {
-				a.Config = newConfig
+				a.ApplyConfig(newConfig)
 				*theme = GetConfiguredTheme(a.Config)
 				_ = config.SaveConfig(a.ConfigPath, a.Config)
 			}
-			
-			// Clear screen and redraw everything up to history
-			fmt.Fprint(w, "\x1b[H\x1b[J")
-			if len(a.McpStartErrors) > 0 {
-				RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
+
+			if kiReader != nil {
+				redrawScreen(w, a, kiReader, kiReader.rl)
+			} else {
+				redrawScreen(w, a, nil, nil)
 			}
-			PrintBanner(w, a)
-			
-			if errInteractive != nil {
-				fmt.Fprintln(w, "interactive config cancelled.")
-			} else if newConfig != nil {
-				fmt.Fprintf(w, "configuration updated and saved to %s\n", a.ConfigPath)
-			}
-			
-			PrintSessionHistory(w, *messages, *theme, a.Config)
-			pTok, cTok := calcHistoryTokens()
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-			DrawStatusBar(os.Stderr, *theme)
 		}
 		return true, false
 	case "/provider", "/providers":
-		HandleProviderCommand(a, parts, messages, *theme, w, rlInput)
+		HandleProviderCommand(a, parts, messages, *theme, w, kiReader)
 		return true, false
 	case "/skills":
 		if len(parts) > 1 && parts[1] == "load" {
@@ -336,12 +330,15 @@ func HandleSlashCommand(
 		getUI().State.CompletionTokens = 0
 		getUI().StateMu.Unlock()
 
-		// Clear terminal screen and scrollback
-		fmt.Fprint(w, "\x1b[H")
-		fmt.Fprintln(w, "conversation cleared and started a new one.")
-		pTok, cTok := calcHistoryTokens()
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-		DrawStatusBar(w, *theme)
+		a.CurrentStreamMu.Lock()
+		a.CurrentStreamBuffer = nil
+		a.CurrentStreamMu.Unlock()
+
+		var rl *term.Terminal
+		if kiReader != nil {
+			rl = kiReader.rl
+		}
+		redrawScreenWithNotice(w, a, kiReader, rl, "conversation cleared and started a new one.")
 		return true, false
 	case "/stats":
 		if a.MultiAgentManager != nil {
@@ -351,7 +348,7 @@ func HandleSlashCommand(
 			headerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 			titleStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 			valueStyle := style.NewStyle().Foreground(theme.Text)
-			
+
 			calcTokens := func(history []db.Message) (int, int) {
 				var prompt, completion int
 				for _, m := range history {
@@ -412,8 +409,8 @@ func HandleSlashCommand(
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
 				fmt.Fprintln(w, "started a new conversation session.")
-				pTok, cTok := calcHistoryTokens()
-				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+				pTok, cTok, estimated := calcHistoryTokens()
+				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 				DrawStatusBar(os.Stderr, *theme)
 			case "branch":
 				if len(parts) < 3 {
@@ -442,19 +439,18 @@ func HandleSlashCommand(
 						getUI().LastStatsText = ""
 						*currentSessionID = selected
 						*messages = dbHistory
-						fmt.Fprintf(w, "loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
-						PrintSessionHistory(w, *messages, *theme, a.Config)
-
-						pTok, cTok := calcHistoryTokens()
-						UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-						DrawStatusBar(os.Stderr, *theme)
+						if kiReader != nil {
+							redrawScreen(w, a, kiReader, kiReader.rl)
+						} else {
+							redrawScreen(w, a, nil, nil)
+						}
 					} else {
 						fmt.Fprintf(w, "error: session '%s' not found or empty.\n", selected)
 					}
 					return true, false
 				}
 
-				var input io.Reader = rlInput
+				var input io.Reader = kiReader
 				if input == nil {
 					input = os.Stdin
 					if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -468,17 +464,8 @@ func HandleSlashCommand(
 					output = tty
 				}
 
-				ShutdownStatusBar(os.Stderr)
 				selected, startNew, err := RunSessionExplorer(*theme, input, output)
 				InitStatusBar(os.Stderr)
-				
-				// Clear screen and redraw everything up to history
-				fmt.Fprint(w, "\x1b[H\x1b[J")
-				if len(a.McpStartErrors) > 0 {
-					RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
-				}
-				PrintBanner(w, a)
-				
 				if err == nil {
 					getUI().LastStatsText = ""
 					if startNew {
@@ -486,23 +473,20 @@ func HandleSlashCommand(
 						*messages = []db.Message{
 							{Role: "system", Content: a.GetSystemPrompt()},
 						}
-						fmt.Fprintln(w, "started a new conversation session.")
 					} else if selected != "" {
-						dbHistory, err := db.LoadMessages(selected)
-						if err == nil && len(dbHistory) > 0 {
+						dbHistory, loadErr := db.LoadMessages(selected)
+						if loadErr == nil && len(dbHistory) > 0 {
 							*currentSessionID = selected
 							*messages = dbHistory
-							fmt.Fprintf(w, "loaded session %s (%d messages).\n", *currentSessionID, len(*messages))
 						}
 					}
-				} else {
-					fmt.Fprintln(w, "session explorer cancelled.")
 				}
-				
-				PrintSessionHistory(w, *messages, *theme, a.Config)
-				pTok, cTok := calcHistoryTokens()
-				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-				DrawStatusBar(os.Stderr, *theme)
+
+				if kiReader != nil {
+					redrawScreen(w, a, kiReader, kiReader.rl)
+				} else {
+					redrawScreen(w, a, nil, nil)
+				}
 			case "clear":
 				err := db.ClearHistory()
 				if err != nil {
@@ -515,8 +499,8 @@ func HandleSlashCommand(
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
 				fmt.Fprintln(w, "all conversation sessions deleted from disk.")
-				pTok, cTok := calcHistoryTokens()
-				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
+				pTok, cTok, estimated := calcHistoryTokens()
+				UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 				DrawStatusBar(os.Stderr, *theme)
 			default:
 				fmt.Fprintf(w, "active session: %s\n", *currentSessionID)
@@ -528,11 +512,11 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/mcp", "/mcps":
-		HandleMCPCommand(a, parts, messages, *theme, w, rlInput)
+		HandleMCPCommand(a, parts, messages, *theme, w, kiReader)
 		return true, false
 	case "/agent":
 		if len(parts) < 2 {
-			var input io.Reader = rlInput
+			var input io.Reader = kiReader
 			if input == nil {
 				input = os.Stdin
 				if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -550,16 +534,11 @@ func HandleSlashCommand(
 			_ = RunInteractiveAgentManager(mam, *theme, input, output)
 			InitStatusBar(os.Stderr)
 
-			// Clear screen and redraw everything up to history
-			fmt.Fprint(w, "\x1b[H\x1b[J")
-			if len(a.McpStartErrors) > 0 {
-				RenderMCPStartupErrors(w, a.McpStartErrors, *theme)
+			if kiReader != nil {
+				redrawScreen(w, a, kiReader, kiReader.rl)
+			} else {
+				redrawScreen(w, a, nil, nil)
 			}
-			PrintBanner(w, a)
-			PrintSessionHistory(w, *messages, *theme, a.Config)
-			pTok, cTok := calcHistoryTokens()
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens)
-			DrawStatusBar(os.Stderr, *theme)
 			return true, false
 		}
 		sub := parts[1]
@@ -612,7 +591,7 @@ func HandleSlashCommand(
 				return true, false
 			}
 			name := parts[2]
-			
+
 			// Prompt can be multi-word, so we extract it carefully
 			promptStart := fieldStartIndex(line, 3)
 			if promptStart == -1 {
@@ -630,7 +609,7 @@ func HandleSlashCommand(
 					break
 				}
 				lastWord := strings.TrimSpace(prompt[lastSpace+1:])
-				
+
 				// Check if it is a known skill name
 				isSkill := false
 				for _, s := range a.ActiveSkills {

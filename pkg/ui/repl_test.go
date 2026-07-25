@@ -5,10 +5,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/term"
 
 	"maquis/pkg/agent"
+	"maquis/pkg/agent/tool"
 	"maquis/pkg/config"
 	"maquis/pkg/db"
 	"maquis/pkg/ui/style"
@@ -239,6 +241,341 @@ func TestCtrlDExits(t *testing.T) {
 	}
 }
 
+func TestClearTerminalForStartupErasesPreviousViewport(t *testing.T) {
+	var output bytes.Buffer
+	clearTerminalForStartup(&output)
+
+	if got, want := output.String(), "\x1b[r\x1b[2J\x1b[H"; got != want {
+		t.Fatalf("startup clear sequence = %q; want %q", got, want)
+	}
+}
+
+func TestRefreshConsoleAfterTurnDoesNotRepaintHistory(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	var output bytes.Buffer
+	a := &agent.Agent{Config: &config.Config{}}
+	reader := &keyInterceptorReader{agent: a}
+
+	refreshConsoleAfterTurn(&output, a, reader, nil)
+
+	raw := output.String()
+	for _, fullRepaintSequence := range []string{"\x1b[2J", "\x1b[H\x1b[J"} {
+		if strings.Contains(raw, fullRepaintSequence) {
+			t.Fatalf("ordinary turn completion repainted history with %q: %q", fullRepaintSequence, raw)
+		}
+	}
+	if !strings.Contains(raw, "─── prompt ") {
+		t.Fatalf("ordinary turn completion did not refresh fixed prompt controls: %q", raw)
+	}
+}
+
+func TestActiveCancellationMessageUsesConversationRegion(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	var conversationOutput bytes.Buffer
+	var rawOutput bytes.Buffer
+	writer := NewPromptPreservingWriter(&conversationOutput, 30)
+	uiImpl := getUI()
+	uiImpl.ppWriter = writer
+
+	a := &agent.Agent{
+		Config: &config.Config{},
+		UI:     uiImpl,
+	}
+	reader := &keyInterceptorReader{
+		agent: a,
+		w:     &rawOutput,
+	}
+
+	reader.printCancelMessage()
+
+	if rawOutput.Len() != 0 {
+		t.Fatalf("cancellation message bypassed the conversation writer: %q", rawOutput.String())
+	}
+	rendered := conversationOutput.String()
+	if !strings.Contains(rendered, "[Operation Cancelled by User]") {
+		t.Fatalf("conversation region omitted cancellation message: %q", rendered)
+	}
+	for _, destructiveSequence := range []string{"\x1b[2J", "\x1b[H\x1b[J", "\x1b[r\x1b[H"} {
+		if strings.Contains(rendered, destructiveSequence) {
+			t.Fatalf("active cancellation erased conversation history with %q: %q", destructiveSequence, rendered)
+		}
+	}
+}
+
+func TestRedrawKeepsActiveToolAllowlistTokenEstimate(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	registry := tool.NewToolRegistry()
+	registry.Register(tool.NewReadTool())
+	registry.Register(tool.NewBashTool())
+
+	messages := []db.Message{{Role: "system", Content: "system"}}
+	allowedTools := []string{"read"}
+	a := &agent.Agent{
+		Config: &config.Config{
+			ContextWindowLimit: 128000,
+			ShowTokens:         true,
+		},
+		Registry: registry,
+	}
+	reader := &keyInterceptorReader{
+		agent:        a,
+		messages:     &messages,
+		allowedTools: allowedTools,
+	}
+
+	expectedPrompt, expectedCompletion, expectedEstimated := a.GetGlobalTokenUsage(messages, allowedTools)
+	allToolsPrompt, _ := a.GetGlobalTokens(messages, nil)
+	if expectedPrompt == allToolsPrompt {
+		t.Fatal("test fixture did not produce different allowlisted and all-tool estimates")
+	}
+
+	var output bytes.Buffer
+	redrawScreen(&output, a, reader, nil)
+
+	getUI().StateMu.Lock()
+	gotPrompt := getUI().State.PromptTokens
+	gotCompletion := getUI().State.CompletionTokens
+	gotEstimated := getUI().State.TokenEstimate
+	getUI().StateMu.Unlock()
+	if gotPrompt != expectedPrompt || gotCompletion != expectedCompletion {
+		t.Fatalf(
+			"redraw token usage = (%d, %d), want allowlisted estimate (%d, %d)",
+			gotPrompt,
+			gotCompletion,
+			expectedPrompt,
+			expectedCompletion,
+		)
+	}
+	if gotEstimated != expectedEstimated {
+		t.Fatalf("redraw estimate state = %t, want %t", gotEstimated, expectedEstimated)
+	}
+}
+
+func TestInitialAndCtrlCRefreshUseFinalizedToolRegistryWithoutErasingHistory(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	registry := tool.NewToolRegistry()
+	registry.Register(tool.NewReadTool())
+	messages := []db.Message{{Role: "system", Content: "system"}}
+	a := &agent.Agent{
+		Config: &config.Config{
+			ContextWindowLimit: 128000,
+			ShowTokens:         true,
+		},
+		Registry: registry,
+	}
+
+	prematurePrompt, _ := a.GetGlobalTokens(messages, nil)
+	var managerOutput bytes.Buffer
+	mam := agent.NewMultiAgentManager(a, &managerOutput, style.UITheme{})
+	reader := &keyInterceptorReader{
+		agent:    a,
+		messages: &messages,
+		mam:      mam,
+	}
+
+	startupPrompt, startupCompletion, startupEstimated := calculateActiveTokenUsage(a, messages, nil, mam)
+	if startupPrompt <= prematurePrompt {
+		t.Fatalf(
+			"finalized registry estimate %d did not include tools registered after premature estimate %d",
+			startupPrompt,
+			prematurePrompt,
+		)
+	}
+	UpdateStatus(
+		a.Config.Model,
+		startupPrompt,
+		startupCompletion,
+		0,
+		a.Config.ContextWindowLimit,
+		false,
+		0,
+		0,
+		a.Config.ShowTokens,
+		startupEstimated,
+	)
+
+	getUI().StateMu.Lock()
+	getUI().PasteLinesOffset = 3
+	getUI().StateMu.Unlock()
+
+	var output bytes.Buffer
+	refreshConsoleAfterPromptCancellation(&output, a, reader, nil)
+
+	for _, destructiveSequence := range []string{"\x1b[2J", "\x1b[H\x1b[J", "\x1b[r\x1b[H"} {
+		if strings.Contains(output.String(), destructiveSequence) {
+			t.Fatalf("Ctrl+C refresh erased or repainted conversation history with %q: %q", destructiveSequence, output.String())
+		}
+	}
+
+	getUI().StateMu.Lock()
+	afterCtrlCPrompt := getUI().State.PromptTokens
+	afterCtrlCCompletion := getUI().State.CompletionTokens
+	afterCtrlCEstimated := getUI().State.TokenEstimate
+	afterCtrlCPasteOffset := getUI().PasteLinesOffset
+	getUI().StateMu.Unlock()
+	if afterCtrlCPrompt != startupPrompt || afterCtrlCCompletion != startupCompletion {
+		t.Fatalf(
+			"Ctrl+C refresh changed token usage from (%d, %d) to (%d, %d)",
+			startupPrompt,
+			startupCompletion,
+			afterCtrlCPrompt,
+			afterCtrlCCompletion,
+		)
+	}
+	if afterCtrlCEstimated != startupEstimated {
+		t.Fatalf("Ctrl+C refresh changed estimate state from %t to %t", startupEstimated, afterCtrlCEstimated)
+	}
+	if afterCtrlCPasteOffset != 0 {
+		t.Fatalf("Ctrl+C refresh retained %d cancelled prompt continuation rows", afterCtrlCPasteOffset)
+	}
+}
+
+func TestApprovalRepeatedDecisionKeysDoNotLeakToMainPrompt(t *testing.T) {
+	previousUI := ActiveUI
+	activeUI := &AgentUIImpl{}
+	ActiveUI = activeUI
+	t.Cleanup(func() {
+		ActiveUI = previousUI
+	})
+
+	reader := &keyInterceptorReader{
+		inputChan:    make(chan byte, 8),
+		injectChan:   make(chan byte, 1),
+		approvalChan: make(chan byte, 8),
+	}
+	activeUI.ActiveInputReader = reader
+
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			activeUI.StateMu.Lock()
+			inApproval := activeUI.InApprovalPrompt
+			activeUI.StateMu.Unlock()
+			if inApproval {
+				reader.approvalChan <- 'y'
+				reader.approvalChan <- 'y'
+				reader.approvalChan <- 'y'
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	var output bytes.Buffer
+	approved, always := AskForApproval(&output, UITheme{})
+	<-sent
+
+	if !approved || always {
+		t.Fatalf("expected one 'y' to approve once, got approved=%t always=%t", approved, always)
+	}
+	if queued := len(reader.inputChan); queued != 0 {
+		t.Fatalf("%d approval byte(s) leaked into the main prompt", queued)
+	}
+	if queued := len(reader.approvalChan); queued != 0 {
+		t.Fatalf("%d repeated approval byte(s) remained queued", queued)
+	}
+
+	activeUI.StateMu.Lock()
+	inApproval := activeUI.InApprovalPrompt
+	activeUI.StateMu.Unlock()
+	if inApproval {
+		t.Fatal("approval input ownership was not released")
+	}
+}
+
+func TestApprovalNavigationRepaintsMenuInPlace(t *testing.T) {
+	previousUI := ActiveUI
+	activeUI := &AgentUIImpl{}
+	ActiveUI = activeUI
+	t.Cleanup(func() {
+		ActiveUI = previousUI
+	})
+
+	activeUI.ActiveInputReader = bytes.NewReader([]byte("\x1b[B\x1b[B\r"))
+
+	var terminal bytes.Buffer
+	output := NewPromptPreservingWriter(&terminal, 30)
+	approved, always := AskForApproval(output, UITheme{})
+
+	if !approved || !always {
+		t.Fatalf("expected navigation to select always, got approved=%t always=%t", approved, always)
+	}
+	raw := terminal.String()
+	if count := strings.Count(stripAnsi(raw), "approve tool execution?"); count != 1 {
+		t.Fatalf("approval prompt was appended %d times instead of repainted: %q", count, raw)
+	}
+	if strings.Contains(raw, "\x1b[4A") {
+		t.Fatalf("approval navigation used relative cursor movement through the prompt writer: %q", raw)
+	}
+	if !strings.Contains(raw, "\x1b7") || !strings.Contains(raw, "\x1b8") {
+		t.Fatalf("approval options were not atomically repainted in place: %q", raw)
+	}
+}
+
+func TestSubagentCancellationMenuOffersSkipAndStopAll(t *testing.T) {
+	t.Run("stop completely", func(t *testing.T) {
+		previousUI := ActiveUI
+		activeUI := &AgentUIImpl{
+			ActiveInputReader: bytes.NewReader([]byte{'\r'}),
+		}
+		ActiveUI = activeUI
+		t.Cleanup(func() {
+			ActiveUI = previousUI
+		})
+
+		var output bytes.Buffer
+		decision := AskForSubagentCancellation(&output, UITheme{}, "tester_audit")
+		if decision != agent.SubagentCancellationStopAll {
+			t.Fatalf("decision = %v; want stop all", decision)
+		}
+		for _, expected := range []string{"skip current agent (tester_audit)", "stop completely"} {
+			if !strings.Contains(output.String(), expected) {
+				t.Fatalf("cancellation menu omitted %q: %q", expected, output.String())
+			}
+		}
+	})
+
+	t.Run("skip current", func(t *testing.T) {
+		previousUI := ActiveUI
+		activeUI := &AgentUIImpl{
+			ActiveInputReader: bytes.NewReader([]byte("\x1b[A\r")),
+		}
+		ActiveUI = activeUI
+		t.Cleanup(func() {
+			ActiveUI = previousUI
+		})
+
+		var output bytes.Buffer
+		decision := AskForSubagentCancellation(&output, UITheme{}, "tester_audit")
+		if decision != agent.SubagentCancellationSkipCurrent {
+			t.Fatalf("decision = %v; want skip current", decision)
+		}
+	})
+
+	t.Run("escape continues", func(t *testing.T) {
+		previousUI := ActiveUI
+		activeUI := &AgentUIImpl{
+			ActiveInputReader: bytes.NewReader([]byte{27}),
+		}
+		ActiveUI = activeUI
+		t.Cleanup(func() {
+			ActiveUI = previousUI
+		})
+
+		var output bytes.Buffer
+		decision := AskForSubagentCancellation(&output, UITheme{}, "tester_audit")
+		if decision != agent.SubagentCancellationContinue {
+			t.Fatalf("decision = %v; want continue", decision)
+		}
+	})
+}
+
 func TestPrintPromptSeparatorStatic(t *testing.T) {
 	theme := UITheme{
 		Primary: style.Color("#ffffff"),
@@ -273,6 +610,16 @@ func TestDrawStaticStatsLine(t *testing.T) {
 		Border:  style.Color("#555555"),
 	}
 
+	fallbackUI.StateMu.Lock()
+	previousStats := fallbackUI.LastStatsText
+	fallbackUI.LastStatsText = ""
+	fallbackUI.StateMu.Unlock()
+	t.Cleanup(func() {
+		fallbackUI.StateMu.Lock()
+		fallbackUI.LastStatsText = previousStats
+		fallbackUI.StateMu.Unlock()
+	})
+
 	var buf bytes.Buffer
 	// Test stats text
 	DrawStaticStatsLine(&buf, theme, "", "14 out • 2026-06-15 01:02:06 (1.4s)")
@@ -290,9 +637,23 @@ func TestDrawStaticStatsLine(t *testing.T) {
 	if !strings.Contains(rawSpinner, "◜") {
 		t.Errorf("Expected rawSpinner to contain spinner, got %q", rawSpinner)
 	}
+	if strings.Contains(rawSpinner, "\x1b[2K") {
+		t.Errorf("spinner frame clears the row before repainting it: %q", rawSpinner)
+	}
+	if !strings.Contains(rawSpinner, "\x1b[K") {
+		t.Errorf("spinner frame does not clear its unused line tail: %q", rawSpinner)
+	}
+
+	buf.Reset()
+	DrawStaticStatsLine(&buf, theme, "", "")
+	rawCleared := buf.String()
+	if strings.Contains(rawCleared, "14 out • 2026-06-15 01:02:06 (1.4s)") {
+		t.Errorf("clearing the activity row restored stale stats: %q", rawCleared)
+	}
+	if !strings.Contains(rawCleared, "\x1b[2K") {
+		t.Errorf("empty activity status did not clear its row: %q", rawCleared)
+	}
 }
-
-
 
 func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
 	a := &agent.Agent{
@@ -306,23 +667,15 @@ func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
 		w:     &buf,
 	}
 
-	p := make([]byte, len(pasteData))
-	// Directly call ki.Read(p). Since n > 1 and it contains newlines, it will trigger isMultilinePaste logic.
+	p := make([]byte, 1024)
 	n, err := ki.Read(p)
 	if err != nil {
 		t.Fatalf("failed to read paste: %v", err)
 	}
 
-	if n != 0 {
-		t.Errorf("expected 0 bytes returned (no auto-submit), got %d", n)
-	}
-	expectedPasted := "hello\nworld\n"
-	if ki.pastedText != expectedPasted {
-		t.Errorf("expected pastedText to be %q, got %q", expectedPasted, ki.pastedText)
-	}
-	// Verify that it echoed to ki.w (which is buf)
-	if !strings.HasSuffix(buf.String(), "hello\r\nworld\r\n") {
-		t.Errorf("expected echoed text to have carriage returns, got %q", buf.String())
+	expectedNormalized := "hello ↵ world ↵ "
+	if string(p[:n]) != expectedNormalized {
+		t.Errorf("expected normalized paste string %q, got %q", expectedNormalized, string(p[:n]))
 	}
 }
 
@@ -439,6 +792,21 @@ func TestHandleSessionSlashCommand(t *testing.T) {
 func TestJsonStreamParserStreamWrites(t *testing.T) {
 	theme := UITheme{}
 
+	t.Run("command marker starts at left edge", func(t *testing.T) {
+		p := &jsonStreamParser{
+			activeToolName: "bash",
+		}
+		var buf bytes.Buffer
+		p.feed(`{"command": "find /workspace/tests"}`, &buf, theme)
+		got := stripAnsi(buf.String())
+		if !strings.Contains(got, "\n▸ command: find /workspace/tests") {
+			t.Errorf("expected command marker at left edge, got %q", got)
+		}
+		if strings.Contains(got, "\n  ▸ command:") {
+			t.Errorf("expected no leading indentation before command marker, got %q", got)
+		}
+	})
+
 	t.Run("streamWrites=false", func(t *testing.T) {
 		p := &jsonStreamParser{
 			activeToolName: "write",
@@ -480,7 +848,7 @@ func TestJsonStreamParserStreamWrites(t *testing.T) {
 		}
 	})
 
-	t.Run("edit newText streamWrites=true", func(t *testing.T) {
+	t.Run("edit newText remains final-only when streamWrites=true", func(t *testing.T) {
 		p := &jsonStreamParser{
 			activeToolName: "edit",
 			streamWrites:   true,
@@ -488,8 +856,8 @@ func TestJsonStreamParserStreamWrites(t *testing.T) {
 		var buf bytes.Buffer
 		p.feed(`{"newText": "hello world"}`, &buf, theme)
 		got := buf.String()
-		if !strings.Contains(got, "hello world") {
-			t.Errorf("expected newText to be streamed, but got %q", got)
+		if strings.Contains(got, "hello world") {
+			t.Errorf("expected edit intent to remain suppressed, but got %q", got)
 		}
 	})
 }
@@ -633,7 +1001,7 @@ func TestStreamRendererRealTimeStreaming(t *testing.T) {
 	var buf bytes.Buffer
 	// Create a PromptPreservingWriter.
 	ppw := NewPromptPreservingWriter(&buf, 40)
-	
+
 	// Create StreamRenderer with ppw
 	sr := NewStreamRenderer(ppw, theme, false, false, "test")
 
@@ -654,52 +1022,20 @@ func TestStreamRendererRealTimeStreaming(t *testing.T) {
 	sr.Write("*")
 	sr.Write("*")
 
-	// Helper to strip all ANSI codes (including cursor movements)
-	stripAllAnsi := func(s string) string {
-		var sb strings.Builder
-		inEscape := false
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\x1b' {
-				inEscape = true
-				continue
-			}
-			if inEscape {
-				if (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') {
-					inEscape = false
-				}
-				continue
-			}
-			sb.WriteByte(s[i])
-		}
-		return sb.String()
-	}
-
-	// Now check what was written so far. It should have the raw text printed immediately.
-	rawWritten := buf.String()
-	t.Logf("DEBUG: rawWritten=%q\n", rawWritten)
-	cleanRaw := stripAllAnsi(rawWritten)
-	if !strings.Contains(cleanRaw, "Hello **world**") {
-		t.Errorf("expected raw text to be written immediately, got %q", cleanRaw)
-	}
-
-	// Now write a newline
-	buf.Reset()
+	// Completing a line must append only the newline. It must not clear and
+	// replay the already streamed content to apply formatting.
 	sr.Write("\n")
+	sr.Flush()
 
-	// Upon writing the newline, it should reposition the cursor to the starting line,
-	// clear the line using \x1b[2K, write the styled line (which parses **world**), and then print \n.
-	newLineOutput := buf.String()
-
-	// The output should contain \x1b[2K to clear, and then the styled version of "Hello **world**"
-	if !strings.Contains(newLineOutput, "\x1b[2K") {
-		t.Errorf("expected output to contain clear line sequence \\x1b[2K, got %q", newLineOutput)
+	rendered := sanitizeTerminalText(buf.String())
+	if count := strings.Count(rendered, "Hello world"); count != 1 {
+		t.Fatalf("expected streamed text exactly once, got %d occurrences in %q", count, rendered)
 	}
-	cleanNewLineOutput := stripAllAnsi(newLineOutput)
-	if strings.Contains(cleanNewLineOutput, "**") {
-		t.Errorf("expected markdown styling to be applied (stars removed), but got %q", cleanNewLineOutput)
+	if strings.Contains(rendered, "**") {
+		t.Fatalf("expected Markdown markers to be consumed during streaming: %q", rendered)
 	}
-	if !strings.Contains(cleanNewLineOutput, "world") {
-		t.Errorf("expected output to contain 'world', but got %q", cleanNewLineOutput)
+	if strings.Contains(buf.String(), "\x1b[2K") {
+		t.Fatalf("stream completion cleared an existing row: %q", buf.String())
 	}
 }
 
@@ -758,5 +1094,93 @@ func TestPrintSessionHistoryMarkdown(t *testing.T) {
 	}
 }
 
+func TestPrintSessionHistoryHidesLegacyFallbackToolMarkup(t *testing.T) {
+	const rawToolCall = `<tool_call name="read">{"path":"legacy.py"}</tool_call>`
+	messages := []db.Message{
+		{
+			Role:    "assistant",
+			Content: rawToolCall,
+			ToolCalls: []db.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: db.ToolFunction{
+						Name:      "read",
+						Arguments: `{"path":"legacy.py"}`,
+					},
+				},
+			},
+		},
+	}
 
+	var output bytes.Buffer
+	PrintSessionHistory(&output, messages, UITheme{}, &config.Config{})
 
+	rendered := sanitizeTerminalText(output.String())
+	if strings.Contains(rendered, "<tool_call") || strings.Contains(rendered, "</tool_call>") {
+		t.Fatalf("legacy fallback markup appeared in session history: %q", rendered)
+	}
+}
+
+func TestCalculatePromptLayout(t *testing.T) {
+	// Single short line
+	l1 := CalculatePromptLayout("> ", "hello", 5, 80)
+	if l1.TotalRows != 1 || l1.ExtraOffset != 0 {
+		t.Errorf("expected 1 row and 0 extra offset, got rows=%d extraOffset=%d", l1.TotalRows, l1.ExtraOffset)
+	}
+	if l1.CursorRow != 0 || l1.CursorCol != 8 {
+		t.Errorf("expected cursor row 0, col 8, got row=%d col=%d", l1.CursorRow, l1.CursorCol)
+	}
+
+	// Long single line wrapping across 2 rows (80 width, prefix 2 runes + 150 runes = 152 runes -> 2 rows)
+	longInput := strings.Repeat("a", 150)
+	l2 := CalculatePromptLayout("> ", longInput, 100, 80)
+	if l2.TotalRows != 2 || l2.ExtraOffset != 1 {
+		t.Errorf("expected 2 rows and 1 extra offset for long input, got rows=%d extraOffset=%d", l2.TotalRows, l2.ExtraOffset)
+	}
+	// pos 100 + prefix 2 = 102 runes -> row 1, col 23
+	if l2.CursorRow != 1 || l2.CursorCol != 23 {
+		t.Errorf("expected cursor row 1, col 23, got row=%d col=%d", l2.CursorRow, l2.CursorCol)
+	}
+
+	// Multiline input (3 lines)
+	multilineInput := "line1\nline2\nline3"
+	l3 := CalculatePromptLayout("> ", multilineInput, 8, 80) // pos 8 is inside "line2"
+	if l3.TotalRows != 3 || l3.ExtraOffset != 2 {
+		t.Errorf("expected 3 rows and 2 extra offset for multiline input, got rows=%d extraOffset=%d", l3.TotalRows, l3.ExtraOffset)
+	}
+	if l3.CursorRow != 1 || l3.CursorCol != 3 {
+		t.Errorf("expected cursor row 1, col 3 for pos 8, got row=%d col=%d", l3.CursorRow, l3.CursorCol)
+	}
+}
+
+func TestDynamicHistoryLayoutClearing(t *testing.T) {
+	// Verify that moving from a multi-line history entry to a short single-line history entry
+	// correctly recalculates the layout extra offset from 2 down to 0.
+	promptPrefix := "> "
+	multilineHistory := "first line\nsecond line\nthird line"
+	shortHistory := "ls -la"
+
+	layoutMulti := CalculatePromptLayout(promptPrefix, multilineHistory, len(multilineHistory), 80)
+	if layoutMulti.ExtraOffset != 2 {
+		t.Fatalf("expected multiline history offset to be 2, got %d", layoutMulti.ExtraOffset)
+	}
+
+	layoutShort := CalculatePromptLayout(promptPrefix, shortHistory, len(shortHistory), 80)
+	if layoutShort.ExtraOffset != 0 {
+		t.Fatalf("expected short history offset to be 0, got %d", layoutShort.ExtraOffset)
+	}
+}
+
+func TestHistoryReturnSymbolNormalization(t *testing.T) {
+	promptPrefix := "> "
+	historyEntryWithSymbols := "func Deduplicate(entries []string) []string { ↵ 	seen := make(map[string]bool) ↵ 	var unique []string ↵ 	for i := len(entries) - 1; i >= 0; i-- { ↵ 		entry := entries[i] ↵ 		if !seen[entry] { ↵ 			seen[entry] = true ↵ 			unique = append([]string{entry}, unique...) ↵ 		} ↵ 	} ↵  return unique ↵  }"
+
+	layout := CalculatePromptLayout(promptPrefix, historyEntryWithSymbols, len(historyEntryWithSymbols), 80)
+	if layout.TotalRows < 10 {
+		t.Fatalf("expected at least 10 rows for multiline history entry with return symbols, got %d", layout.TotalRows)
+	}
+	if layout.ExtraOffset < 9 {
+		t.Fatalf("expected extra offset at least 9, got %d", layout.ExtraOffset)
+	}
+}

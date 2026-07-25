@@ -11,7 +11,6 @@ import (
 	"maquis/pkg/db"
 )
 
-
 // LoadMemoryContext loads global (~/.maquis/MAQUIS.md) and project (MEMORY.md) memory context.
 func (a *Agent) LoadMemoryContext() string {
 	var sb strings.Builder
@@ -71,32 +70,27 @@ func (a *Agent) LoadMemoryContext() string {
 }
 
 func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (int, int) {
-	// Find the last assistant message
+	prompt, completion, _ := a.GetGlobalTokenUsage(messages, allowedTools)
+	return prompt, completion
+}
+
+func (a *Agent) GetGlobalTokenUsage(messages []db.Message, allowedTools []string) (int, int, bool) {
 	lastAssistantIdx := -1
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
+		message := messages[i]
+		hasPayload := message.Content != "" || message.ReasoningContent != "" || len(message.ToolCalls) > 0
+		if message.Role == "assistant" && hasPayload {
 			lastAssistantIdx = i
 			break
-		}
-	}
-
-	globalPrompt := 0
-	globalCompletion := 0
-
-	// Sum all completion tokens
-	for _, m := range messages {
-		if m.Role == "assistant" {
-			if m.CompletionTokens > 0 {
-				globalCompletion += m.CompletionTokens
-			} else {
-				globalCompletion += (len(m.Content) + len(m.ReasoningContent)) / 4
-			}
 		}
 	}
 
 	var toolsEst int
 	if a.Registry != nil {
 		tools := a.Registry.GetAvailableTools(allowedTools)
+		if a.Config != nil {
+			tools = prepareToolDefinitions(tools, a.Config.CompactPrompt)
+		}
 		var toolsChars int
 		if len(tools) > 0 {
 			if toolsData, err := json.Marshal(tools); err == nil {
@@ -106,35 +100,59 @@ func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (i
 		toolsEst = toolsChars / 4
 	}
 
+	estimateMessage := func(message db.Message) int {
+		if strings.HasPrefix(message.Content, "[user manually executed slash command:") {
+			return 0
+		}
+		characters := len(message.Content) + len(message.ReasoningContent)
+		if len(message.ToolCalls) > 0 {
+			if toolCallData, err := json.Marshal(message.ToolCalls); err == nil {
+				characters += len(toolCallData)
+			}
+		}
+		if characters == 0 {
+			return 0
+		}
+		estimated := characters / 4
+		if estimated == 0 {
+			return 1
+		}
+		return estimated
+	}
+
+	globalPrompt := 0
+	globalCompletion := 0
+	estimated := false
 	if lastAssistantIdx != -1 {
-		// We have an assistant message.
-		// Start with the prompt tokens of that turn.
-		if messages[lastAssistantIdx].PromptTokens > 0 {
-			globalPrompt = messages[lastAssistantIdx].PromptTokens
+		lastAssistant := messages[lastAssistantIdx]
+		if lastAssistant.PromptTokens > 0 {
+			globalPrompt = lastAssistant.PromptTokens
 		} else {
-			// Fallback if not stored
-			for i := 0; i <= lastAssistantIdx; i++ {
-				m := messages[i]
-				if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-					globalPrompt += len(m.Content) / 4
-				}
+			estimated = true
+			for i := 0; i < lastAssistantIdx; i++ {
+				globalPrompt += estimateMessage(messages[i])
 			}
 			globalPrompt += toolsEst
 		}
 
-		// Add estimation for any messages after the last assistant message
+		if lastAssistant.CompletionTokens > 0 {
+			globalCompletion = lastAssistant.CompletionTokens
+		} else {
+			estimated = true
+			globalCompletion = estimateMessage(lastAssistant)
+		}
+
 		for i := lastAssistantIdx + 1; i < len(messages); i++ {
-			m := messages[i]
-			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-				globalPrompt += len(m.Content) / 4
+			messageEstimate := estimateMessage(messages[i])
+			globalPrompt += messageEstimate
+			if messageEstimate > 0 {
+				estimated = true
 			}
 		}
 	} else {
-		// No assistant messages yet. Estimate everything.
-		for _, m := range messages {
-			if m.Role == "user" || m.Role == "system" || m.Role == "tool" {
-				globalPrompt += len(m.Content) / 4
-			}
+		estimated = true
+		for _, message := range messages {
+			globalPrompt += estimateMessage(message)
 		}
 		if globalPrompt == 0 {
 			globalPrompt = len(a.GetSystemPrompt()) / 4
@@ -142,28 +160,43 @@ func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (i
 		globalPrompt += toolsEst
 	}
 
-	return globalPrompt, globalCompletion
+	return globalPrompt, globalCompletion, estimated
 }
-
 
 // FormatDefensiveError turns syntax errors into descriptive, action-oriented correction prompts
 func FormatDefensiveError(toolName string, err error) string {
 	errStr := err.Error()
+	lowerErr := strings.ToLower(errStr)
 
 	var suggestion string
-	if strings.Contains(errStr, "not found") || strings.Contains(errStr, "no such file") {
+	if (strings.Contains(lowerErr, "oldtext block") && strings.Contains(lowerErr, "not found")) ||
+		strings.Contains(lowerErr, "targetcontent not found") {
+		suggestion = "The file exists, but oldText does not match its current contents. Read the file again, copy a small unique block exactly as it exists now, and retry without reusing an earlier snapshot. Do not recover by overwriting the existing file with write."
+	} else if strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "no such file") {
 		suggestion = "Inspect your immediate working directory structure using 'bash' with 'ls' or check the file path. Ensure the file actually exists before calling this tool."
-	} else if strings.Contains(errStr, "oldText block not found") || strings.Contains(errStr, "targetContent not found") {
-		suggestion = "The exact text block you tried to replace was not found. Read the file content first to verify the exact indentation, line endings, and characters, then try again with a precise match."
-	} else if strings.Contains(errStr, "escapes workspace") || strings.Contains(errStr, "security violation") {
+	} else if strings.Contains(lowerErr, "escapes workspace") || strings.Contains(lowerErr, "security violation") {
 		suggestion = "Verify that the path is relative or inside the current workspace. Escaping the workspace is blocked."
-	} else if strings.Contains(errStr, "command failed") || strings.Contains(errStr, "exit status") {
+	} else if strings.Contains(lowerErr, "command failed") || strings.Contains(lowerErr, "exit status") {
 		suggestion = "Review the command syntax and arguments. If the command depends on specific environment setups or files, verify they are present."
 	} else {
 		suggestion = "Ensure arguments match the schema parameters exactly, and that any files/folders referred to exist and are spelled correctly."
 	}
 
 	return fmt.Sprintf("System Alert: Your execution of '%s' failed due to: %s\nRecommendation: %s", toolName, errStr, suggestion)
+}
+
+// FormatToolExecutionFailure preserves useful tool diagnostics while adding the
+// action-oriented failure context expected by the agent and terminal UI.
+func FormatToolExecutionFailure(toolName, output string, err error) string {
+	if err == nil {
+		return strings.TrimRight(output, "\r\n")
+	}
+	alert := FormatDefensiveError(toolName, err)
+	diagnostic := strings.Trim(output, "\r\n")
+	if strings.TrimSpace(diagnostic) == "" || strings.TrimSpace(diagnostic) == strings.TrimSpace(err.Error()) {
+		return alert
+	}
+	return diagnostic + "\n\n" + alert
 }
 
 // ParseFallbackToolCalls extracts XML-style fallback tool calls from plain assistant message content
@@ -246,5 +279,3 @@ func buildToolCall(name string, args string) db.ToolCall {
 	tc.Function.Arguments = finalArgs
 	return tc
 }
-
-

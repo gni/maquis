@@ -48,12 +48,12 @@ func ParseFrontmatter(content string) (map[string]string, string) {
 
 func LoadSkills(skillsDir string) ([]Skill, error) {
 	var skills []Skill
-	
+
 	if strings.HasPrefix(skillsDir, "~/") {
 		homeDir, _ := os.UserHomeDir()
 		skillsDir = filepath.Join(homeDir, skillsDir[2:])
 	}
-	
+
 	if _, err := os.Stat(skillsDir); os.IsNotExist(err) {
 		return skills, nil
 	}
@@ -97,6 +97,37 @@ func LoadSkills(skillsDir string) ([]Skill, error) {
 	return skills, err
 }
 
+func subagentSkillGuidance(skills []Skill) string {
+	names := make([]string, 0, len(skills))
+	seen := make(map[string]struct{}, len(skills))
+	for _, skill := range skills {
+		name := strings.TrimSpace(skill.Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var sb strings.Builder
+	sb.WriteString("\n\nSubagent skill assignment:\n")
+	if len(names) == 0 {
+		sb.WriteString("- No registered reference skills are currently installed.\n")
+	} else {
+		sb.WriteString("- Registered reference skill names: ")
+		sb.WriteString(strings.Join(names, ", "))
+		sb.WriteString(".\n")
+	}
+	sb.WriteString("- Use skill_names only for exact registered names. Do not invent reference skill names.\n")
+	sb.WriteString("- For a new specialization, define it in the subagent system_prompt or provide inline_skills. Unknown skill_names are preserved as agent-local skills using that subagent's system_prompt.\n")
+	return sb.String()
+}
+
 func RenderSkills(w io.Writer, skills []Skill, theme style.UITheme) {
 	if len(skills) == 0 {
 		fmt.Fprintln(w, "No reference skills found.")
@@ -125,6 +156,7 @@ func (a *Agent) GetSystemPrompt() string {
 			"- Workspace root: `%s`. Read, edit, or list files inside this workspace directory tree.\n"+
 
 			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
+			"- If edit reports an oldText mismatch, read the latest file and retry a smaller exact unique block. Never recover by overwriting the existing file with write.\n"+
 			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
 			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
 			"- Ignore dependencies (.git, node_modules, .venv) when searching or listing.\n"+
@@ -133,6 +165,7 @@ func (a *Agent) GetSystemPrompt() string {
 
 		var sb strings.Builder
 		sb.WriteString(a.Config.SystemInstruction + thinkingGuidelines)
+		sb.WriteString(subagentSkillGuidance(a.ActiveSkills))
 		memoryContext := a.LoadMemoryContext()
 		if memoryContext != "" {
 			sb.WriteString(memoryContext)
@@ -146,6 +179,7 @@ func (a *Agent) GetSystemPrompt() string {
 		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
 		"- For direct shell commands and read/write/edit tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
 		"- Before editing or modifying a file, you MUST read the file (or the relevant part of it) first to ensure your edits match the current content exactly and avoid \"oldText block not found\" errors.\n"+
+		"- If edit reports an oldText mismatch, read the latest file and retry a smaller exact unique block. Never recover by overwriting the existing file with write.\n"+
 		"- When asked to write, create, or implement code, files, or applications, you MUST actually write the code to files on disk in the workspace using the 'write' tool, rather than just printing the code blocks in your chat response.\n"+
 		"- Keep all internal thoughts extremely short (under 2-3 sentences max) and strictly restricted to immediate technical execution planning. Avoid conversational monologues, introspective reflections, or debating choices in thoughts.\n"+
 		"- You MUST NOT output any conversational preambles, introductory text, explanations, or warnings before calling a tool. The tool call must be the absolute first content you generate.\n"+
@@ -211,6 +245,7 @@ func (a *Agent) GetSystemPrompt() string {
 			sb.WriteString(fmt.Sprintf("- name: %s\n  description: %s\n", s.Name, s.Description))
 		}
 	}
+	sb.WriteString(subagentSkillGuidance(a.ActiveSkills))
 
 	memoryContext := a.LoadMemoryContext()
 	if memoryContext != "" {

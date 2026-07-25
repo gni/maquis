@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"maquis/pkg/ui/style"
 	"golang.org/x/term"
+	"maquis/pkg/ui/style"
 
 	"maquis/pkg/config"
 	"maquis/pkg/db"
@@ -59,58 +59,15 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		a.CurrentWriter = nil
 		a.CurrentContext = nil
 	}()
-	var pauseThinkingSpinner chan bool
+	var activity *turnActivity
 	if !isNonInteractive && a.UI != nil {
-		stopThinkingSpinner := make(chan struct{})
-		thinkingSpinnerDone := make(chan struct{})
-		pauseThinkingSpinner = make(chan bool, 1)
-
-		go func() {
-			defer close(thinkingSpinnerDone)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			frames := []string{"◜", "◝", "◞", "◟"} // Curved Arcs (Sleek rotating circle)
-
-			i := 0
-			paused := false
-			for {
-				select {
-				case <-stopThinkingSpinner:
-					return
-				case p := <-pauseThinkingSpinner:
-					paused = p
-					if paused {
-						spinnerFrameMu.Lock()
-						currentSpinnerFrame = ""
-						spinnerFrameMu.Unlock()
-						a.UI.DrawStatsLine(rawW, theme, "", "")
-					}
-				case <-ticker.C:
-					if paused {
-						continue
-					}
-					frame := frames[i%len(frames)]
-					i++
-					spinnerFrameMu.Lock()
-					currentSpinnerFrame = frame
-					spinnerFrameMu.Unlock()
-					elapsed := time.Since(startTime).Seconds()
-					a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
-				}
-			}
-		}()
-
-		defer func() {
-			close(stopThinkingSpinner)
-			<-thinkingSpinnerDone
+		activity = newTurnActivity(startTime, defaultTurnActivityInterval, func(frame, text string) {
 			spinnerFrameMu.Lock()
-			currentSpinnerFrame = ""
+			currentSpinnerFrame = frame
 			spinnerFrameMu.Unlock()
-			if a.UI != nil {
-				a.UI.DrawStatsLine(rawW, theme, "", "")
-			}
-		}()
+			a.UI.DrawStatsLine(rawW, theme, frame, text)
+		})
+		defer activity.Stop()
 	}
 
 	var totalCompletionTokens int
@@ -146,11 +103,37 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	defer signal.Stop(sigChan)
 
 	go func() {
-		select {
-		case <-sigChan:
-			fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
-			cancel()
-		case <-ctx.Done():
+		for {
+			select {
+			case receivedSignal := <-sigChan:
+				manager := a.MultiAgentManager
+				if receivedSignal == syscall.SIGINT && manager != nil {
+					if activeName, ok := manager.ActiveSubagentName(); ok && a.UI != nil {
+						decision := a.UI.AskForSubagentCancellation(writerToUse, theme, activeName)
+						switch decision {
+						case SubagentCancellationContinue:
+							fmt.Fprintln(writerToUse, "\n[Subagent cancellation dismissed]")
+							continue
+						case SubagentCancellationSkipCurrent:
+							if manager.CancelSubagentTurn(activeName) {
+								fmt.Fprintf(writerToUse, "\n[Skipped subagent: %s]\n", activeName)
+							} else {
+								fmt.Fprintf(writerToUse, "\n[Subagent already finished: %s]\n", activeName)
+							}
+							continue
+						case SubagentCancellationStopAll:
+							manager.CancelAllActiveSubagents()
+						}
+					} else {
+						manager.CancelAllActiveSubagents()
+					}
+				}
+				fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
+				cancel()
+				return
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
@@ -163,11 +146,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			return
 		}
 
-		if !isNonInteractive && pauseThinkingSpinner != nil {
-			select {
-			case pauseThinkingSpinner <- false:
-			default:
-			}
+		if activity != nil {
+			activity.Think()
 		}
 
 		if iter > 1 {
@@ -191,7 +171,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		a.CurrentStreamMu.Lock()
 		a.CurrentStreamBuffer = new(bytes.Buffer)
 		a.CurrentStreamMu.Unlock()
-		
+
 		teeWriter := &customTeeWriter{screen: writerToUse, buffer: a.CurrentStreamBuffer}
 		ncw := &newlineCounterWriter{Writer: teeWriter}
 		var sr StreamRenderer
@@ -290,33 +270,17 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		sr.Flush()
 		stopTicker()
-		
+
 		a.CurrentStreamMu.Lock()
 		a.CurrentStreamBuffer = nil
 		a.CurrentStreamMu.Unlock()
 
 		streamErr := <-streamErrChan
 
-		var globalPromptTokens, globalCompletionTokens int
-		if assistantMsg != nil {
-			totalCompletionTokens += assistantMsg.CompletionTokens
-			totalPromptTokens += assistantMsg.PromptTokens
-			totalApiDuration += a.lastGenerationDuration
-
-			assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
-			*messages = append(*messages, *assistantMsg)
-			if sessionID != "" {
-				go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
-			}
-
-			globalPromptTokens, globalCompletionTokens = a.GetGlobalTokens(*messages, allowlist)
-
-			if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
-				a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
-			}
-		}
-
 		if streamErr != nil {
+			if activity != nil {
+				activity.Pause()
+			}
 			if !isNonInteractive {
 				fmt.Fprintln(writerToUse)
 				cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
@@ -340,7 +304,20 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			return
 		}
 
+		totalCompletionTokens += assistantMsg.CompletionTokens
+		totalPromptTokens += assistantMsg.PromptTokens
+		totalApiDuration += a.lastGenerationDuration
 
+		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
+		*messages = append(*messages, *assistantMsg)
+		if sessionID != "" {
+			go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+		}
+
+		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
+		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
+			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
+		}
 
 		var finalTps float64
 		if a.lastGenerationDuration > 0 {
@@ -348,6 +325,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
+			if activity != nil {
+				activity.Pause()
+			}
 			timePrinted = true
 			elapsed := time.Since(startTime)
 			timeStr := fmt.Sprintf("%s (%.1fs)", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
@@ -361,7 +341,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			cStyled := style.NewStyle().Foreground(theme.Highlight).Render(currentCStr)
 			dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
 
-			fmt.Fprintln(writerToUse)
 			if !isNonInteractive {
 				if a.UI != nil {
 					activeTasks := 0
@@ -413,23 +392,15 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			tc     db.ToolCall
 		}
 
-		firstTitleLine := sr.GetToolTitleLineNumber(0)
-		wasStreamed := firstTitleLine != -1
-
-		var startLine int
-		_ = startLine
-
 		for idx, tc := range assistantMsg.ToolCalls {
 			if ctx.Err() != nil {
 				return
 			}
 
 			isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
+			wasStreamed := sr.GetToolTitleLineNumber(idx) != -1
 
-			if wasStreamed {
-				startLine = sr.GetToolTitleLineNumber(idx)
-			} else {
-				startLine = ncw.count
+			if !wasStreamed {
 				// Render the tool header only if it wasn't already streamed
 				if a.UI != nil {
 					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
@@ -440,15 +411,17 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 			approved := false
 			always := false
+			approvalRendered := false
 			if !a.Config.AutoApprove && !isReadOnly(tc.Function.Name) {
+				approvalRendered = true
 				sr.Flush()
 				if a.UI != nil {
-					if !isNonInteractive && pauseThinkingSpinner != nil {
-						pauseThinkingSpinner <- true
+					if activity != nil {
+						activity.Pause()
 					}
 					approved, always = a.UI.AskForApproval(ncw, theme)
-					if !isNonInteractive && pauseThinkingSpinner != nil {
-						pauseThinkingSpinner <- false
+					if activity != nil {
+						activity.Think()
 					}
 				} else {
 					approved = true
@@ -462,18 +435,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			}
 
 			if approved {
-				// If it's a subagent tool, update the tool header to green BEFORE executing it.
-				// This way, the subagent outputs its results below the green header, and we don't
-				// overwrite/duplicate the output after it completes.
-				if isSubagent && a.UI != nil {
-					a.UI.RenderToolOutput(ncw, "", false, true, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
-				}
-
-				// Execute the tool call
-				if !isNonInteractive && pauseThinkingSpinner != nil {
-					pauseThinkingSpinner <- true
-				}
-
 				allowed, reason := a.runBeforeToolHook(tc)
 				var toolOutput string
 				var toolErr error
@@ -482,69 +443,40 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
 					toolErr = fmt.Errorf("blocked by hook")
 				} else {
-					// Draw temporary executing status line if UI is present
-					var stopSpinner chan struct{}
-					var spinnerDone chan struct{}
-					if a.UI != nil && !isSubagent {
-						stopSpinner = make(chan struct{})
-						spinnerDone = make(chan struct{})
-						go func() {
-							defer close(spinnerDone)
-							frames := []string{"◜", "◝", "◞", "◟"}
-							i := 0
-							for {
-								select {
-								case <-stopSpinner:
-									return
-								default:
-									time.Sleep(80 * time.Millisecond)
-									select {
-									case <-stopSpinner:
-										return
-									default:
-									}
-									frame := frames[i%len(frames)]
-									i++
-									a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("executing %s...", tc.Function.Name))
-								}
-							}
-						}()
+					if activity != nil {
+						if isSubagent {
+							activity.Pause()
+						} else {
+							activity.Execute(tc.Function.Name)
+						}
 					}
 
 					toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
 					toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
 
-					if a.UI != nil && !isSubagent {
-						close(stopSpinner)
-						<-spinnerDone
-						a.UI.DrawStatsLine(rawW, theme, "", "")
+					if activity != nil {
+						activity.Think()
 					}
 				}
 
-				if !isNonInteractive && pauseThinkingSpinner != nil {
-					pauseThinkingSpinner <- false
-				}
-
 				if toolErr != nil {
-					toolOutput = FormatDefensiveError(tc.Function.Name, toolErr)
+					toolOutput = FormatToolExecutionFailure(tc.Function.Name, toolOutput, toolErr)
 				}
 				if toolOutput == "" {
 					toolOutput = "(no output)"
 				}
 
+				if !isSubagent && !approvalRendered {
+					sr.CompleteToolCall(idx, tc.Function.Name, tc.Function.Arguments, toolErr != nil)
+				}
+
 				// Render the tool output
-				countBefore := ncw.count
 				if !isSubagent {
 					if a.UI != nil {
-						a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
+						a.UI.RenderToolOutput(ncw, toolOutput, toolErr != nil, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, sr.DidStreamToolBody(idx))
 					} else {
 						fmt.Fprintln(ncw, toolOutput)
 					}
-				}
-				countAfter := ncw.count
-				diff := countAfter - countBefore
-				if diff > 0 && wasStreamed && sr != nil {
-					sr.ShiftToolTitleLineNumbers(idx+1, diff)
 				}
 
 				// Update agent state
@@ -573,16 +505,13 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				a.lastToolOutput = toolOutput
 				a.lastToolIsError = true
 
-				countBefore := ncw.count
+				if !approvalRendered {
+					sr.CompleteToolCall(idx, tc.Function.Name, tc.Function.Arguments, true)
+				}
 				if a.UI != nil {
-					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, wasStreamed)
+					a.UI.RenderToolOutput(ncw, toolOutput, true, a.Config.CollapseResults, theme, tc.Function.Name, tc.Function.Arguments, sr.DidStreamToolBody(idx))
 				} else {
 					fmt.Fprintln(ncw, toolOutput)
-				}
-				countAfter := ncw.count
-				diff := countAfter - countBefore
-				if diff > 0 && wasStreamed && sr != nil {
-					sr.ShiftToolTitleLineNumbers(idx+1, diff)
 				}
 
 				*messages = append(*messages, db.Message{
@@ -601,6 +530,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 	}
 
+	if activity != nil {
+		activity.Pause()
+	}
 	errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
 	fmt.Fprintf(writerToUse, "\n%s reached maximum reasoning steps limit (%d).\n", errStyle.Render("warning:"), maxSteps)
 }
@@ -671,14 +603,16 @@ type fallbackStreamRenderer struct {
 func (f *fallbackStreamRenderer) Write(content string) {
 	fmt.Fprint(f.w, content)
 }
-func (f *fallbackStreamRenderer) WriteReasoning(content string)                     {}
-func (f *fallbackStreamRenderer) Flush()                                          {}
-func (f *fallbackStreamRenderer) HasOutput() bool                                 { return false }
+func (f *fallbackStreamRenderer) WriteReasoning(content string)                    {}
+func (f *fallbackStreamRenderer) Flush()                                           {}
+func (f *fallbackStreamRenderer) HasOutput() bool                                  { return false }
 func (f *fallbackStreamRenderer) StartToolCall(toolName string, toolCallIndex int) {}
 func (f *fallbackStreamRenderer) WriteToolCall(content string)                     {}
 func (f *fallbackStreamRenderer) GetToolTitleLineNumber(index int) int             { return -1 }
-func (f *fallbackStreamRenderer) ShiftToolTitleLineNumbers(startIdx int, diff int) {}
-func (f *fallbackStreamRenderer) GetReasoningDuration() float64                    { return 0 }
+func (f *fallbackStreamRenderer) DidStreamToolBody(index int) bool                 { return false }
+func (f *fallbackStreamRenderer) CompleteToolCall(index int, toolName string, toolArgs string, isError bool) {
+}
+func (f *fallbackStreamRenderer) GetReasoningDuration() float64 { return 0 }
 
 func isReadOnly(toolName string) bool {
 	return toolName == "read" || toolName == "task_status"

@@ -1,5 +1,10 @@
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
 type ProviderConfig struct {
 	Name     string `json:"name"`
 	Endpoint string `json:"endpoint"`
@@ -12,21 +17,40 @@ type ProvidersFile struct {
 	Providers      map[string]ProviderConfig `json:"providers"`
 }
 
-func (c *Config) SyncActiveProvider() {
-	if c.ActiveProvider == "" || c.Providers == nil {
-		return
+func (c *Config) ActivateProvider(name string) error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
 	}
-	p, ok := c.Providers[c.ActiveProvider]
+	if strings.TrimSpace(name) == "" {
+		c.ActiveProvider = ""
+		return nil
+	}
+	if c.Providers == nil {
+		return fmt.Errorf("provider '%s' not found", name)
+	}
+
+	provider, ok := c.Providers[name]
 	if !ok {
+		return fmt.Errorf("provider '%s' not found", name)
+	}
+	if strings.TrimSpace(provider.Endpoint) == "" {
+		return fmt.Errorf("provider '%s' has an empty endpoint", name)
+	}
+
+	c.ActiveProvider = name
+	c.Endpoint = provider.Endpoint
+	c.ApiKey = provider.ApiKey
+	if provider.Model != "" {
+		c.Model = provider.Model
+	}
+	return nil
+}
+
+func (c *Config) SyncActiveProvider() {
+	if c == nil || c.ActiveProvider == "" {
 		return
 	}
-	c.Endpoint = p.Endpoint
-	if p.ApiKey != "" {
-		c.ApiKey = p.ApiKey
-	}
-	if p.Model != "" {
-		c.Model = p.Model
-	}
+	_ = c.ActivateProvider(c.ActiveProvider)
 }
 
 func (c *Config) UpdateActiveProvider() {

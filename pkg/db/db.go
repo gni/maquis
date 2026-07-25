@@ -147,6 +147,9 @@ func LoadMessages(sessionID string) ([]Message, error) {
 		if record.Message.Role == "user" && record.Message.Content == "" {
 			continue
 		}
+		if strings.HasPrefix(record.Message.Content, "[user manually executed slash command:") {
+			continue
+		}
 
 		messages = append(messages, record.Message)
 	}
@@ -304,7 +307,7 @@ func GetSessions() ([]SessionInfo, error) {
 				continue
 			}
 
-			if record.Message.Role == "user" && record.Message.Content == "" {
+			if record.Message.Role == "user" && (record.Message.Content == "" || strings.HasPrefix(record.Message.Content, "[user manually executed slash command:")) {
 				continue
 			}
 
