@@ -2030,7 +2030,11 @@ func redrawScreenWithNotice(w io.Writer, a *agent.Agent, kiReader *keyIntercepto
 
 	drawConsoleStaticControlsLocked(cwFinal, a, kiReader, rl, true)
 
-	_, _ = w.Write(finalBuf.Bytes())
+	dest := w
+	if _, isPP := w.(*PromptPreservingWriter); isPP {
+		dest = os.Stderr
+	}
+	_, _ = dest.Write(finalBuf.Bytes())
 }
 
 func setNonCanonical(fd int) (func(), error) {
