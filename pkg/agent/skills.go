@@ -46,55 +46,94 @@ func ParseFrontmatter(content string) (map[string]string, string) {
 	return fm, body
 }
 
-func LoadSkills(skillsDir string) ([]Skill, error) {
+func LoadSkillsFromDirs(dirs ...string) ([]Skill, error) {
 	var skills []Skill
+	seen := make(map[string]bool)
 
-	if strings.HasPrefix(skillsDir, "~/") {
-		homeDir, _ := os.UserHomeDir()
-		skillsDir = filepath.Join(homeDir, skillsDir[2:])
-	}
-
-	if _, err := os.Stat(skillsDir); os.IsNotExist(err) {
-		return skills, nil
-	}
-
-	err := filepath.Walk(skillsDir, func(path string, info os.FileInfo, err error) error {
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if strings.HasPrefix(dir, "~/") {
+			homeDir, _ := os.UserHomeDir()
+			dir = filepath.Join(homeDir, dir[2:])
+		}
+		absDir, err := filepath.Abs(dir)
 		if err != nil {
-			return nil
+			absDir = dir
 		}
-		if info.IsDir() {
-			return nil
-		}
-		if filepath.Ext(path) != ".md" {
-			return nil
+		if _, err := os.Stat(absDir); os.IsNotExist(err) {
+			continue
 		}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
+		_ = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			if strings.ToLower(filepath.Ext(path)) != ".md" {
+				return nil
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+
+			fm, body := ParseFrontmatter(string(data))
+			name := ""
+			desc := ""
+			if fm != nil {
+				name = fm["name"]
+				desc = fm["description"]
+			}
+
+			if name == "" {
+				baseName := info.Name()
+				baseNoExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+				if strings.EqualFold(baseNoExt, "SKILL") || strings.EqualFold(baseNoExt, "README") {
+					name = filepath.Base(filepath.Dir(path))
+				} else {
+					name = baseNoExt
+				}
+			}
+
+			if desc == "" {
+				lines := strings.Split(strings.TrimSpace(body), "\n")
+				for _, l := range lines {
+					l = strings.TrimSpace(l)
+					if l != "" && !strings.HasPrefix(l, "---") {
+						desc = strings.TrimPrefix(l, "# ")
+						break
+					}
+				}
+				if desc == "" {
+					desc = name + " skill guide"
+				}
+			}
+
+			if !seen[name] {
+				seen[name] = true
+				skills = append(skills, Skill{
+					Name:        name,
+					Description: desc,
+					Path:        path,
+					Content:     strings.TrimSpace(body),
+				})
+			}
 			return nil
-		}
-
-		fm, body := ParseFrontmatter(string(data))
-		if fm == nil {
-			return nil
-		}
-
-		name := fm["name"]
-		desc := fm["description"]
-		if name == "" {
-			name = strings.TrimSuffix(info.Name(), ".md")
-		}
-
-		skills = append(skills, Skill{
-			Name:        name,
-			Description: desc,
-			Path:        path,
-			Content:     strings.TrimSpace(body),
 		})
+	}
+	return skills, nil
+}
 
-		return nil
-	})
-	return skills, err
+func LoadSkills(skillsDir string) ([]Skill, error) {
+	cwd, _ := os.Getwd()
+	dirs := []string{
+		skillsDir,
+		filepath.Join(cwd, "skills"),
+		filepath.Join(cwd, ".agents", "skills"),
+	}
+	return LoadSkillsFromDirs(dirs...)
 }
 
 func subagentSkillGuidance(skills []Skill) string {

@@ -105,11 +105,11 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 			}
 			fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[J\x1b8", clearStart)
 		}
-		fmt.Fprintf(&buf, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
 		getUI().LastH = height
 		getUI().LastPasteLinesOffset = getUI().PasteLinesOffset
 		getUI().LastStatusBarText = "" // Force redraw of the actual text
 	}
+	fmt.Fprintf(&buf, "\x1b7\x1b[1;%dr\x1b8", scrollBottom)
 
 	// Save cursor
 	fmt.Fprint(&buf, "\x1b7")

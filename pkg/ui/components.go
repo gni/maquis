@@ -85,18 +85,13 @@ func PrintBanner(w io.Writer, a *agent.Agent) {
 		}
 	}
 
-	pluginWord := "plugin"
-	if pluginsCount != 1 {
-		pluginWord = "plugins"
+	tagStr := ""
+	if pluginsCount > 0 || extensionsCount > 0 {
+		tagStyle := style.NewStyle().Foreground(theme.Secondary).Italic(true)
+		tagStr = "  " + tagStyle.Render(fmt.Sprintf("[⊞ %d, ⌁ %d]", pluginsCount, extensionsCount))
 	}
-	extWord := "extension"
-	if extensionsCount != 1 {
-		extWord = "extensions"
-	}
-	tagStyle := style.NewStyle().Foreground(theme.Secondary).Italic(true)
-	tagStr := tagStyle.Render(fmt.Sprintf("[%d %s, %d %s]", pluginsCount, pluginWord, extensionsCount, extWord))
 
-	info := fmt.Sprintf("\n\nmaquis v1.0.0  %s\nendpoint: %s\nmodel:    %s", tagStr, cfg.Endpoint, cfg.Model)
+	info := fmt.Sprintf("\n\nmaquis v1.0.0%s\nendpoint: %s\nmodel:    %s", tagStr, cfg.Endpoint, cfg.Model)
 
 	joined := style.JoinHorizontal(
 		style.Center,

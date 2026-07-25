@@ -1022,9 +1022,6 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 
 			if char == 13 || char == 10 {
 				mam.JoinAgent(selectedName)
-				fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
-				fmt.Fprintf(rlOutput, "Switched active chat focus to agent '%s'.\r\nPress enter to continue...", selectedName)
-				_, _ = sr.ReadLine(rlOutput)
 				return nil
 			}
 
@@ -1079,14 +1076,14 @@ func RunInteractiveAgentManager(mam *agent.MultiAgentManager, theme UITheme, rlI
 										}
 
 										errSpawn := mam.SpawnAgent(agentName, sysPrompt, parentName, skills)
-
-										fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 										if errSpawn != nil {
+											fmt.Fprint(rlOutput, "\x1b[?25h\x1b[H\x1b[2J")
 											fmt.Fprintf(rlOutput, "Error spawning agent: %v\r\n\r\nPress enter to continue...", errSpawn)
+											_, _ = sr.ReadLine(rlOutput)
 										} else {
-											fmt.Fprintf(rlOutput, "Successfully spawned agent '%s'!\r\n\r\nPress enter to continue...", agentName)
+											mam.JoinAgent(agentName)
+											return nil
 										}
-										_, _ = sr.ReadLine(rlOutput)
 									}
 								}
 							}

@@ -210,7 +210,6 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 								p.outputBuf.Reset()
 							}
 						}
-						fmt.Fprintf(pw, "  ▸ %s:\n", p.currentKey)
 					}
 				}
 			} else if char == '}' || char == ']' {

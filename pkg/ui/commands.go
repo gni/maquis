@@ -34,7 +34,8 @@ func HandleSlashCommand(
 	kiReader *keyInterceptorReader,
 ) (bool, bool) {
 	trimmed := strings.TrimSpace(line)
-	isHelp := trimmed == "help" || trimmed == "h" || trimmed == "?" || trimmed == "/help" || trimmed == "/commands" || trimmed == "/h" || trimmed == "/?"
+	lower := strings.ToLower(trimmed)
+	isHelp := lower == "help" || lower == "h" || lower == "?" || lower == "/help" || lower == "/commands" || lower == "/h" || lower == "/?" || strings.HasPrefix(lower, "help ") || strings.HasPrefix(lower, "/help ")
 	if !strings.HasPrefix(trimmed, "/") && !isHelp {
 		return false, false
 	}
@@ -119,18 +120,7 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/help", "/h", "/commands", "?", "/?", "help", "h":
-		var helpBuf strings.Builder
-		RenderHelp(&helpBuf, *theme)
-		msgContent := fmt.Sprintf("[user manually executed slash command: `/help`]\n%s", strings.TrimSpace(helpBuf.String()))
-		*messages = append(*messages, db.Message{Role: "user", Content: msgContent})
-		if currentSessionID != nil && *currentSessionID != "" {
-			_ = db.SaveMessage(*currentSessionID, (*messages)[len(*messages)-1])
-		}
-		if kiReader != nil {
-			redrawScreen(w, a, kiReader, kiReader.rl)
-		} else {
-			redrawScreen(w, a, nil, nil)
-		}
+		RenderHelp(w, *theme)
 		return true, false
 	case "/config", "/set":
 		if len(parts) > 1 {
@@ -514,7 +504,7 @@ func HandleSlashCommand(
 	case "/mcp", "/mcps":
 		HandleMCPCommand(a, parts, messages, *theme, w, kiReader)
 		return true, false
-	case "/agent":
+	case "/agent", "/agents":
 		if len(parts) < 2 {
 			var input io.Reader = kiReader
 			if input == nil {
@@ -738,7 +728,7 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, "no custom plugins registered.")
 			return true, false
 		}
-		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("custom plugin tools:"))
+		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("⊞ custom plugin tools:"))
 		for _, name := range pluginNames {
 			exec := executors[name]
 			fmt.Fprintf(w, "  - %-25s : %s\n",
@@ -807,7 +797,7 @@ func HandleSlashCommand(
 			return true, false
 		}
 
-		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("custom slash command extensions:"))
+		fmt.Fprintln(w, style.NewStyle().Foreground(theme.Primary).Bold(true).Render("⌁ custom slash command extensions:"))
 		for _, ext := range exts {
 			fmt.Fprintf(w, "  - %-20s : %s (%s)\n",
 				style.NewStyle().Foreground(theme.Secondary).Bold(true).Render(ext.name),

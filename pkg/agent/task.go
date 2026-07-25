@@ -203,12 +203,12 @@ func (a *Agent) GetTaskStatus(id string) (string, string, error) {
 	}
 
 	if task.Stdout.Len() > 0 {
-		sb.WriteString("STDOUT:\n")
+		// sb.WriteString("STDOUT:\n")
 		sb.Write(getTail(task.Stdout.Bytes(), 4000))
 		sb.WriteString("\n")
 	}
 	if task.Stderr.Len() > 0 {
-		sb.WriteString("STDERR:\n")
+		// sb.WriteString("STDERR:\n")
 		sb.Write(getTail(task.Stderr.Bytes(), 4000))
 		sb.WriteString("\n")
 	}

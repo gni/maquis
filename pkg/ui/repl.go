@@ -70,6 +70,14 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 		"/provider select ",
 		"/provider model ",
 		"/provider remove ",
+		"/agent ",
+		"/agent list",
+		"/agent join ",
+		"/agent spawn ",
+		"/agents ",
+		"/agents list",
+		"/agents join ",
+		"/agents spawn ",
 	}
 
 	var matches []string
@@ -1573,7 +1581,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		var handled, quit bool
 		if isSlashCmd {
-			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, os.Stderr, &currentSessionID, rl.History, mam, kiReader)
+			handled, quit = HandleSlashCommand(a, line, &messages, allowedTools, &theme, ppWriter, &currentSessionID, rl.History, mam, kiReader)
 			kiReader.Drain()
 
 			if handled {
@@ -1972,14 +1980,13 @@ func redrawScreenWithNotice(w io.Writer, a *agent.Agent, kiReader *keyIntercepto
 		PrintSessionHistory(cwBuf, activeMessages, activeTheme, a.Config)
 	}
 
-	termW, height := getTerminalSize()
+	_, height := getTerminalSize()
 	scrollBottom := height - 5 - getUI().PasteLinesOffset
 	if scrollBottom < 1 {
 		scrollBottom = 1
 	}
 
 	content := buf.String()
-	linesCount := countWrappedLines(content, termW)
 
 	var finalBuf bytes.Buffer
 	cwFinal := crnlWriter{w: &finalBuf}
@@ -1990,11 +1997,6 @@ func redrawScreenWithNotice(w io.Writer, a *agent.Agent, kiReader *keyIntercepto
 	// Set scroll region BEFORE rendering content so text auto-scrolls within 1..scrollBottom
 	fmt.Fprintf(cwFinal, "\x1b[1;%dr\x1b[1;1H", scrollBottom)
 
-	// Write padding BEFORE content to push it to the bottom of the scroll region
-	if linesCount < scrollBottom {
-		padding := scrollBottom - linesCount
-		fmt.Fprint(cwFinal, strings.Repeat("\n", padding))
-	}
 
 	fmt.Fprint(cwFinal, content)
 

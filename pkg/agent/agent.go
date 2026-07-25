@@ -190,14 +190,25 @@ func (a *Agent) GetActiveSkills() []tool.Skill {
 }
 
 func (a *Agent) ReloadSkills() []tool.Skill {
-	if a == nil || a.Config == nil || a.Config.SkillsDir == "" {
+	if a == nil || a.Config == nil {
 		if a != nil {
 			return a.ActiveSkills
 		}
 		return nil
 	}
-	skills, err := LoadSkills(a.Config.SkillsDir)
-	if err == nil {
+	cwd := a.WorkspaceRoot
+	var dirs []string
+	if a.Config.SkillsDir != "" {
+		dirs = append(dirs, a.Config.SkillsDir)
+	}
+	if cwd != "" {
+		dirs = append(dirs, filepath.Join(cwd, "skills"), filepath.Join(cwd, ".agents", "skills"))
+	}
+	if len(dirs) == 0 {
+		return a.ActiveSkills
+	}
+	skills, err := LoadSkillsFromDirs(dirs...)
+	if err == nil && (len(skills) > 0 || len(a.ActiveSkills) == 0) {
 		a.ActiveSkills = skills
 	}
 	return a.ActiveSkills
