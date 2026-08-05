@@ -78,3 +78,29 @@ func TestCompactPromptForbidsWholeFileWriteAfterEditMismatch(t *testing.T) {
 		}
 	}
 }
+
+func TestEditMismatchProvidesClosestLineRecommendation(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "DashboardLayout.tsx")
+	const current = "// Header\nimport React from 'react';\n\nexport const DashboardLayout = () => {\n  return <div>Dashboard</div>;\n};\n"
+	if err := os.WriteFile(path, []byte(current), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	a := &Agent{WorkspaceRoot: workspace}
+	executor := tool.NewEditTool()
+	_, err := executor.Execute(
+		a,
+		`{"path":"DashboardLayout.tsx","updates":[{"oldText":"export const DashboardLayout = () => {\n  return <span>Old</span>;\n}","newText":"export const DashboardLayout = () => {\n  return <div>New</div>;\n}"}]}`,
+	)
+	if err == nil {
+		t.Fatalf("expected error on mismatched edit, got nil")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "oldText block was not found in file") {
+		t.Fatalf("expected oldText error prefix, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "around line 4") {
+		t.Fatalf("expected recommendation pointing to around line 4, got: %s", errMsg)
+	}
+}

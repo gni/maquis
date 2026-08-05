@@ -402,7 +402,11 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 				diffBuilder.WriteString(fmt.Sprintf("edit[%d]: requested replacement already present; file unchanged\n", i))
 				continue
 			}
-			return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s", i, args.Path)
+			closestLine := findClosestLineMatch(content, edit.OldText)
+			if closestLine > 0 {
+				return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s.\nRecommendation: A similar block was detected around line %d. Read the file again starting at offset=%d using 'read', copy a small unique 2-5 line block exactly as it exists now, and retry without reusing an earlier snapshot. Do not recover by overwriting the existing file with write.", i, args.Path, closestLine, closestLine)
+			}
+			return "", fmt.Errorf("edit[%d]: oldText block was not found in file %s.\nRecommendation: Read the file again using 'read' to verify its current contents, copy a small unique block exactly as it exists now, and retry without reusing an earlier snapshot. Do not recover by overwriting the existing file with write.", i, args.Path)
 		}
 		occurrences := strings.Count(content, edit.OldText)
 		if occurrences > 1 {
@@ -572,4 +576,27 @@ func hasIgnoredComponent(path string) bool {
 		}
 	}
 	return false
+}
+
+func findClosestLineMatch(content, oldText string) int {
+	fileLines := strings.Split(content, "\n")
+	oldLines := strings.Split(oldText, "\n")
+	var coreLine string
+	for _, l := range oldLines {
+		t := strings.TrimSpace(l)
+		if len(t) > 3 {
+			coreLine = t
+			break
+		}
+	}
+	if coreLine == "" {
+		return 0
+	}
+	coreNorm := normalizeSpace(coreLine)
+	for idx, fLine := range fileLines {
+		if strings.Contains(fLine, coreLine) || normalizeSpace(fLine) == coreNorm {
+			return idx + 1
+		}
+	}
+	return 0
 }

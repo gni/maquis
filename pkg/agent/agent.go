@@ -292,9 +292,9 @@ func (a *Agent) compressHistory(
 	theme style.UITheme,
 	w io.Writer,
 ) {
-	keepMsgCount := 10
+	keepMsgCount := 4
 	if len(*messages) <= keepMsgCount+2 {
-		keepMsgCount = 4
+		keepMsgCount = 2
 	}
 
 	keepIdx := len(*messages) - keepMsgCount
@@ -363,10 +363,18 @@ func (a *Agent) compressHistory(
 		Content: fmt.Sprintf("[System: Below is a summary of the earlier conversation history:\n%s]", summaryText),
 	}
 
-	newMessages := make([]db.Message, 0, len(*messages))
+	keptMessages := make([]db.Message, 0, len((*messages)[keepIdx:]))
+	for _, m := range (*messages)[keepIdx:] {
+		if m.Role == "tool" && len(m.Content) > 1000 {
+			m.Content = m.Content[:1000] + "... (truncated for context optimization)"
+		}
+		keptMessages = append(keptMessages, m)
+	}
+
+	newMessages := make([]db.Message, 0, 2+len(keptMessages))
 	newMessages = append(newMessages, (*messages)[0])           // Keep system prompt
 	newMessages = append(newMessages, summaryMsg)               // Add summary
-	newMessages = append(newMessages, (*messages)[keepIdx:]...) // Add latest messages
+	newMessages = append(newMessages, keptMessages...)          // Add latest messages
 
 	if sessionID != "" {
 		_ = db.ClearSession(sessionID)
