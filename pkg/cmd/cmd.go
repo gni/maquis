@@ -125,7 +125,7 @@ var rootCmd = &cobra.Command{
 
 		httpClient := &http.Client{
 			Transport: transport,
-			Timeout:   120 * time.Second,
+			Timeout:   0, // No timeout on long-running streaming responses
 		}
 
 		cwd, _ := os.Getwd()

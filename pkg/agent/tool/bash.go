@@ -46,10 +46,19 @@ func (t *bashTool) Definition() Tool {
 func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
 		Command    string `json:"command"`
+		Cmd        string `json:"cmd"`
+		Arguments  string `json:"arguments"`
 		Background bool   `json:"background"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Command == "" {
+		if args.Cmd != "" {
+			args.Command = args.Cmd
+		} else if args.Arguments != "" {
+			args.Command = args.Arguments
+		}
 	}
 	if args.Command == "" {
 		return "", fmt.Errorf("command parameter is empty")

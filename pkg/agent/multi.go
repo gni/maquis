@@ -103,13 +103,14 @@ func (ma *MultiAgent) GetSystemPrompt() string {
 		swarmInfo = fmt.Sprintf("\n\nMulti-Agent Swarm System (Subagents):\n"+
 			"- Active spawned subagents in the swarm: %s\n"+
 			"- You can spawn specialized subagents to delegate subtasks to them using the 'spawn_subagent' tool.\n"+
+			"- IMPORTANT: If a subagent is ALREADY listed in Active spawned subagents above, DO NOT call 'spawn_subagent' again! Invoke its dynamic tool 'subagent__<name>' (e.g. 'subagent__%s') directly to send tasks to it.\n"+
 			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n"+
 			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n"+
 			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n"+
 			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n"+
 			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n"+
 			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.",
-			strings.Join(activeAgents, ", "))
+			strings.Join(activeAgents, ", "), activeAgents[0])
 	} else {
 		swarmInfo = "\n\nMulti-Agent Swarm System (Subagents):\n" +
 			"- You can spawn specialized subagents to delegate subtasks to them using the 'spawn_subagent' tool.\n" +

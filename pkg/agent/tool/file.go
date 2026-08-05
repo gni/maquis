@@ -393,6 +393,41 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 					actualOldText := strings.Join(fileLines[actualStart:actualEnd], "\n")
 					edit.OldText = actualOldText
 					indexOfOldText = strings.Index(content, edit.OldText)
+				} else if matchesCount == 0 && len(coreOldLines) >= 4 {
+					// Fuzzy block matcher: find a unique window matching >= 80% of lines for blocks >= 4 lines
+					bestMatchStart := -1
+					bestMatchScore := 0
+					bestMatchCount := 0
+
+					for fs := 0; fs <= len(fileLines)-len(coreOldLines); fs++ {
+						score := 0
+						for j := 0; j < len(coreOldLines); j++ {
+							fNorm := normalizeSpace(fileLines[fs+j])
+							oNorm := normalizeSpace(coreOldLines[j])
+							if fNorm == oNorm || strings.Contains(fNorm, oNorm) || strings.Contains(oNorm, fNorm) {
+								score++
+							}
+						}
+						minScore := (len(coreOldLines) * 4) / 5
+						if minScore < 3 {
+							minScore = 3
+						}
+						if score >= minScore {
+							if score > bestMatchScore {
+								bestMatchScore = score
+								bestMatchStart = fs
+								bestMatchCount = 1
+							} else if score == bestMatchScore {
+								bestMatchCount++
+							}
+						}
+					}
+
+					if bestMatchCount == 1 && bestMatchStart >= 0 {
+						actualOldText := strings.Join(fileLines[bestMatchStart:bestMatchStart+len(coreOldLines)], "\n")
+						edit.OldText = actualOldText
+						indexOfOldText = strings.Index(content, edit.OldText)
+					}
 				}
 			}
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -305,6 +306,9 @@ func (a *Agent) compressHistory(
 	toCompress := (*messages)[1:keepIdx]
 
 	var transcriptBuilder strings.Builder
+	readFilesMap := make(map[string]bool)
+	modifiedFilesMap := make(map[string]bool)
+
 	for _, m := range toCompress {
 		if m.Role == "user" {
 			transcriptBuilder.WriteString(fmt.Sprintf("User: %s\n\n", m.Content))
@@ -315,6 +319,16 @@ func (a *Agent) compressHistory(
 			if len(m.ToolCalls) > 0 {
 				for _, tc := range m.ToolCalls {
 					transcriptBuilder.WriteString(fmt.Sprintf("Agent requested tool call: %s(%s)\n\n", tc.Function.Name, tc.Function.Arguments))
+					var fileArg struct {
+						Path string `json:"path"`
+					}
+					if json.Unmarshal([]byte(tc.Function.Arguments), &fileArg) == nil && fileArg.Path != "" {
+						if tc.Function.Name == "read" {
+							readFilesMap[fileArg.Path] = true
+						} else if tc.Function.Name == "write" || tc.Function.Name == "edit" {
+							modifiedFilesMap[fileArg.Path] = true
+						}
+					}
 				}
 			}
 		} else if m.Role == "tool" {
@@ -325,6 +339,16 @@ func (a *Agent) compressHistory(
 			transcriptBuilder.WriteString(fmt.Sprintf("Tool Output (%s): %s\n\n", m.Name, out))
 		}
 	}
+
+	var readFiles, modifiedFiles []string
+	for f := range readFilesMap {
+		readFiles = append(readFiles, f)
+	}
+	for f := range modifiedFilesMap {
+		modifiedFiles = append(modifiedFiles, f)
+	}
+	sort.Strings(readFiles)
+	sort.Strings(modifiedFiles)
 
 	transcript := transcriptBuilder.String()
 	summaryPrompt := fmt.Sprintf(
@@ -358,9 +382,13 @@ func (a *Agent) compressHistory(
 	}
 
 	summaryText := summaryAssistantMsg.Content
+	var fileOpsHeader string
+	if len(readFiles) > 0 || len(modifiedFiles) > 0 {
+		fileOpsHeader = fmt.Sprintf("\n- Files Read: %s\n- Files Modified: %s\n", strings.Join(readFiles, ", "), strings.Join(modifiedFiles, ", "))
+	}
 	summaryMsg := db.Message{
 		Role:    "system",
-		Content: fmt.Sprintf("[System: Below is a summary of the earlier conversation history:\n%s]", summaryText),
+		Content: fmt.Sprintf("[System: Below is a summary of the earlier conversation history:%s\n%s]", fileOpsHeader, summaryText),
 	}
 
 	keptMessages := make([]db.Message, 0, len((*messages)[keepIdx:]))

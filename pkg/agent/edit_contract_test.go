@@ -104,3 +104,27 @@ func TestEditMismatchProvidesClosestLineRecommendation(t *testing.T) {
 		t.Fatalf("expected recommendation pointing to around line 4, got: %s", errMsg)
 	}
 }
+
+func TestEditFuzzyBlockMatching(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "gallery.html")
+	const current = "<div class=\"gallery\">\n  <header class=\"title\">Header</header>\n  <main class=\"content\">Main Body</main>\n  <footer class=\"footer\">Footer</footer>\n</div>\n"
+	if err := os.WriteFile(path, []byte(current), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	a := &Agent{WorkspaceRoot: workspace}
+	executor := tool.NewEditTool()
+	// Slight discrepancy on line 2 (header vs title)
+	_, err := executor.Execute(
+		a,
+		`{"path":"gallery.html","updates":[{"oldText":"<div class=\"gallery\">\n  <header class=\"header\">Header</header>\n  <main class=\"content\">Main Body</main>\n  <footer class=\"footer\">Footer</footer>\n</div>","newText":"<div class=\"gallery\">\n  <header class=\"new\">Header</header>\n  <main class=\"content\">Main Body</main>\n  <footer class=\"footer\">Footer</footer>\n</div>"}]}`,
+	)
+	if err != nil {
+		t.Fatalf("expected fuzzy match to succeed, got error: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if !strings.Contains(string(after), "header class=\"new\"") {
+		t.Fatalf("expected file to contain updated content, got: %s", string(after))
+	}
+}

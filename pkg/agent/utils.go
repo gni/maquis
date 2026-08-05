@@ -168,6 +168,10 @@ func FormatDefensiveError(toolName string, err error) string {
 	errStr := err.Error()
 	lowerErr := strings.ToLower(errStr)
 
+	if strings.Contains(errStr, "Recommendation:") {
+		return fmt.Sprintf("System Alert: Your execution of '%s' failed due to: %s", toolName, errStr)
+	}
+
 	var suggestion string
 	if (strings.Contains(lowerErr, "oldtext block") && strings.Contains(lowerErr, "not found")) ||
 		strings.Contains(lowerErr, "targetcontent not found") {
@@ -255,7 +259,7 @@ func buildToolCall(name string, args string) db.ToolCall {
 
 		// Wrap according to tool name
 		switch {
-		case name == "ls":
+		case name == "bash" || name == "ls":
 			finalArgs = fmt.Sprintf(`{"command": %s}`, escapedArgsStr)
 		case name == "read":
 			finalArgs = fmt.Sprintf(`{"path": %s}`, escapedArgsStr)
