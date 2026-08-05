@@ -2094,10 +2094,14 @@ func handleResize(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 		rl.SetSize(width, height)
 	}
 
-	cw := crnlWriter{w: w}
-	drawConsoleStaticControlsLocked(cw, a, kiReader, rl, true)
+	getUI().StateMu.Lock()
+	activeOp := getUI().ActiveCancelFunc != nil || getUI().State.IsGenerating
+	getUI().StateMu.Unlock()
 
-	if a.CurrentWriter != nil {
+	cw := crnlWriter{w: w}
+	drawConsoleStaticControlsLocked(cw, a, kiReader, rl, !activeOp)
+
+	if !activeOp && a.CurrentWriter != nil {
 		if fr, ok := a.CurrentWriter.(interface{ ForceReposition() }); ok {
 			fr.ForceReposition()
 		}

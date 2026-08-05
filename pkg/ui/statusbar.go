@@ -97,14 +97,6 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 		scrollBottom = 1
 	}
 	if height != getUI().LastH || getUI().PasteLinesOffset != getUI().LastPasteLinesOffset {
-		if getUI().LastH > 0 && height != getUI().LastH {
-			// Clear old status bar and separator lines to prevent duplicate trails on resize
-			clearStart := getUI().LastH - 4
-			if clearStart < 1 {
-				clearStart = 1
-			}
-			fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H\x1b[J\x1b8", clearStart)
-		}
 		getUI().LastH = height
 		getUI().LastPasteLinesOffset = getUI().PasteLinesOffset
 		getUI().LastStatusBarText = "" // Force redraw of the actual text
