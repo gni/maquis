@@ -39,7 +39,7 @@ type jsonStreamParser struct {
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "ls" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "bash" || p.activeToolName == "ls" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
 }
 
 type parserWriter struct {
@@ -183,10 +183,10 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				isContentKey := (p.currentKey == "command" && p.activeToolName != "ls")
+				isContentKey := (p.currentKey == "command" || p.currentKey == "CommandLine")
 				if isContentKey {
 					p.isContent = true
-					p.guessedLang = ""
+					p.guessedLang = "bash"
 					p.markBodyStreamed()
 					if !p.titlePrinted {
 						p.printStreamTitle(w, theme)
@@ -196,7 +196,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 						}
 					}
 					fmt.Fprintf(pw, "▸ %s: ", p.currentKey)
-				} else if p.currentKey == "path" || (p.currentKey == "command" && p.activeToolName == "ls") || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" {
+				} else if p.currentKey == "path" || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" || p.currentKey == "task_id" || p.currentKey == "AbsolutePath" || p.currentKey == "TargetFile" {
 					p.isPath = true
 				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") {
 					if p.streamWrites {

@@ -205,6 +205,57 @@ func HasMessages(sessionID string) bool {
 	return info.Size() > 0
 }
 
+func RewriteSession(sessionID string, messages []Message) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+	if sessionsDir == "" {
+		return fmt.Errorf("sessions directory not initialized")
+	}
+
+	tmpFile, err := os.CreateTemp(sessionsDir, sessionID+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp session file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+	for _, msg := range messages {
+		if msg.Role == "user" && msg.Content == "" {
+			continue
+		}
+		record := JSONLRecord{
+			Timestamp: now,
+			Message:   msg,
+		}
+		jsonData, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("failed to marshal message: %w", err)
+		}
+		if _, err := tmpFile.Write(append(jsonData, '\n')); err != nil {
+			return fmt.Errorf("failed to write message to temp file: %w", err)
+		}
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	targetPath := filepath.Join(sessionsDir, sessionID+".jsonl")
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("failed to atomically replace session file: %w", err)
+	}
+
+	return nil
+}
+
 func ClearSession(sessionID string) error {
 	if err := validateSessionID(sessionID); err != nil {
 		return err

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -241,6 +242,63 @@ func TestCtrlDExits(t *testing.T) {
 	}
 }
 
+func TestPromptInputAndBackspace(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	var buf bytes.Buffer
+
+	// Type "hello", backspace 2 times (127), type "p", Enter (\r)
+	inputBytes := []byte("hello\x7f\x7fp\r")
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader(inputBytes),
+		agent: a,
+		w:     &buf,
+	}
+	rl := term.NewTerminal(ki, "")
+	ki.rl = rl
+
+	line, err := rl.ReadLine()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if line != "help" {
+		t.Errorf("expected line %q, got %q", "help", line)
+	}
+
+	// Verify terminal output buffer received the echo and backspaces
+	out := buf.String()
+	if !strings.Contains(out, "\x1b[D \x1b[D") && !strings.Contains(out, "\b") {
+		t.Errorf("expected output to contain backspace sequence, got %q", out)
+	}
+
+	// Second test: type gibberish, backspace all of it, type command, Enter (\r)
+	buf.Reset()
+	gibberish := "/fkijojkljkljl"
+	var fullInput []byte
+	fullInput = append(fullInput, []byte(gibberish)...)
+	for i := 0; i < len(gibberish); i++ {
+		fullInput = append(fullInput, 127) // backspace
+	}
+	fullInput = append(fullInput, []byte("/help\r")...)
+
+	ki2 := &keyInterceptorReader{
+		r:     bytes.NewReader(fullInput),
+		agent: a,
+		w:     &buf,
+	}
+	rl2 := term.NewTerminal(ki2, "")
+	ki2.rl = rl2
+
+	line2, err := rl2.ReadLine()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if line2 != "/help" {
+		t.Errorf("expected line %q after backspacing gibberish, got %q", "/help", line2)
+	}
+}
+
 func TestClearTerminalForStartupErasesPreviousViewport(t *testing.T) {
 	var output bytes.Buffer
 	clearTerminalForStartup(&output)
@@ -311,7 +369,10 @@ func TestRedrawKeepsActiveToolAllowlistTokenEstimate(t *testing.T) {
 	registry.Register(tool.NewReadTool())
 	registry.Register(tool.NewBashTool())
 
-	messages := []db.Message{{Role: "system", Content: "system"}}
+	messages := []db.Message{
+		{Role: "system", Content: "system"},
+		{Role: "assistant", Content: "done", PromptTokens: 142, CompletionTokens: 28},
+	}
 	allowedTools := []string{"read"}
 	a := &agent.Agent{
 		Config: &config.Config{
@@ -327,9 +388,8 @@ func TestRedrawKeepsActiveToolAllowlistTokenEstimate(t *testing.T) {
 	}
 
 	expectedPrompt, expectedCompletion, expectedEstimated := a.GetGlobalTokenUsage(messages, allowedTools)
-	allToolsPrompt, _ := a.GetGlobalTokens(messages, nil)
-	if expectedPrompt == allToolsPrompt {
-		t.Fatal("test fixture did not produce different allowlisted and all-tool estimates")
+	if expectedPrompt != 142 || expectedCompletion != 28 {
+		t.Fatalf("expected usage = (%d, %d); want (142, 28)", expectedPrompt, expectedCompletion)
 	}
 
 	var output bytes.Buffer
@@ -359,7 +419,10 @@ func TestInitialAndCtrlCRefreshUseFinalizedToolRegistryWithoutErasingHistory(t *
 
 	registry := tool.NewToolRegistry()
 	registry.Register(tool.NewReadTool())
-	messages := []db.Message{{Role: "system", Content: "system"}}
+	messages := []db.Message{
+		{Role: "system", Content: "system"},
+		{Role: "assistant", Content: "ready", PromptTokens: 42, CompletionTokens: 10},
+	}
 	a := &agent.Agent{
 		Config: &config.Config{
 			ContextWindowLimit: 128000,
@@ -368,7 +431,6 @@ func TestInitialAndCtrlCRefreshUseFinalizedToolRegistryWithoutErasingHistory(t *
 		Registry: registry,
 	}
 
-	prematurePrompt, _ := a.GetGlobalTokens(messages, nil)
 	var managerOutput bytes.Buffer
 	mam := agent.NewMultiAgentManager(a, &managerOutput, style.UITheme{})
 	reader := &keyInterceptorReader{
@@ -378,12 +440,8 @@ func TestInitialAndCtrlCRefreshUseFinalizedToolRegistryWithoutErasingHistory(t *
 	}
 
 	startupPrompt, startupCompletion, startupEstimated := calculateActiveTokenUsage(a, messages, nil, mam)
-	if startupPrompt <= prematurePrompt {
-		t.Fatalf(
-			"finalized registry estimate %d did not include tools registered after premature estimate %d",
-			startupPrompt,
-			prematurePrompt,
-		)
+	if startupPrompt != 42 || startupCompletion != 10 {
+		t.Fatalf("startup usage = (%d, %d); want (42, 10)", startupPrompt, startupCompletion)
 	}
 	UpdateStatus(
 		a.Config.Model,
@@ -676,6 +734,57 @@ func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
 	expectedNormalized := "hello ↵ world ↵ "
 	if string(p[:n]) != expectedNormalized {
 		t.Errorf("expected normalized paste string %q, got %q", expectedNormalized, string(p[:n]))
+	}
+}
+
+func TestKeyInterceptorReader_CarriageReturnMultilinePaste(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	var buf bytes.Buffer
+	pasteData := []byte("first line\r\nsecond line\rthird line\r")
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader(pasteData),
+		agent: a,
+		w:     &buf,
+	}
+
+	p := make([]byte, 1024)
+	n, err := ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read paste: %v", err)
+	}
+
+	expected := "first line ↵ second line ↵ third line ↵ "
+	if string(p[:n]) != expected {
+		t.Errorf("expected %q, got %q", expected, string(p[:n]))
+	}
+}
+
+func TestKeyInterceptorReader_LongPromptPasteNotCollapsed(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{},
+	}
+	var buf bytes.Buffer
+	longPrompt := "   3. **Security & Adversarial Tests:** Explicitly execute test cases asserting failure containment against SQL injection attempts, path traversals, malformed JSON structures, buffer overflows, and unauthorized tenant data access."
+	bracketed := fmt.Sprintf("\x1b[200~%s\x1b[201~", longPrompt)
+	ki := &keyInterceptorReader{
+		r:     bytes.NewReader([]byte(bracketed)),
+		agent: a,
+		w:     &buf,
+	}
+
+	p := make([]byte, 1024)
+	n, err := ki.Read(p)
+	if err != nil {
+		t.Fatalf("failed to read paste: %v", err)
+	}
+
+	if string(p[:n]) != longPrompt {
+		t.Errorf("expected %q, got %q", longPrompt, string(p[:n]))
+	}
+	if strings.Contains(string(p[:n]), "[Pasted code") {
+		t.Errorf("long prompt was unexpectedly collapsed into a code block tag")
 	}
 }
 

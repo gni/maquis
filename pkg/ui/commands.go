@@ -103,7 +103,7 @@ func HandleSlashCommand(
 			}
 			id := parts[2]
 			a.ToggleStreaming(id, w)
-		case "remove":
+		case "kill", "remove":
 			if len(parts) < 3 {
 				fmt.Fprintln(w, "usage: /task kill <id>")
 				return true, false

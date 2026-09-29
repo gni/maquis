@@ -728,7 +728,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 	compressed.Function.Parameters.Properties = newProps
 
 	switch t.Function.Name {
-	case "ls":
+	case "bash", "ls":
 		compressed.Function.Description = "Run bash command"
 		if prop, ok := compressed.Function.Parameters.Properties["command"]; ok {
 			prop.Description = "Command string"
@@ -811,14 +811,10 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["task_id"] = prop
 		}
 	default:
-		if len(compressed.Function.Description) > 30 {
-			compressed.Function.Description = compressed.Function.Description[:27] + "..."
-		}
+		compressed.Function.Description = TruncateRunes(compressed.Function.Description, 30)
 		for k, prop := range compressed.Function.Parameters.Properties {
-			if len(prop.Description) > 20 {
-				prop.Description = prop.Description[:17] + "..."
-				compressed.Function.Parameters.Properties[k] = prop
-			}
+			prop.Description = TruncateRunes(prop.Description, 20)
+			compressed.Function.Parameters.Properties[k] = prop
 		}
 	}
 	return compressed

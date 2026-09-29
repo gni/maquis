@@ -41,8 +41,11 @@ func RunExtension(
 		}
 	}
 
-	// Define extension directories
+	// Define extension directories (both global and workspace-local)
 	var dirs []string
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".maquis", "extensions"))
+	}
 	dirs = append(dirs, filepath.Join(a.GetWorkspaceRoot(), "extensions"))
 
 	var extPath string

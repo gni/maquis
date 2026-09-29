@@ -264,9 +264,6 @@ func LoadConfig(path string) (*Config, error) {
 		config.MaxCompletionTokens = 16384
 	}
 
-	// Force a save to ensure all split files exist and legacy config.json is stripped
-	_ = SaveConfig(path, config)
-
 	return config, nil
 }
 

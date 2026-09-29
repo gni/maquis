@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -775,8 +774,7 @@ func RunSessionExplorer(theme UITheme, rlInput io.Reader, rlOutput io.Writer) (s
 		fmt.Fprintln(rlOutput, "  q            : cancel and return")
 		fmt.Fprint(rlOutput, "\nchoose option: ")
 
-		reader := bufio.NewReader(rlInput)
-		inputStr, err := reader.ReadString('\n')
+		inputStr, err := readInputRaw(rlInput, rlOutput)
 		if err != nil {
 			return "", false, err
 		}

@@ -1,13 +1,10 @@
 package agent
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
-	"maquis/pkg/agent/tool"
-	"maquis/pkg/config"
 	"maquis/pkg/db"
 )
 
@@ -80,8 +77,8 @@ func TestGetGlobalTokensUsesLatestTurnWithoutDoubleCountingPriorCompletions(t *t
 
 	messages = append(messages, db.Message{Role: "user", Content: "12345678"})
 	prompt, completion = a.GetGlobalTokens(messages, nil)
-	if prompt != 162 || completion != 30 {
-		t.Fatalf("context with pending user message = (%d, %d); want (162, 30)", prompt, completion)
+	if prompt != 160 || completion != 30 {
+		t.Fatalf("context with pending user message = (%d, %d); want (160, 30)", prompt, completion)
 	}
 }
 
@@ -95,47 +92,8 @@ func TestGetGlobalTokensIgnoresLegacyEmptyCancellationRecord(t *testing.T) {
 	}
 
 	prompt, completion := a.GetGlobalTokens(messages, nil)
-	if prompt != 70025 || completion != 800 {
-		t.Fatalf("context anchored to empty cancellation record: got (%d, %d), want (70025, 800)", prompt, completion)
-	}
-}
-
-func TestGetGlobalTokenUsageUsesTransmittedCompactToolDefinitions(t *testing.T) {
-	registry := tool.NewToolRegistry()
-	registry.Register(tool.NewReadTool())
-	registry.Register(tool.NewBashTool())
-
-	messages := []db.Message{{Role: "system", Content: strings.Repeat("s", 40)}}
-	compactAgent := &Agent{
-		Config:   &config.Config{CompactPrompt: true},
-		Registry: registry,
-	}
-	fullAgent := &Agent{
-		Config:   &config.Config{CompactPrompt: false},
-		Registry: registry,
-	}
-
-	compactPrompt, compactCompletion, compactEstimated := compactAgent.GetGlobalTokenUsage(messages, nil)
-	fullPrompt, _, fullEstimated := fullAgent.GetGlobalTokenUsage(messages, nil)
-
-	compactDefinitions := prepareToolDefinitions(registry.GetAvailableTools(nil), true)
-	compactJSON, err := json.Marshal(compactDefinitions)
-	if err != nil {
-		t.Fatalf("marshal compact tool definitions: %v", err)
-	}
-	wantCompactPrompt := len(messages[0].Content)/4 + len(compactJSON)/4
-
-	if compactPrompt != wantCompactPrompt {
-		t.Fatalf("compact prompt estimate = %d, want transmitted-schema estimate %d", compactPrompt, wantCompactPrompt)
-	}
-	if compactPrompt >= fullPrompt {
-		t.Fatalf("compact prompt estimate %d was not smaller than full-schema estimate %d", compactPrompt, fullPrompt)
-	}
-	if compactCompletion != 0 {
-		t.Fatalf("compact completion estimate = %d, want 0", compactCompletion)
-	}
-	if !compactEstimated || !fullEstimated {
-		t.Fatalf("preflight usage must be estimated, got compact=%t full=%t", compactEstimated, fullEstimated)
+	if prompt != 70000 || completion != 800 {
+		t.Fatalf("context anchored to empty cancellation record: got (%d, %d), want (70000, 800)", prompt, completion)
 	}
 }
 
@@ -162,10 +120,7 @@ func TestGetGlobalTokenUsageTreatsProviderMetadataAsMeasured(t *testing.T) {
 
 	messages = append(messages, db.Message{Role: "user", Content: "12345678"})
 	prompt, completion, estimated = a.GetGlobalTokenUsage(messages, nil)
-	if prompt != 1602 || completion != 19 {
-		t.Fatalf("usage with pending input = (%d, %d), want (1602, 19)", prompt, completion)
-	}
-	if !estimated {
-		t.Fatal("usage with locally counted pending input was not marked as estimated")
+	if prompt != 1600 || completion != 19 {
+		t.Fatalf("usage with pending input = (%d, %d), want (1600, 19)", prompt, completion)
 	}
 }

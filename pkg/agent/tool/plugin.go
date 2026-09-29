@@ -117,8 +117,17 @@ func RegisterPlugins(registry *ToolRegistry, dir string) error {
 		}
 
 		if errRead != nil || len(jsonBytes) == 0 {
-			// Skip plugins without a valid descriptor json file
-			continue
+			// If no companion json file exists, probe the script with --info flag as documented
+			ctxTimeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cmd := exec.CommandContext(ctxTimeout, pluginPath, "--info")
+			out, err := cmd.Output()
+			cancel()
+			if err == nil && len(out) > 0 {
+				jsonBytes = out
+			} else {
+				// Skip plugins without a valid descriptor json file or working --info
+				continue
+			}
 		}
 
 		var functionDef FunctionDefinition

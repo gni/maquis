@@ -418,69 +418,6 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		maxSteps = 30
 	}
 
-	var stopSpinner chan struct{}
-	var spinnerDone chan struct{}
-	var pauseThinkingSpinner chan bool
-
-	if ma.Parent == nil && ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-		stopSpinner = make(chan struct{})
-		spinnerDone = make(chan struct{})
-		pauseThinkingSpinner = make(chan bool, 1)
-		startTime := time.Now()
-		gStart := startTime
-		if ma.BaseAgent != nil && !ma.BaseAgent.TurnStartTime.IsZero() {
-			gStart = ma.BaseAgent.TurnStartTime
-		}
-
-		go func() {
-			defer close(spinnerDone)
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			frames := []string{"◜", "◝", "◞", "◟"}
-			i := 0
-			paused := false
-			for {
-				select {
-				case <-stopSpinner:
-					return
-				case <-ctx.Done():
-					return
-				case p := <-pauseThinkingSpinner:
-					paused = p
-					if paused {
-						ma.BaseAgent.UI.DrawStatsLine(rawW, theme, "", "")
-					}
-				case <-ticker.C:
-					if paused {
-						continue
-					}
-					frame := frames[i%len(frames)]
-					i++
-					elapsed := time.Since(gStart).Seconds()
-
-					activeTasks := 0
-					for _, t := range ma.BaseAgent.ListTasks() {
-						if t.Status == "running" {
-							activeTasks++
-						}
-					}
-
-					ma.BaseAgent.UI.UpdateStatus(ma.BaseAgent.Config.Model, -1, -1, 0, ma.BaseAgent.Config.ContextWindowLimit, true, 0, activeTasks, ma.BaseAgent.Config.ShowTokens)
-					ma.BaseAgent.UI.DrawStatusBar(rawW, theme)
-					ma.BaseAgent.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("(%.1fs)", elapsed))
-				}
-			}
-		}()
-
-		defer func() {
-			close(stopSpinner)
-			<-spinnerDone
-			if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-				ma.BaseAgent.UI.DrawStatsLine(rawW, theme, "", "")
-			}
-		}()
-	}
-
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return db.Message{}, ctx.Err()
@@ -662,13 +599,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				AgentContext: ma.BaseAgent,
 				ma:           ma,
 			}
-			if pauseThinkingSpinner != nil {
-				pauseThinkingSpinner <- true
-			}
 			output, toolErr := ma.BaseAgent.Registry.Execute(mac, tc.Function.Name, tc.Function.Arguments)
-			if pauseThinkingSpinner != nil {
-				pauseThinkingSpinner <- false
-			}
 
 			if toolErr != nil {
 				output = FormatToolExecutionFailure(tc.Function.Name, output, toolErr)
@@ -1986,16 +1917,8 @@ func (mam *MultiAgentManager) RenderStats(w io.Writer, baseMessages []db.Message
 		var prompt, completion int
 		for _, m := range history {
 			if m.Role == "assistant" {
-				if m.PromptTokens > 0 {
-					prompt += m.PromptTokens
-				} else {
-					prompt += (len(m.Content) + len(m.ReasoningContent)) / 4
-				}
-				if m.CompletionTokens > 0 {
-					completion += m.CompletionTokens
-				} else {
-					completion += (len(m.Content) + len(m.ReasoningContent)) / 4
-				}
+				prompt += m.PromptTokens
+				completion += m.CompletionTokens
 			}
 		}
 		return prompt, completion

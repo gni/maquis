@@ -257,10 +257,7 @@ func formatRight(theme UITheme, width int) string {
 	if width < 45 {
 		return taskStr
 	} else if width < 65 {
-		modelName := getUI().State.Model
-		if len(modelName) > 10 {
-			modelName = modelName[:10] + "..."
-		}
+		modelName := style.TruncateRunes(getUI().State.Model, 13)
 		return taskStr + modelStyle.Render(modelName) + " "
 	} else {
 		return taskStr + modelStyle.Render(getUI().State.Model) + " "

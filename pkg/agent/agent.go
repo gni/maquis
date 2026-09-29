@@ -405,10 +405,7 @@ func (a *Agent) compressHistory(
 	newMessages = append(newMessages, keptMessages...)          // Add latest messages
 
 	if sessionID != "" {
-		_ = db.ClearSession(sessionID)
-		for _, msg := range newMessages {
-			_ = db.SaveMessage(sessionID, msg)
-		}
+		_ = db.RewriteSession(sessionID, newMessages)
 	}
 	*messages = newMessages
 

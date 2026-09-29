@@ -87,3 +87,46 @@ func TestDBLifecycle(t *testing.T) {
 		t.Fatalf("expected session to be cleared")
 	}
 }
+
+func TestRewriteSession(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := InitDB(tempDir); err != nil {
+		t.Fatalf("failed to init DB: %v", err)
+	}
+
+	sessionID := "test-rewrite-001"
+	origMsgs := []Message{
+		{Role: "user", Content: "initial user message"},
+		{Role: "assistant", Content: "initial assistant response"},
+	}
+	for _, m := range origMsgs {
+		if err := SaveMessage(sessionID, m); err != nil {
+			t.Fatalf("failed to save initial msg: %v", err)
+		}
+	}
+
+	newMsgs := []Message{
+		{Role: "system", Content: "system summary prompt"},
+		{Role: "user", Content: "latest question"},
+		{Role: "assistant", Content: "latest answer"},
+	}
+
+	if err := RewriteSession(sessionID, newMsgs); err != nil {
+		t.Fatalf("RewriteSession failed: %v", err)
+	}
+
+	loaded, err := LoadMessages(sessionID)
+	if err != nil {
+		t.Fatalf("failed to load rewritten messages: %v", err)
+	}
+
+	if len(loaded) != len(newMsgs) {
+		t.Fatalf("expected %d messages, got %d", len(newMsgs), len(loaded))
+	}
+
+	for i, m := range loaded {
+		if m.Role != newMsgs[i].Role || m.Content != newMsgs[i].Content {
+			t.Errorf("mismatch at %d: got %+v, want %+v", i, m, newMsgs[i])
+		}
+	}
+}

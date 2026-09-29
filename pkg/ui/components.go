@@ -264,7 +264,7 @@ func formatToolArguments(toolName string, argsJSON string, theme UITheme) string
 
 			lang := "plaintext"
 			if k == "command" {
-				lang = "ls"
+				lang = "bash"
 			} else if pathVal, ok := m["path"].(string); ok {
 				ext := filepath.Ext(pathVal)
 				if len(ext) > 1 {

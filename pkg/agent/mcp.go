@@ -21,6 +21,14 @@ import (
 	"maquis/pkg/config"
 )
 
+var mcpDebugLogging = os.Getenv("MAQUIS_MCP_DEBUG") == "1"
+
+func mcpLog(format string, args ...interface{}) {
+	if mcpDebugLogging {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
+}
+
 type mcpClient struct {
 	name        string
 	config      config.MCPServerConfig
@@ -41,6 +49,7 @@ type MCPTool struct {
 	InputSchema map[string]interface{} `json:"inputSchema"`
 }
 
+
 type mcpToolExecutor struct {
 	client   *mcpClient
 	toolName string
@@ -55,27 +64,36 @@ func (m *mcpToolExecutor) Execute(ctx tool.AgentContext, arguments string) (stri
 
 func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error {
 	a.McpClientsMu.Lock()
-	a.McpStartErrors = make(map[string]error)
-	a.McpClients = make(map[string]*mcpClient)
+	if a.McpClients == nil {
+		a.McpClients = make(map[string]*mcpClient)
+	}
+	if a.McpStartErrors == nil {
+		a.McpStartErrors = make(map[string]error)
+	}
 	a.McpClientsMu.Unlock()
 
 	for name, cfg := range configs {
 		if cfg.Disabled {
 			continue
 		}
-		
-		mcpHTTPClient := a.HttpClient
-		if mcpHTTPClient == nil {
-			mcpHTTPClient = &http.Client{
-				Timeout: 30 * time.Second,
-			}
-		} else {
-			cCopy := *a.HttpClient
-			cCopy.Timeout = 30 * time.Second
-			mcpHTTPClient = &cCopy
+
+		mcpHTTPClient := &http.Client{
+			Timeout: 30 * time.Second,
 		}
-		jar, _ := cookiejar.New(nil)
-		mcpHTTPClient.Jar = jar
+
+		if jar, err := cookiejar.New(nil); err == nil {
+			mcpHTTPClient.Jar = jar
+		}
+
+		if a.Config != nil && (a.Config.CertFile != "" || a.Config.SkipVerify) {
+			tlsConfig, err := config.GetTLSConfig(a.Config)
+			if err == nil && tlsConfig != nil {
+				transport := &http.Transport{
+					TLSClientConfig: tlsConfig,
+				}
+				mcpHTTPClient.Transport = transport
+			}
+		}
 
 		client := &mcpClient{
 			name:     name,
@@ -96,11 +114,11 @@ func (a *Agent) StartMCPServers(configs map[string]config.MCPServerConfig) error
 		a.McpClientsMu.Lock()
 		a.McpClients[name] = client
 		a.McpClientsMu.Unlock()
-		fmt.Fprintf(os.Stderr, "Started MCP server '%s'\n", name)
+		mcpLog("Started MCP server '%s'\n", name)
 
 		tools, err := client.listTools()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to list tools for MCP server '%s': %v\n", name, err)
+			mcpLog("Error: Failed to list tools for MCP server '%s': %v\n", name, err)
 			continue
 		}
 
@@ -137,7 +155,7 @@ func (a *Agent) StopMCPServers() {
 
 	for name, client := range a.McpClients {
 		client.close()
-		fmt.Fprintf(os.Stderr, "Stopped MCP server '%s'\n", name)
+		mcpLog("Stopped MCP server '%s'\n", name)
 	}
 	a.McpClients = make(map[string]*mcpClient)
 	a.Registry.UnregisterPrefix("mcp__")
@@ -214,22 +232,22 @@ func (c *mcpClient) startSSE() error {
 							postURL = parsedBase.ResolveReference(parsedRel).String()
 						}
 					}
-					fmt.Fprintf(os.Stderr, "[MCP] Resolved POST endpoint: %s\n", postURL)
+					mcpLog("[MCP] Resolved POST endpoint: %s\n", postURL)
 					select {
 					case endpointChan <- postURL:
 					default:
 					}
 				} else {
-					fmt.Fprintf(os.Stderr, "[MCP Rx] %s\n", data)
+					mcpLog("[MCP Rx] %s\n", data)
 					c.handleMessage(data)
 				}
 				lastEvent = ""
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "SSE connection error for '%s': %v\n", c.name, err)
+			mcpLog("SSE connection error for '%s': %v\n", c.name, err)
 		} else {
-			fmt.Fprintf(os.Stderr, "SSE connection closed for '%s'\n", c.name)
+			mcpLog("SSE connection closed for '%s'\n", c.name)
 		}
 	}()
 
@@ -328,7 +346,7 @@ func (c *mcpClient) request(method string, params interface{}) (string, error) {
 		c.requestMu.Unlock()
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "[MCP Tx] %s\n", string(data))
+	mcpLog("[MCP Tx] %s\n", string(data))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -413,7 +431,7 @@ func (c *mcpClient) handshake() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	fmt.Fprintf(os.Stderr, "[MCP Tx Notification] %s\n", string(data))
+	mcpLog("[MCP Tx Notification] %s\n", string(data))
 	req, err := http.NewRequestWithContext(ctx, "POST", c.postURL, bytes.NewBuffer(data))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -422,11 +440,11 @@ func (c *mcpClient) handshake() error {
 		}
 		if respDrop, errDrop := c.client.Do(req); errDrop == nil {
 			if respDrop.StatusCode != http.StatusOK && respDrop.StatusCode != http.StatusAccepted && respDrop.StatusCode != http.StatusNoContent {
-				fmt.Fprintf(os.Stderr, "[MCP] notifications/initialized returned status %d\n", respDrop.StatusCode)
+				mcpLog("[MCP] notifications/initialized returned status %d\n", respDrop.StatusCode)
 			}
 			respDrop.Body.Close()
 		} else {
-			fmt.Fprintf(os.Stderr, "[MCP] failed to send notifications/initialized: %v\n", errDrop)
+			mcpLog("[MCP] failed to send notifications/initialized: %v\n", errDrop)
 		}
 	}
 

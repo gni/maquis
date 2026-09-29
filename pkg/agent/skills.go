@@ -23,24 +23,40 @@ func ParseFrontmatter(content string) (map[string]string, string) {
 		return nil, content
 	}
 
-	parts := strings.SplitN(trimmed[3:], "---", 2)
-	if len(parts) < 2 {
+	rest := strings.TrimPrefix(trimmed, "---")
+	if strings.HasPrefix(rest, "\r\n") {
+		rest = rest[2:]
+	} else if strings.HasPrefix(rest, "\n") {
+		rest = rest[1:]
+	}
+
+	endIdx := -1
+	lines := strings.Split(rest, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			endIdx = i
+			break
+		}
+	}
+	if endIdx == -1 {
 		return nil, content
 	}
 
-	fmText := parts[0]
-	body := parts[1]
+	fmLines := lines[:endIdx]
+	bodyLines := lines[endIdx+1:]
+	body := strings.Join(bodyLines, "\n")
 
 	fm := make(map[string]string)
-	lines := strings.Split(fmText, "\n")
-	for _, line := range lines {
+	for _, line := range fmLines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		kv := strings.SplitN(line, ":", 2)
 		if len(kv) == 2 {
-			fm[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			val := strings.TrimSpace(kv[1])
+			val = strings.Trim(val, `"'`)
+			fm[strings.TrimSpace(kv[0])] = val
 		}
 	}
 	return fm, body
@@ -74,6 +90,21 @@ func LoadSkillsFromDirs(dirs ...string) ([]Skill, error) {
 				return nil
 			}
 
+			rel, err := filepath.Rel(absDir, path)
+			if err != nil {
+				return nil
+			}
+			relParts := strings.Split(filepath.ToSlash(rel), "/")
+			baseName := info.Name()
+			baseNoExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+
+			// Top-level skill file: skills/my-skill.md (relParts length 1)
+			// Or skill package root: skills/my-skill/SKILL.md (relParts length 2)
+			// Ignore deeper sub-docs (e.g. skills/my-skill/references/notes.md)
+			if len(relParts) > 2 && !strings.EqualFold(baseNoExt, "SKILL") {
+				return nil
+			}
+
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return nil
@@ -88,8 +119,6 @@ func LoadSkillsFromDirs(dirs ...string) ([]Skill, error) {
 			}
 
 			if name == "" {
-				baseName := info.Name()
-				baseNoExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
 				if strings.EqualFold(baseNoExt, "SKILL") || strings.EqualFold(baseNoExt, "README") {
 					name = filepath.Base(filepath.Dir(path))
 				} else {

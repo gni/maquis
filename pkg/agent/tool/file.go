@@ -562,8 +562,13 @@ func DetectOmissionPlaceholders(text string) []string {
 	return matches
 }
 
+type refMutex struct {
+	mu   sync.Mutex
+	refs int
+}
+
 var (
-	fileLocks   = make(map[string]*sync.Mutex)
+	fileLocks   = make(map[string]*refMutex)
 	fileLocksMu sync.Mutex
 )
 
@@ -573,16 +578,23 @@ func lockPath(path string) func() {
 	if err != nil {
 		absPath = path
 	}
-	mu, exists := fileLocks[absPath]
+	entry, exists := fileLocks[absPath]
 	if !exists {
-		mu = &sync.Mutex{}
-		fileLocks[absPath] = mu
+		entry = &refMutex{}
+		fileLocks[absPath] = entry
 	}
+	entry.refs++
 	fileLocksMu.Unlock()
 
-	mu.Lock()
+	entry.mu.Lock()
 	return func() {
-		mu.Unlock()
+		entry.mu.Unlock()
+		fileLocksMu.Lock()
+		entry.refs--
+		if entry.refs <= 0 {
+			delete(fileLocks, absPath)
+		}
+		fileLocksMu.Unlock()
 	}
 }
 

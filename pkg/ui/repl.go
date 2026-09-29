@@ -11,12 +11,10 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -337,6 +335,7 @@ type keyInterceptorReader struct {
 	w                io.Writer
 	rl               *term.Terminal
 	currentInputLine string
+	currentInputPos  int
 	messages         *[]db.Message
 	pasteRemaining   []byte
 	pastedText       string
@@ -349,6 +348,7 @@ type keyInterceptorReader struct {
 	injectChan       chan byte
 	typeAheadBuffer  []byte
 	inBracketedPaste bool
+	bracketedBuffer  []byte
 	isAtMainPrompt   bool
 	lastCtrlDTime    time.Time
 	pastedCodeBlocks map[string]string
@@ -607,8 +607,7 @@ func (ki *keyInterceptorReader) handleCtrlT() {
 	activeTheme := GetConfiguredTheme(ki.agent.Config)
 	ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
 	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-	frame := agent.GetCurrentSpinnerFrame()
-	DrawStaticPromptSeparatorWithSpinner(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme, frame)
+	DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 }
 
 func (ki *keyInterceptorReader) handleCtrlR() {
@@ -628,8 +627,7 @@ func (ki *keyInterceptorReader) handleCtrlR() {
 	}
 	ki.agent.Config.ReasoningEffort = nextEffort
 	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-	frame := agent.GetCurrentSpinnerFrame()
-	DrawStaticPromptSeparatorWithSpinner(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme, frame)
+	DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 }
 
 func stylePrompt(p []byte, prefix string, styledPrefix string) []byte {
@@ -681,55 +679,6 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 
 	if bytes.Contains(p, []byte("\x1b[H")) || bytes.Contains(p, []byte("\x1b[1;1H")) {
 		return len(p), nil
-	}
-
-	if ki.isAtMainPrompt && ki.rl != nil {
-		termW, height := getTerminalSize()
-		if height > 3 {
-			if termW <= 0 {
-				termW = 80
-			}
-			line, pos := getTerminalLine(ki.rl)
-			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
-			availWidth := termW - prefixLen - 1
-			if availWidth < 10 {
-				availWidth = 10
-			}
-
-			runes := []rune(line)
-			totalRunes := len(runes)
-
-			displayStr := line
-			cursorCol := prefixLen + pos + 1
-
-			if totalRunes > availWidth {
-				start := pos - (availWidth / 2)
-				if start < 0 {
-					start = 0
-				}
-				end := start + availWidth
-				if end > totalRunes {
-					end = totalRunes
-					start = end - availWidth
-					if start < 0 {
-						start = 0
-					}
-				}
-				displayStr = string(runes[start:end])
-				cursorCol = prefixLen + (pos - start) + 1
-			}
-
-			var buf bytes.Buffer
-			cursorVisibility := "\x1b[?25h"
-			if ki.agent != nil && ki.agent.CurrentWriter != nil {
-				if pw, ok := ki.agent.CurrentWriter.(*PromptPreservingWriter); ok && pw.cursorHidden {
-					cursorVisibility = "\x1b[?25l"
-				}
-			}
-			fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s%s\x1b[%d;%dH%s", height-2, promptStr, displayStr, height-2, cursorCol, cursorVisibility)
-			_, _ = ki.writeToTerminal(buf.Bytes())
-			return len(p), nil
-		}
 	}
 
 	return ki.writeToTerminal(p)
@@ -911,50 +860,85 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	done:
 	}
 
-	wasBracketedPaste := bytes.Contains(p[:n], []byte("\x1b[200~")) || ki.inBracketedPaste
-	if wasBracketedPaste {
-		ki.inBracketedPaste = true
-		data := p[:n]
-		if idx := bytes.Index(data, []byte("\x1b[200~")); idx >= 0 {
-			data = data[idx+6:]
-		}
-		if idx := bytes.Index(data, []byte("\x1b[201~")); idx >= 0 {
-			data = data[:idx]
-			ki.inBracketedPaste = false
-		}
-		n = copy(p, data)
-	}
+	var isPaste bool
+	var pasteBytes []byte
 
-	if !wasBracketedPaste {
+	if bytes.Contains(p[:n], []byte("\x1b[200~")) || ki.inBracketedPaste {
+		isPaste = true
+		ki.inBracketedPaste = true
+		ki.bracketedBuffer = append(ki.bracketedBuffer, p[:n]...)
+
+		// Drain until \x1b[201~ is received or inputChan dries up
+		if ki.inputChan != nil {
+			for !bytes.Contains(ki.bracketedBuffer, []byte("\x1b[201~")) {
+				select {
+				case b, ok := <-ki.inputChan:
+					if !ok {
+						break
+					}
+					ki.bracketedBuffer = append(ki.bracketedBuffer, b)
+				case <-time.After(25 * time.Millisecond):
+					goto bracketedDrainDone
+				}
+			}
+		}
+	bracketedDrainDone:
+		if startIdx := bytes.Index(ki.bracketedBuffer, []byte("\x1b[200~")); startIdx >= 0 {
+			ki.bracketedBuffer = ki.bracketedBuffer[startIdx+6:]
+		}
+		if endIdx := bytes.Index(ki.bracketedBuffer, []byte("\x1b[201~")); endIdx >= 0 {
+			pasteBytes = ki.bracketedBuffer[:endIdx]
+			remainder := ki.bracketedBuffer[endIdx+6:]
+			ki.bracketedBuffer = nil
+			ki.inBracketedPaste = false
+			if len(remainder) > 0 {
+				ki.pasteRemaining = append(ki.pasteRemaining, remainder...)
+			}
+		} else {
+			pasteBytes = ki.bracketedBuffer
+			ki.bracketedBuffer = nil
+		}
+	} else if n > 1 {
+		trimmed := bytes.TrimRight(p[:n], "\r\n")
+		if len(trimmed) > 0 && (bytes.Contains(trimmed, []byte("\n")) || bytes.Contains(trimmed, []byte("\r"))) {
+			isPaste = true
+			pasteBytes = p[:n]
+		} else {
+			n = ki.copyReadData(p, normalizePromptNavigationKeys(p[:n]))
+		}
+	} else {
 		n = ki.copyReadData(p, normalizePromptNavigationKeys(p[:n]))
 	}
 
-	if n > 1 {
+	if isPaste {
+		// Normalize line endings: CRLF -> LF, CR -> LF
 		var rawBytes []byte
-		for i := 0; i < n; i++ {
-			if p[i] == '\r' {
-				if i+1 < n && p[i+1] == '\n' {
+		for i := 0; i < len(pasteBytes); i++ {
+			if pasteBytes[i] == '\r' {
+				if i+1 < len(pasteBytes) && pasteBytes[i+1] == '\n' {
 					i++
 				}
 				rawBytes = append(rawBytes, '\n')
 			} else {
-				rawBytes = append(rawBytes, p[i])
+				rawBytes = append(rawBytes, pasteBytes[i])
 			}
 		}
 		rawStr := string(rawBytes)
 		lines := strings.Split(rawStr, "\n")
 
-		if len(lines) > 3 || len(rawStr) > 180 {
+		// Only collapse into tag if truly massive (> 15 lines or > 2000 chars)
+		if len(lines) > 15 || len(rawStr) > 2000 {
 			if ki.pastedCodeBlocks == nil {
 				ki.pastedCodeBlocks = make(map[string]string)
 			}
 			getUI().PasteCounter++
 			tagStr := fmt.Sprintf("[Pasted code #%d (+%d lines, %d chars)]", getUI().PasteCounter, len(lines)-1, len(rawStr))
 			ki.pastedCodeBlocks[tagStr] = rawStr
-			n = copy(p, []byte(tagStr))
+			n = ki.copyReadData(p, []byte(tagStr))
 		} else {
+			// Replace newlines with " ↵ " so x/term receives a single logical line without early submission
 			normalizedStr := strings.ReplaceAll(rawStr, "\n", " ↵ ")
-			n = copy(p, []byte(normalizedStr))
+			n = ki.copyReadData(p, []byte(normalizedStr))
 		}
 	}
 
@@ -1079,7 +1063,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		injectChan:   make(chan byte, 100),
 	}
 	getUI().ActiveInputReader = kiReader
-	defer func() { getUI().ActiveInputReader = nil }()
+	defer func() {
+		fmt.Fprint(os.Stderr, "\x1b[?2004l")
+		getUI().ActiveInputReader = nil
+	}()
 
 	rawChan := make(chan byte, 1000)
 	go func() {
@@ -1266,22 +1253,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 				kiReader.inputChan <- b
 			} else {
-				if b == 4 { // Ctrl+D at main prompt
-					line, _ := getTerminalLine(kiReader.rl)
-					if strings.TrimSpace(line) == "" {
-						now := time.Now()
-						if now.Sub(kiReader.lastCtrlDTime) < 3*time.Second {
-							kiReader.inputChan <- 4
-							return
-						} else {
-							kiReader.lastCtrlDTime = now
-							activeTheme := GetConfiguredTheme(a.Config)
-							hintStyle := style.NewStyle().Foreground(activeTheme.Border).Italic(true)
-							fmt.Fprintf(os.Stderr, "  %s", hintStyle.Render("(Press Ctrl+D again to exit)"))
-							continue
-						}
-					}
-				}
 				kiReader.inputChan <- b
 			}
 		}
@@ -1337,6 +1308,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 	rl.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
 		kiReader.currentInputLine = line
+		kiReader.currentInputPos = pos
 		return autoCompleteCallback(line, pos, key, a)
 	}
 
@@ -1360,9 +1332,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			os.Exit(1)
 		}
 
+		fmt.Fprint(os.Stderr, "\x1b[?2004h")
 		kiReader.isAtMainPrompt = true
 		line, err := rl.ReadLine()
 		kiReader.isAtMainPrompt = false
+		fmt.Fprint(os.Stderr, "\x1b[?2004l")
 		term.Restore(fd, oldState)
 
 		a.TasksMu.Lock()
@@ -1683,6 +1657,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		refreshConsoleAfterTurn(os.Stderr, a, kiReader, rl)
 	}
 
+	fmt.Fprint(os.Stderr, "\x1b[?2004l")
 	ShutdownStatusBar(os.Stderr)
 	fmt.Fprintf(os.Stderr, "goodbye! to resume this session, run: ./maquis --session %s (or ./maquis --resume)\n", currentSessionID)
 }
@@ -1794,14 +1769,10 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 
 	inputLine := ""
 	posOffset := 0
-	if drawPrompt {
-		if rl != nil {
-			inputLine, posOffset = getTerminalLine(rl)
-		} else if kiReader != nil {
-			inputLine = kiReader.currentInputLine
-			posOffset = len(inputLine)
-		}
-		if kiReader != nil && kiReader.pastedText != "" {
+	if drawPrompt && kiReader != nil {
+		inputLine = kiReader.currentInputLine
+		posOffset = kiReader.currentInputPos
+		if kiReader.pastedText != "" {
 			inputLine = inputLine + kiReader.pastedText
 			posOffset = len([]rune(inputLine))
 		}
@@ -2062,24 +2033,6 @@ func setNonCanonical(fd int) (func(), error) {
 	return restore, nil
 }
 
-func getTerminalLine(rl *term.Terminal) (string, int) {
-	if rl == nil {
-		return "", 0
-	}
-	val := reflect.ValueOf(rl).Elem()
-	lineField := val.FieldByName("line")
-	posField := val.FieldByName("pos")
-	if lineField.IsValid() && posField.IsValid() {
-		ptrLine := unsafe.Pointer(lineField.UnsafeAddr())
-		runes := *(*[]rune)(ptrLine)
-
-		ptrPos := unsafe.Pointer(posField.UnsafeAddr())
-		pos := *(*int)(ptrPos)
-
-		return string(runes), pos
-	}
-	return "", 0
-}
 
 func handleResize(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, rl *term.Terminal) {
 	TerminalMu.Lock()

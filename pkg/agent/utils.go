@@ -69,98 +69,22 @@ func (a *Agent) LoadMemoryContext() string {
 	return sb.String()
 }
 
+// GetGlobalTokens returns the prompt and completion tokens from the latest assistant message.
 func (a *Agent) GetGlobalTokens(messages []db.Message, allowedTools []string) (int, int) {
 	prompt, completion, _ := a.GetGlobalTokenUsage(messages, allowedTools)
 	return prompt, completion
 }
 
-func (a *Agent) GetGlobalTokenUsage(messages []db.Message, allowedTools []string) (int, int, bool) {
-	lastAssistantIdx := -1
+// GetGlobalTokenUsage extracts measured token counts returned by the OpenAI API from message history.
+func (a *Agent) GetGlobalTokenUsage(messages []db.Message, _ []string) (int, int, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
 		hasPayload := message.Content != "" || message.ReasoningContent != "" || len(message.ToolCalls) > 0
-		if message.Role == "assistant" && hasPayload {
-			lastAssistantIdx = i
-			break
+		if message.Role == "assistant" && hasPayload && (message.PromptTokens > 0 || message.CompletionTokens > 0) {
+			return message.PromptTokens, message.CompletionTokens, false
 		}
 	}
-
-	var toolsEst int
-	if a.Registry != nil {
-		tools := a.Registry.GetAvailableTools(allowedTools)
-		if a.Config != nil {
-			tools = prepareToolDefinitions(tools, a.Config.CompactPrompt)
-		}
-		var toolsChars int
-		if len(tools) > 0 {
-			if toolsData, err := json.Marshal(tools); err == nil {
-				toolsChars = len(toolsData)
-			}
-		}
-		toolsEst = toolsChars / 4
-	}
-
-	estimateMessage := func(message db.Message) int {
-		if strings.HasPrefix(message.Content, "[user manually executed slash command:") {
-			return 0
-		}
-		characters := len(message.Content) + len(message.ReasoningContent)
-		if len(message.ToolCalls) > 0 {
-			if toolCallData, err := json.Marshal(message.ToolCalls); err == nil {
-				characters += len(toolCallData)
-			}
-		}
-		if characters == 0 {
-			return 0
-		}
-		estimated := characters / 4
-		if estimated == 0 {
-			return 1
-		}
-		return estimated
-	}
-
-	globalPrompt := 0
-	globalCompletion := 0
-	estimated := false
-	if lastAssistantIdx != -1 {
-		lastAssistant := messages[lastAssistantIdx]
-		if lastAssistant.PromptTokens > 0 {
-			globalPrompt = lastAssistant.PromptTokens
-		} else {
-			estimated = true
-			for i := 0; i < lastAssistantIdx; i++ {
-				globalPrompt += estimateMessage(messages[i])
-			}
-			globalPrompt += toolsEst
-		}
-
-		if lastAssistant.CompletionTokens > 0 {
-			globalCompletion = lastAssistant.CompletionTokens
-		} else {
-			estimated = true
-			globalCompletion = estimateMessage(lastAssistant)
-		}
-
-		for i := lastAssistantIdx + 1; i < len(messages); i++ {
-			messageEstimate := estimateMessage(messages[i])
-			globalPrompt += messageEstimate
-			if messageEstimate > 0 {
-				estimated = true
-			}
-		}
-	} else {
-		estimated = true
-		for _, message := range messages {
-			globalPrompt += estimateMessage(message)
-		}
-		if globalPrompt == 0 {
-			globalPrompt = len(a.GetSystemPrompt()) / 4
-		}
-		globalPrompt += toolsEst
-	}
-
-	return globalPrompt, globalCompletion, estimated
+	return 0, 0, false
 }
 
 // FormatDefensiveError turns syntax errors into descriptive, action-oriented correction prompts
@@ -282,4 +206,19 @@ func buildToolCall(name string, args string) db.ToolCall {
 	tc.Function.Name = name
 	tc.Function.Arguments = finalArgs
 	return tc
+}
+
+// TruncateRunes safely truncates a string to maxRunes without slicing multi-byte UTF-8 runes.
+func TruncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }

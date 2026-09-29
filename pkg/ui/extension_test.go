@@ -13,11 +13,7 @@ import (
 )
 
 func TestRunExtension(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("/workspace/maquis/tmp", "extension_test_")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	extDir := filepath.Join(tmpDir, "extensions")
 	if err := os.MkdirAll(extDir, 0755); err != nil {

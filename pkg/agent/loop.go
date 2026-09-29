@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -19,15 +17,8 @@ import (
 	"maquis/pkg/db"
 )
 
-var (
-	currentSpinnerFrame string
-	spinnerFrameMu      sync.RWMutex
-)
-
 func GetCurrentSpinnerFrame() string {
-	spinnerFrameMu.RLock()
-	defer spinnerFrameMu.RUnlock()
-	return currentSpinnerFrame
+	return ""
 }
 
 func unwrapWriter(w io.Writer) io.Writer {
@@ -59,16 +50,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		a.CurrentWriter = nil
 		a.CurrentContext = nil
 	}()
-	var activity *turnActivity
-	if !isNonInteractive && a.UI != nil {
-		activity = newTurnActivity(startTime, defaultTurnActivityInterval, func(frame, text string) {
-			spinnerFrameMu.Lock()
-			currentSpinnerFrame = frame
-			spinnerFrameMu.Unlock()
-			a.UI.DrawStatsLine(rawW, theme, frame, text)
-		})
-		defer activity.Stop()
-	}
 
 	var totalCompletionTokens int
 	var totalPromptTokens int
@@ -89,53 +70,14 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	if sessionID != "" {
 		if !db.HasMessages(sessionID) {
 			if len(*messages) > 1 && (*messages)[0].Role == "system" {
-				go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[0])
+				_ = db.SaveMessage(sessionID, (*messages)[0])
 			}
 		}
-		go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+		_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	go func() {
-		for {
-			select {
-			case receivedSignal := <-sigChan:
-				manager := a.MultiAgentManager
-				if receivedSignal == syscall.SIGINT && manager != nil {
-					if activeName, ok := manager.ActiveSubagentName(); ok && a.UI != nil {
-						decision := a.UI.AskForSubagentCancellation(writerToUse, theme, activeName)
-						switch decision {
-						case SubagentCancellationContinue:
-							fmt.Fprintln(writerToUse, "\n[Subagent cancellation dismissed]")
-							continue
-						case SubagentCancellationSkipCurrent:
-							if manager.CancelSubagentTurn(activeName) {
-								fmt.Fprintf(writerToUse, "\n[Skipped subagent: %s]\n", activeName)
-							} else {
-								fmt.Fprintf(writerToUse, "\n[Subagent already finished: %s]\n", activeName)
-							}
-							continue
-						case SubagentCancellationStopAll:
-							manager.CancelAllActiveSubagents()
-						}
-					} else {
-						manager.CancelAllActiveSubagents()
-					}
-				}
-				fmt.Fprintln(writerToUse, "\n\n[Operation Cancelled by User]")
-				cancel()
-				return
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 
 	maxSteps := a.Config.MaxReasoningSteps
 	if maxSteps <= 0 {
@@ -144,10 +86,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return
-		}
-
-		if activity != nil {
-			activity.Think()
 		}
 
 		if iter > 1 {
@@ -218,8 +156,44 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		var toolCallChars int
 		var generationStart time.Time
 
+		spinnerDone := make(chan struct{})
+		var spinnerOnce sync.Once
+		stopSpinner := func() {
+			spinnerOnce.Do(func() {
+				close(spinnerDone)
+				if a.UI != nil && !isNonInteractive {
+					a.UI.DrawStatsLine(rawW, theme, "", "")
+				}
+			})
+		}
+		defer stopSpinner()
+
+		if a.UI != nil && !isNonInteractive {
+			go func() {
+				frames := []string{"◜", "◝", "◞", "◟"}
+				ticker := time.NewTicker(120 * time.Millisecond)
+				defer ticker.Stop()
+				i := 0
+				start := time.Now()
+				for {
+					select {
+					case <-spinnerDone:
+						return
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						frame := frames[i%len(frames)]
+						i++
+						elapsed := time.Since(start).Seconds()
+						a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("thinking... (%.1fs)", elapsed))
+					}
+				}
+			}()
+		}
+
 		var lastDraw time.Time
 		for chunk := range chunkChan {
+			stopSpinner()
 			if chunk.Type == "reasoning" {
 				if generationStart.IsZero() {
 					generationStart = time.Now()
@@ -278,9 +252,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		streamErr := <-streamErrChan
 
 		if streamErr != nil {
-			if activity != nil {
-				activity.Pause()
-			}
 			if !isNonInteractive {
 				fmt.Fprintln(writerToUse)
 				cancelStyle := style.NewStyle().Foreground(theme.Error).Italic(true)
@@ -311,7 +282,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
 		*messages = append(*messages, *assistantMsg)
 		if sessionID != "" {
-			go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 		}
 
 		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
@@ -325,9 +296,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			if activity != nil {
-				activity.Pause()
-			}
 			timePrinted = true
 			elapsed := time.Since(startTime)
 			timeStr := fmt.Sprintf("%s (%.1fs)", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
@@ -416,13 +384,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				approvalRendered = true
 				sr.Flush()
 				if a.UI != nil {
-					if activity != nil {
-						activity.Pause()
-					}
 					approved, always = a.UI.AskForApproval(ncw, theme)
-					if activity != nil {
-						activity.Think()
-					}
 				} else {
 					approved = true
 				}
@@ -443,19 +405,15 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
 					toolErr = fmt.Errorf("blocked by hook")
 				} else {
-					if activity != nil {
-						if isSubagent {
-							activity.Pause()
-						} else {
-							activity.Execute(tc.Function.Name)
-						}
+					if a.UI != nil && !isNonInteractive && !isSubagent {
+						a.UI.DrawStatsLine(rawW, theme, "◜", fmt.Sprintf("executing %s...", tc.Function.Name))
 					}
 
 					toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
 					toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
 
-					if activity != nil {
-						activity.Think()
+					if a.UI != nil && !isNonInteractive && !isSubagent {
+						a.UI.DrawStatsLine(rawW, theme, "", "")
 					}
 				}
 
@@ -496,7 +454,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					Content:    toolOutput,
 				})
 				if sessionID != "" {
-					go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 				}
 
 			} else {
@@ -521,7 +479,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					Content:    toolOutput,
 				})
 				if sessionID != "" {
-					go func(msg db.Message) { _ = db.SaveMessage(sessionID, msg) }((*messages)[len(*messages)-1])
+					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 				}
 
 				// Abort execution of subsequent tools in the batch
@@ -530,9 +488,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 	}
 
-	if activity != nil {
-		activity.Pause()
-	}
 	errStyle := style.NewStyle().Foreground(theme.Error).Bold(true)
 	fmt.Fprintf(writerToUse, "\n%s reached maximum reasoning steps limit (%d).\n", errStyle.Render("warning:"), maxSteps)
 }

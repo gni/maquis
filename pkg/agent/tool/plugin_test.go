@@ -8,11 +8,7 @@ import (
 )
 
 func TestRegisterPlugins(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("/workspace/maquis/tmp", "plugin_test_")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	pluginPath := filepath.Join(tmpDir, "mock_tool.sh")
 	pluginContent := `#!/bin/bash
@@ -33,7 +29,7 @@ cat
 	}
 
 	registry := NewToolRegistry()
-	err = RegisterPlugins(registry, tmpDir)
+	err := RegisterPlugins(registry, tmpDir)
 	if err != nil {
 		t.Fatalf("RegisterPlugins failed: %v", err)
 	}
@@ -66,11 +62,7 @@ cat
 }
 
 func TestRegisterPluginsInvalidJSON(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("/workspace/maquis/tmp", "plugin_test_invalid_")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	pluginPath := filepath.Join(tmpDir, "invalid_tool.sh")
 	pluginContent := `#!/bin/bash
@@ -90,7 +82,7 @@ exit 0
 	}
 
 	registry := NewToolRegistry()
-	err = RegisterPlugins(registry, tmpDir)
+	err := RegisterPlugins(registry, tmpDir)
 	if err != nil {
 		t.Fatalf("RegisterPlugins failed: %v", err)
 	}
@@ -100,5 +92,41 @@ exit 0
 		if strings.Contains(name, "invalid_tool") {
 			t.Errorf("unregistered tool '%s' was registered unexpectedly", name)
 		}
+	}
+}
+
+func TestRegisterPluginsWithInfoFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pluginPath := filepath.Join(tmpDir, "info_tool.sh")
+	pluginContent := `#!/bin/bash
+if [ "$1" == "--info" ]; then
+  echo '{"name": "info_tool", "description": "Info flag probed tool", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}'
+  exit 0
+fi
+echo "Executed: $@"
+`
+	if err := os.WriteFile(pluginPath, []byte(pluginContent), 0755); err != nil {
+		t.Fatalf("failed to write info script: %v", err)
+	}
+	if err := os.Chmod(pluginPath, 0755); err != nil {
+		t.Fatalf("failed to make script executable: %v", err)
+	}
+
+	registry := NewToolRegistry()
+	err := RegisterPlugins(registry, tmpDir)
+	if err != nil {
+		t.Fatalf("RegisterPlugins failed: %v", err)
+	}
+
+	expectedName := "plugin__info_tool"
+	executors := registry.GetAllExecutors()
+	executor, exists := executors[expectedName]
+	if !exists {
+		t.Fatalf("expected tool '%s' to be registered via --info probing", expectedName)
+	}
+
+	if executor.Definition().Function.Description != "Info flag probed tool" {
+		t.Errorf("unexpected description: %s", executor.Definition().Function.Description)
 	}
 }
