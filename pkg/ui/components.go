@@ -367,7 +367,7 @@ func extractToolTarget(toolName string, argsJSON string) string {
 	}
 
 	// 1. Command execution tools (bash, run_command, exec, etc.)
-	if strings.Contains(toolName, "ls") || strings.Contains(toolName, "command") || strings.Contains(toolName, "run") || strings.Contains(toolName, "exec") {
+	if strings.Contains(toolName, "bash") || strings.Contains(toolName, "ls") || strings.Contains(toolName, "command") || strings.Contains(toolName, "run") || strings.Contains(toolName, "exec") {
 		if c := getString("CommandLine"); c != "" {
 			return c
 		}
@@ -502,9 +502,12 @@ func renderToolSymbol(toolName string, status toolRenderStatus, theme UITheme) s
 
 func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
 	symbol := renderToolSymbol(toolName, toolStatusPending, theme)
-
 	pathVal := extractToolTarget(toolName, argsJSON)
-
+	if toolName == "bash" {
+		fmt.Fprintln(w, FormatToolDelimiter(theme))
+		fmt.Fprintln(w, FormatBashCommandLine(symbol, pathVal, theme))
+		return
+	}
 	title := FormatToolTitle(symbol, toolName, pathVal, theme)
 	fmt.Fprintln(w, title)
 }
@@ -726,6 +729,54 @@ func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UIT
 	fmt.Fprintln(w)
 }
 
+func FormatToolDelimiter(theme UITheme) string {
+	width, _ := getTerminalSize()
+	if width <= 0 {
+		width = 80
+	}
+	targetWidth := width - 2
+	if targetWidth < 3 {
+		targetWidth = 3
+	}
+	borderStyle := style.NewStyle().Foreground(theme.Border)
+	return borderStyle.Render(strings.Repeat("─", targetWidth))
+}
+
+func FormatBashCommandLine(symbol string, command string, theme UITheme) string {
+	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
+	cmdStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
+
+	command = strings.Join(strings.FieldsFunc(command, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t'
+	}), " ")
+	command = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, command)
+
+	width, _ := getTerminalSize()
+	if width <= 0 {
+		width = 80
+	}
+	targetWidth := width - 2
+	symbolLen := utf8.RuneCountInString(stripAnsi(symbol))
+	maxCmdRunes := targetWidth - symbolLen - 8
+	if maxCmdRunes < 8 {
+		maxCmdRunes = 8
+	}
+	cmdRunes := []rune(command)
+	if len(cmdRunes) > maxCmdRunes {
+		command = string(cmdRunes[:maxCmdRunes-3]) + "..."
+	}
+
+	if command != "" {
+		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render("bash:"), cmdStyle.Render(command))
+	}
+	return fmt.Sprintf("%s %s", symbol, toolStyle.Render("bash:"))
+}
+
 func FormatToolTitle(symbol string, toolName string, path string, theme UITheme) string {
 	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
 	pathStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
@@ -749,7 +800,7 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 	var innerTitle string
 	if path != "" {
 		relPath := path
-		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill"
+		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill" || toolName == "bash"
 		if toolName != "ls" && !isNonFilePathTool {
 			wd, err := os.Getwd()
 			if err == nil {
@@ -851,14 +902,18 @@ func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, 
 	getUI().StateMu.Unlock()
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "\x1b7\x1b[%d;1H", height-4-getUI().PasteLinesOffset)
+	buf.WriteString("\x1b[?2026h\x1b7")
+	fmt.Fprintf(&buf, "\x1b[%d;1H", height-4-getUI().PasteLinesOffset)
 
 	if spinnerFrame != "" {
-		spinnerStyled := style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
+		displayFrame := spinnerFrame
+		if !strings.Contains(spinnerFrame, "\x1b[") {
+			displayFrame = style.NewStyle().Foreground(theme.Primary).Bold(true).Render(spinnerFrame)
+		}
 		if textToDraw != "" {
-			fmt.Fprintf(&buf, "%s %s", spinnerStyled, textToDraw)
+			fmt.Fprintf(&buf, "%s %s", displayFrame, textToDraw)
 		} else {
-			fmt.Fprintf(&buf, "%s ", spinnerStyled)
+			fmt.Fprintf(&buf, "%s", displayFrame)
 		}
 	} else if textToDraw != "" {
 		fmt.Fprint(&buf, textToDraw)
@@ -869,7 +924,7 @@ func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, 
 	} else {
 		fmt.Fprint(&buf, "\x1b[K")
 	}
-	fmt.Fprint(&buf, "\x1b8")
+	buf.WriteString("\x1b8\x1b[?2026l")
 	_, _ = w.Write(buf.Bytes())
 }
 
@@ -1048,7 +1103,7 @@ func renderReasoningMarkdownContent(w io.Writer, content string, theme UITheme) 
 			if strings.HasPrefix(trimmed, "```") {
 				sr.inCodeBlock = false
 			} else {
-				fmt.Fprint(w, style.NewStyle().Foreground(theme.Border).Italic(true).Render("  "+line))
+				fmt.Fprint(w, sr.getThinkingStyle().Render("  "+line))
 				if i < len(lines)-1 {
 					fmt.Fprintln(w)
 				}
@@ -1125,12 +1180,14 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 	promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 
 	var lastRole string
+	var lastUserPrompt string
 	for i, msg := range messages {
 		if msg.Role == "system" {
 			continue
 		}
 
 		if msg.Role == "user" {
+			lastUserPrompt = msg.Content
 			if strings.HasPrefix(msg.Content, "[user manually executed slash command: `") {
 				firstTick := strings.Index(msg.Content, "`")
 				if firstTick != -1 {
@@ -1205,19 +1262,22 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 
 			hasPrintedAnything := false
 			if msg.ReasoningContent != "" {
-				if cfg.ShowThinking {
-					renderReasoningMarkdownContent(w, strings.TrimRight(msg.ReasoningContent, "\r\n"), theme)
-					fmt.Fprintln(w)
-				}
+				cleanReasoning := agent.StripEchoedPrompt(msg.ReasoningContent, lastUserPrompt)
+				if strings.TrimSpace(cleanReasoning) != "" {
+					if cfg.ShowThinking {
+						renderReasoningMarkdownContent(w, strings.TrimRight(cleanReasoning, "\r\n"), theme)
+						fmt.Fprintln(w)
+					}
 
-				iconStyle := style.NewStyle().Foreground(theme.Success)
-				labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-				if msg.ReasoningDuration > 0 {
-					fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
-				} else {
-					fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+					iconStyle := style.NewStyle().Foreground(theme.Success)
+					labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+					if msg.ReasoningDuration > 0 {
+						fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
+					} else {
+						fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+					}
+					hasPrintedAnything = true
 				}
-				hasPrintedAnything = true
 			}
 
 			assistantContent := agent.StripFallbackToolMarkup(msg.Content)
@@ -1253,8 +1313,13 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						} else {
 							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
 						}
-						title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
-						fmt.Fprintln(w, title)
+						if tc.Function.Name == "bash" {
+							fmt.Fprintln(w, FormatToolDelimiter(theme))
+							fmt.Fprintln(w, FormatBashCommandLine(symbol, path, theme))
+						} else {
+							title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
+							fmt.Fprintln(w, title)
+						}
 
 						if len(tc.Function.Arguments) > 0 && isWriteTool {
 							RenderToolOutput(w, "", false, false, theme, tc.Function.Name, tc.Function.Arguments, false)
@@ -1312,8 +1377,13 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			}
 			symbol := renderToolSymbol(toolName, status, theme)
 			path := extractToolTarget(toolName, argsJSON)
-			title := FormatToolTitle(symbol, toolName, path, theme)
-			fmt.Fprintln(w, title)
+			if toolName == "bash" {
+				fmt.Fprintln(w, FormatToolDelimiter(theme))
+				fmt.Fprintln(w, FormatBashCommandLine(symbol, path, theme))
+			} else {
+				title := FormatToolTitle(symbol, toolName, path, theme)
+				fmt.Fprintln(w, title)
+			}
 
 			RenderToolOutput(w, msg.Content, isError, cfg.CollapseResults, theme, toolName, argsJSON, false)
 		} else if msg.Role == "error" {

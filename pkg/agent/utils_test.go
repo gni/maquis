@@ -38,21 +38,31 @@ func TestFormatToolExecutionFailurePreservesCommandDiagnostics(t *testing.T) {
 	for _, expected := range []string{
 		"npm ERR! code ERESOLVE",
 		"unable to resolve dependency tree",
-		"System Alert:",
-		"exit status 1",
-		"Recommendation:",
 	} {
 		if !strings.Contains(formatted, expected) {
 			t.Fatalf("tool failure omitted %q: %q", expected, formatted)
 		}
 	}
-	if strings.Index(formatted, diagnostic) > strings.Index(formatted, "System Alert:") {
-		t.Fatalf("tool diagnostic appeared after the generic alert: %q", formatted)
+	if strings.Contains(formatted, "System Alert:") || strings.Contains(formatted, "Recommendation:") {
+		t.Fatalf("bash failure should not contain robotic alert slop: %q", formatted)
+	}
+}
+
+func TestFormatToolExecutionFailureIncludesDefensiveAlertForGenericTools(t *testing.T) {
+	formatted := FormatToolExecutionFailure("read", "failed to read file", errors.New("no such file: missing.py"))
+	for _, expected := range []string{
+		"failed to read file",
+		"System Alert:",
+		"Recommendation:",
+	} {
+		if !strings.Contains(formatted, expected) {
+			t.Fatalf("generic tool omitted expected alert part %q: %q", expected, formatted)
+		}
 	}
 }
 
 func TestFormatToolExecutionFailureDoesNotRepeatGenericFailure(t *testing.T) {
-	err := errors.New("command failed: exit status 1")
+	err := errors.New("command failed: exit status 1 (no output on stdout or stderr)")
 	formatted := FormatToolExecutionFailure("bash", err.Error(), err)
 
 	if count := strings.Count(formatted, err.Error()); count != 1 {
@@ -124,3 +134,59 @@ func TestGetGlobalTokenUsageTreatsProviderMetadataAsMeasured(t *testing.T) {
 		t.Fatalf("usage with pending input = (%d, %d), want (1600, 19)", prompt, completion)
 	}
 }
+
+func TestStripEchoedPrompt(t *testing.T) {
+	tests := []struct {
+		name      string
+		reasoning string
+		prompt    string
+		expected  string
+	}{
+		{
+			name:      "exact prompt with double newline",
+			reasoning: "write here a long poem\n\nWe need to write here a long poem.",
+			prompt:    "write here a long poem",
+			expected:  "We need to write here a long poem.",
+		},
+		{
+			name:      "case-insensitive echoed prompt",
+			reasoning: "Write Here A Long Poem\n\nThinking...",
+			prompt:    "write here a long poem",
+			expected:  "Thinking...",
+		},
+		{
+			name:      "quoted echoed prompt",
+			reasoning: "\"write here a long poem\"\n\nThinking...",
+			prompt:    "write here a long poem",
+			expected:  "Thinking...",
+		},
+		{
+			name:      "prompt with no further reasoning",
+			reasoning: "hi\n\n",
+			prompt:    "hi",
+			expected:  "",
+		},
+		{
+			name:      "distinct reasoning is preserved untouched",
+			reasoning: "The user wants a poem about the morning.",
+			prompt:    "write here a long poem",
+			expected:  "The user wants a poem about the morning.",
+		},
+		{
+			name:      "empty prompt or empty reasoning",
+			reasoning: "Some thoughts",
+			prompt:    "",
+			expected:  "Some thoughts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := StripEchoedPrompt(tt.reasoning, tt.prompt)
+			if result != tt.expected {
+				t.Fatalf("StripEchoedPrompt(%q, %q) = %q, want %q", tt.reasoning, tt.prompt, result, tt.expected)
+			}
+		})
+	}
+}
+

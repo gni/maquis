@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -114,10 +115,48 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	}
 
 	if err != nil {
-		if combined == "" {
-			combined = fmt.Sprintf("command failed: %v", err)
+		exitCode := -1
+		var exitDesc string
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			exitDesc = "command timed out after 120 seconds. If this is a server or long-running process, use 'background: true'"
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+			if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				sig := ws.Signal()
+				switch sig {
+				case syscall.SIGKILL:
+					exitDesc = fmt.Sprintf("command terminated by SIGKILL (signal 9 / killed, possibly out of memory, exit status %d)", exitCode)
+				case syscall.SIGSEGV:
+					exitDesc = fmt.Sprintf("command terminated by SIGSEGV (signal 11 / segmentation fault, exit status %d)", exitCode)
+				case syscall.SIGTERM:
+					exitDesc = fmt.Sprintf("command terminated by SIGTERM (signal 15 / termination request, exit status %d)", exitCode)
+				case syscall.SIGINT:
+					exitDesc = fmt.Sprintf("command interrupted by SIGINT (signal 2 / Ctrl+C, exit status %d)", exitCode)
+				case syscall.SIGABRT:
+					exitDesc = fmt.Sprintf("command aborted by SIGABRT (signal 6 / abort, exit status %d)", exitCode)
+				default:
+					exitDesc = fmt.Sprintf("command terminated by signal %d (%s, exit status %d)", sig, sig.String(), exitCode)
+				}
+			} else {
+				switch exitCode {
+				case 127:
+					exitDesc = "command not found: exit status 127"
+				case 126:
+					exitDesc = "command cannot execute: exit status 126 (permission denied)"
+				default:
+					exitDesc = fmt.Sprintf("command failed: exit status %d", exitCode)
+				}
+			}
+		} else {
+			exitDesc = fmt.Sprintf("command failed: %v", err)
 		}
-		return combined, fmt.Errorf("command failed: %w", err)
+
+		if strings.TrimSpace(combined) == "" {
+			combined = fmt.Sprintf("%s (no output on stdout or stderr)", exitDesc)
+		} else if !strings.Contains(combined, "exit status") && !strings.Contains(combined, "exit code") {
+			combined = fmt.Sprintf("%s\n\n(%s)", strings.TrimRight(combined, "\r\n"), exitDesc)
+		}
+		return combined, fmt.Errorf("%s", exitDesc)
 	}
 	return combined, nil
 }

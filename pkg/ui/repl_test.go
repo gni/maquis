@@ -510,7 +510,7 @@ func TestApprovalRepeatedDecisionKeysDoNotLeakToMainPrompt(t *testing.T) {
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			activeUI.StateMu.Lock()
 			inApproval := activeUI.InApprovalPrompt
@@ -523,6 +523,7 @@ func TestApprovalRepeatedDecisionKeysDoNotLeakToMainPrompt(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
+		reader.approvalChan <- 'y'
 	}()
 
 	var output bytes.Buffer
@@ -901,18 +902,21 @@ func TestHandleSessionSlashCommand(t *testing.T) {
 func TestJsonStreamParserStreamWrites(t *testing.T) {
 	theme := UITheme{}
 
-	t.Run("command marker starts at left edge", func(t *testing.T) {
+	t.Run("bash command in title bar without duplicate command line", func(t *testing.T) {
 		p := &jsonStreamParser{
 			activeToolName: "bash",
 		}
 		var buf bytes.Buffer
 		p.feed(`{"command": "find /workspace/tests"}`, &buf, theme)
 		got := stripAnsi(buf.String())
-		if !strings.Contains(got, "\n▸ command: find /workspace/tests") {
-			t.Errorf("expected command marker at left edge, got %q", got)
+		if strings.Contains(got, "▸ command:") {
+			t.Errorf("expected no duplicate command marker, got %q", got)
 		}
-		if strings.Contains(got, "\n  ▸ command:") {
-			t.Errorf("expected no leading indentation before command marker, got %q", got)
+		if !strings.Contains(got, "bash: find /workspace/tests") {
+			t.Errorf("expected bash: command line, got %q", got)
+		}
+		if strings.Contains(got, "─── ▸ bash") || strings.Contains(got, "─── bash") {
+			t.Errorf("expected pure delimiter line without bash tool title, got %q", got)
 		}
 	})
 

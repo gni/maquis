@@ -17,10 +17,6 @@ import (
 	"maquis/pkg/db"
 )
 
-func GetCurrentSpinnerFrame() string {
-	return ""
-}
-
 func unwrapWriter(w io.Writer) io.Writer {
 	if uw, ok := w.(interface{ Unwrap() io.Writer }); ok {
 		return unwrapWriter(uw.Unwrap())
@@ -118,6 +114,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
+		sr.SetPrompt(prompt)
 
 		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
 
@@ -151,96 +148,52 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			a.UI.DrawStatusBar(rawW, theme)
 		}
 
-		var reasoningChars int
-		var textChars int
-		var toolCallChars int
-		var generationStart time.Time
-
-		spinnerDone := make(chan struct{})
-		var spinnerOnce sync.Once
-		stopSpinner := func() {
-			spinnerOnce.Do(func() {
-				close(spinnerDone)
-				if a.UI != nil && !isNonInteractive {
-					a.UI.DrawStatsLine(rawW, theme, "", "")
-				}
-			})
-		}
-		defer stopSpinner()
-
+		var stopSpinner func()
+		spinnerRunning := false
 		if a.UI != nil && !isNonInteractive {
-			go func() {
-				frames := []string{"◜", "◝", "◞", "◟"}
-				ticker := time.NewTicker(120 * time.Millisecond)
-				defer ticker.Stop()
-				i := 0
-				start := time.Now()
-				for {
-					select {
-					case <-spinnerDone:
-						return
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						frame := frames[i%len(frames)]
-						i++
-						elapsed := time.Since(start).Seconds()
-						a.UI.DrawStatsLine(rawW, theme, frame, fmt.Sprintf("thinking... (%.1fs)", elapsed))
-					}
-				}
-			}()
+			stopSpinner = a.startSoftDotLoader(ctx, rawW, theme)
+			spinnerRunning = true
+		} else {
+			stopSpinner = func() {}
+		}
+		defer func() {
+			if spinnerRunning {
+				stopSpinner()
+				spinnerRunning = false
+			}
+		}()
+
+		safeStopSpinner := func() {
+			if spinnerRunning {
+				stopSpinner()
+				spinnerRunning = false
+			}
+		}
+		ensureSpinner := func() {
+			if !spinnerRunning && a.UI != nil && !isNonInteractive {
+				stopSpinner = a.startSoftDotLoader(ctx, rawW, theme)
+				spinnerRunning = true
+			}
 		}
 
-		var lastDraw time.Time
 		for chunk := range chunkChan {
-			stopSpinner()
 			if chunk.Type == "reasoning" {
-				if generationStart.IsZero() {
-					generationStart = time.Now()
-				}
+				safeStopSpinner()
 				sr.WriteReasoning(chunk.Content)
-				reasoningChars += len(chunk.Content)
-			} else {
-				if chunk.Type == "text" {
-					if generationStart.IsZero() {
-						generationStart = time.Now()
-					}
-					sr.Write(chunk.Content)
-					textChars += len(chunk.Content)
-				} else if chunk.Type == "tool_name" {
-					sr.StartToolCall(chunk.Content, chunk.ToolCallIndex)
-				} else if chunk.Type == "tool_call" {
-					sr.WriteToolCall(chunk.Content)
-					toolCallChars += len(chunk.Content)
-				}
-			}
-
-			if !isNonInteractive {
-				now := time.Now()
-				if lastDraw.IsZero() || now.Sub(lastDraw) >= 200*time.Millisecond {
-					currentCompletionTokensEst := (reasoningChars + textChars + toolCallChars) / 4
-					globalCompletionTokensEst := priorCompletionTokens + currentCompletionTokensEst
-					var tps float64
-					if !generationStart.IsZero() {
-						elapsed := now.Sub(generationStart).Seconds()
-						if elapsed > 0 {
-							tps = float64(currentCompletionTokensEst) / elapsed
-						}
-					}
-					if a.UI != nil {
-						activeTasks := 0
-						for _, t := range a.ListTasks() {
-							if t.Status == "running" {
-								activeTasks++
-							}
-						}
-						a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, globalCompletionTokensEst, currentCompletionTokensEst, a.Config.ContextWindowLimit, true, tps, activeTasks, a.Config.ShowTokens)
-						a.UI.DrawStatusBar(rawW, theme)
-					}
-					lastDraw = now
+			} else if chunk.Type == "text" {
+				safeStopSpinner()
+				sr.Write(chunk.Content)
+			} else if chunk.Type == "tool_name" {
+				sr.StartToolCall(chunk.Content, chunk.ToolCallIndex)
+				ensureSpinner()
+			} else if chunk.Type == "tool_call" {
+				sr.WriteToolCall(chunk.Content)
+				if sr.DidStreamToolBody(chunk.ToolCallIndex) {
+					safeStopSpinner()
 				}
 			}
 		}
+		safeStopSpinner()
 
 		sr.Flush()
 		stopTicker()
@@ -273,6 +226,10 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		if assistantMsg == nil {
 			return
+		}
+
+		if prompt != "" && assistantMsg.ReasoningContent != "" {
+			assistantMsg.ReasoningContent = StripEchoedPrompt(assistantMsg.ReasoningContent, prompt)
 		}
 
 		totalCompletionTokens += assistantMsg.CompletionTokens
@@ -309,6 +266,20 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			cStyled := style.NewStyle().Foreground(theme.Highlight).Render(currentCStr)
 			dotStyled := style.NewStyle().Foreground(theme.Border).Render(" • ")
 
+			var statsText string
+			if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
+				statsText = fmt.Sprintf("%s%s%s", cStyled, dotStyled, timeStyled)
+			} else {
+				statsText = timeStyled
+			}
+
+			_, height := getTerminalSize()
+			if height > 0 {
+				a.UI.DrawStatsLine(rawW, theme, "", statsText)
+			} else {
+				fmt.Fprintln(writerToUse, statsText)
+			}
+
 			if !isNonInteractive {
 				if a.UI != nil {
 					activeTasks := 0
@@ -319,22 +290,6 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					}
 					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks, a.Config.ShowTokens)
 					a.UI.DrawStatusBar(rawW, theme)
-				}
-			}
-			_, height := getTerminalSize()
-			if height > 0 {
-				var statsText string
-				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
-					statsText = fmt.Sprintf("%s%s%s", cStyled, dotStyled, timeStyled)
-				} else {
-					statsText = timeStyled
-				}
-				a.UI.DrawStatsLine(rawW, theme, "", statsText)
-			} else {
-				if a.Config.ShowTokens && assistantMsg.CompletionTokens > 0 {
-					fmt.Fprintf(writerToUse, "%s%s%s\n", cStyled, dotStyled, timeStyled)
-				} else {
-					fmt.Fprintln(writerToUse, timeStyled)
 				}
 			}
 			return
@@ -405,15 +360,14 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
 					toolErr = fmt.Errorf("blocked by hook")
 				} else {
+					var stopToolLoader func()
 					if a.UI != nil && !isNonInteractive && !isSubagent {
-						a.UI.DrawStatsLine(rawW, theme, "◜", fmt.Sprintf("executing %s...", tc.Function.Name))
+						stopToolLoader = a.startSoftDotLoader(ctx, rawW, theme)
 					}
-
 					toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
 					toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
-
-					if a.UI != nil && !isNonInteractive && !isSubagent {
-						a.UI.DrawStatsLine(rawW, theme, "", "")
+					if stopToolLoader != nil {
+						stopToolLoader()
 					}
 				}
 
@@ -492,6 +446,49 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	fmt.Fprintf(writerToUse, "\n%s reached maximum reasoning steps limit (%d).\n", errStyle.Render("warning:"), maxSteps)
 }
 
+func (a *Agent) startSoftDotLoader(ctx context.Context, w io.Writer, theme style.UITheme) func() {
+	if a.UI == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			close(done)
+			a.UI.DrawStatsLine(w, theme, "", "")
+		})
+	}
+
+	go func() {
+		activeDot := style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("•")
+		mutedDot := style.NewStyle().Foreground(theme.Border).Render("·")
+		frames := []string{
+			fmt.Sprintf("%s %s %s", activeDot, mutedDot, mutedDot),
+			fmt.Sprintf("%s %s %s", mutedDot, activeDot, mutedDot),
+			fmt.Sprintf("%s %s %s", mutedDot, mutedDot, activeDot),
+			fmt.Sprintf("%s %s %s", mutedDot, activeDot, mutedDot),
+		}
+		a.UI.DrawStatsLine(w, theme, frames[0], "")
+		ticker := time.NewTicker(240 * time.Millisecond)
+		defer ticker.Stop()
+		i := 1
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				frame := frames[i%len(frames)]
+				i++
+				a.UI.DrawStatsLine(w, theme, frame, "")
+			}
+		}
+	}()
+
+	return stop
+}
+
 type newlineCounterWriter struct {
 	io.Writer
 	count int
@@ -568,6 +565,7 @@ func (f *fallbackStreamRenderer) DidStreamToolBody(index int) bool              
 func (f *fallbackStreamRenderer) CompleteToolCall(index int, toolName string, toolArgs string, isError bool) {
 }
 func (f *fallbackStreamRenderer) GetReasoningDuration() float64 { return 0 }
+func (f *fallbackStreamRenderer) SetPrompt(prompt string)        {}
 
 func isReadOnly(toolName string) bool {
 	return toolName == "read" || toolName == "task_status"

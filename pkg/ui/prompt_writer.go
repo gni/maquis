@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -86,13 +87,8 @@ func (p *PromptPreservingWriter) SetCursorHidden(hidden bool) {
 func (p *PromptPreservingWriter) SetRestoreCursorToPrompt(restore bool) {
 	TerminalMu.Lock()
 	p.restoreCursorToPrompt = restore
-	if restore {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.getPromptRow(), p.promptCol)
-		p.cursorAtPrompt = true
-	} else {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH\x1b[?25h", p.printLine, p.printCol)
-		p.cursorAtPrompt = false
-	}
+	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.getPromptRow(), p.promptCol)
+	p.cursorAtPrompt = true
 	if p.autoWrapPending {
 		p.autoWrapDetached = true
 	}
@@ -112,6 +108,7 @@ func (p *PromptPreservingWriter) ForceReposition() {
 	p.printCol = 1
 	p.autoWrapPending = false
 	p.autoWrapDetached = false
+	fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.getPromptRow(), p.promptCol)
 	TerminalMu.Unlock()
 }
 
@@ -142,15 +139,22 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 		}
 	}
 
-	if p.restoreCursorToPrompt && (p.cursorAtPrompt || p.needsReposition) {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
+	var buf bytes.Buffer
+	buf.WriteString("\x1b[?2026h")
+
+	if p.restoreCursorToPrompt {
+		if !p.cursorAtPrompt {
+			fmt.Fprintf(&buf, "\x1b[%d;%dH", p.getPromptRow(), p.promptCol)
+		}
+		buf.WriteString("\x1b7")
+		fmt.Fprintf(&buf, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.cursorAtPrompt = false
 		p.needsReposition = false
 		if p.autoWrapPending {
 			p.autoWrapDetached = true
 		}
-	} else if !p.restoreCursorToPrompt && p.needsReposition {
-		fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
+	} else if p.needsReposition {
+		fmt.Fprintf(&buf, "\x1b[%d;%dH", p.printLine, p.printCol)
 		p.needsReposition = false
 		if p.autoWrapPending {
 			p.autoWrapDetached = true
@@ -162,37 +166,35 @@ func (p *PromptPreservingWriter) Write(data []byte) (int, error) {
 	// terminal flag. Materialize the delayed wrap before the next printable
 	// chunk so it cannot overwrite column one of the completed row.
 	if p.autoWrapPending && p.autoWrapDetached && firstTerminalActionIsGraphic(data, p.ansiState) {
-		if _, err := fmt.Fprint(p.inner, "\r\n"); err != nil {
-			return 0, err
-		}
+		buf.WriteString("\r\n")
 		p.advancePrintLine()
 		p.printCol = 1
 		p.autoWrapPending = false
 		p.autoWrapDetached = false
 	}
 
-	// Write the actual content. The terminal's scrolling region (set to 1..height-6)
+	// Write the actual content. The terminal's scrolling region (set to 1..height-5)
 	// ensures that newlines here only scroll within that region.
-	n, err := p.inner.Write(data)
+	buf.Write(data)
 
 	// Track the column position so we can restore it accurately next time.
-	p.trackPosition(data[:n])
+	p.trackPosition(data)
 
-	// Restore cursor to the prompt input line (height-2-PasteLinesOffset, promptCol) or keep it at stream position
-	if !p.cursorHidden {
-		if p.restoreCursorToPrompt {
-			fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.getPromptRow(), p.promptCol)
-			p.cursorAtPrompt = true
-		} else {
-			fmt.Fprintf(p.inner, "\x1b[%d;%dH", p.printLine, p.printCol)
-			p.cursorAtPrompt = false
-		}
-		if p.autoWrapPending {
-			p.autoWrapDetached = true
-		}
+	// Restore cursor to the prompt input line without resetting the terminal's blink cycle.
+	if p.restoreCursorToPrompt {
+		buf.WriteString("\x1b8")
+		p.cursorAtPrompt = true
+	} else {
+		fmt.Fprintf(&buf, "\x1b[%d;%dH", p.printLine, p.printCol)
+		p.cursorAtPrompt = false
 	}
+	if p.autoWrapPending {
+		p.autoWrapDetached = true
+	}
+	buf.WriteString("\x1b[?2026l")
 
-	return n, err
+	_, err := p.inner.Write(buf.Bytes())
+	return len(data), err
 }
 
 // trackPosition updates printCol by analyzing the written bytes.
@@ -383,16 +385,13 @@ func (p *PromptPreservingWriter) ReplaceScrollBlockBack(linesBack int, lines []s
 		return false
 	}
 
-	if _, err := fmt.Fprint(p.inner, "\x1b7"); err != nil {
-		return false
-	}
+	var buf bytes.Buffer
+	buf.WriteString("\x1b[?2026h\x1b7")
 	for index, line := range lines {
-		if _, err := fmt.Fprintf(p.inner, "\x1b[%d;1H\x1b[2K%s", startRow+index, line); err != nil {
-			_, _ = fmt.Fprint(p.inner, "\x1b8")
-			return false
-		}
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s", startRow+index, line)
 	}
-	_, err := fmt.Fprint(p.inner, "\x1b8")
+	buf.WriteString("\x1b8\x1b[?2026l")
+	_, err := p.inner.Write(buf.Bytes())
 	return err == nil
 }
 

@@ -26,6 +26,9 @@ type StreamRenderer struct {
 	reasoningDuration         float64
 	reasoningResetSequence    string
 	pendingThoughtTextGap     bool
+	prompt                    string
+	echoFilterDone            bool
+	reasoningPrefixBuf        string
 
 	lastEndedWithNewline bool
 	hasWrittenText       bool
@@ -68,9 +71,25 @@ func (sr *StreamRenderer) HasOutput() bool {
 	return sr.hasWrittenText || sr.hasWrittenThoughts
 }
 
+func (sr *StreamRenderer) getThinkingStyle() style.Style {
+	border := sr.theme.Border
+	if border == nil {
+		border = style.Color("#4C566A")
+	}
+	return style.NewStyle().Foreground(border).Italic(true)
+}
+
 func (sr *StreamRenderer) printReasoningLine(line string) {
-	dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
+	dimStyle := sr.getThinkingStyle()
 	fmt.Fprint(sr.w, dimStyle.Render(line))
+}
+
+func (sr *StreamRenderer) SetPrompt(prompt string) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.prompt = strings.TrimSpace(prompt)
+	sr.echoFilterDone = false
+	sr.reasoningPrefixBuf = ""
 }
 
 func (sr *StreamRenderer) WriteReasoning(chunk string) {
@@ -80,7 +99,75 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 	if !sr.showThinking || chunk == "" {
 		return
 	}
+
+	if !sr.echoFilterDone && sr.prompt != "" {
+		sr.reasoningPrefixBuf += chunk
+		cleanBuf := strings.TrimLeft(sr.reasoningPrefixBuf, "\r\n\t ")
+		normPrompt := sr.prompt
+
+		if cleanBuf == "" {
+			return
+		}
+
+		lowerBuf := strings.ToLower(cleanBuf)
+		lowerPrompt := strings.ToLower(normPrompt)
+
+		// Check if cleanBuf is still a prefix of the prompt
+		isPrefix := strings.HasPrefix(lowerPrompt, lowerBuf)
+		if !isPrefix {
+			for _, q := range []string{`"`, `'`, "`", "> "} {
+				if strings.HasPrefix(lowerPrompt, strings.TrimPrefix(lowerBuf, q)) {
+					isPrefix = true
+					break
+				}
+			}
+		}
+
+		if isPrefix {
+			return
+		}
+
+		// Check if cleanBuf starts with the full prompt
+		matched := false
+		var remaining string
+		if strings.HasPrefix(lowerBuf, lowerPrompt) {
+			matched = true
+			remaining = cleanBuf[len(lowerPrompt):]
+		} else {
+			for _, q := range []string{`"`, `'`, "`", "> "} {
+				if strings.HasPrefix(cleanBuf, q) {
+					trimmed := strings.TrimPrefix(cleanBuf, q)
+					if strings.HasPrefix(strings.ToLower(trimmed), lowerPrompt) {
+						matched = true
+						rem := trimmed[len(lowerPrompt):]
+						rem = strings.TrimPrefix(rem, q)
+						remaining = rem
+						break
+					}
+				}
+			}
+		}
+
+		if matched {
+			sr.echoFilterDone = true
+			remaining = strings.TrimLeft(remaining, "\r\n\t ")
+			sr.reasoningPrefixBuf = ""
+			if remaining == "" {
+				return
+			}
+			chunk = remaining
+		} else {
+			// Did not match prompt, flush the buffered text
+			sr.echoFilterDone = true
+			chunk = sr.reasoningPrefixBuf
+			sr.reasoningPrefixBuf = ""
+		}
+	}
+
 	sr.checkFirstWrite()
+
+	dimStyle := sr.getThinkingStyle()
+	startSeq, resetSeq := dimStyle.GetSequence()
 
 	if !sr.inThinking {
 		sr.inThinking = true
@@ -88,17 +175,13 @@ func (sr *StreamRenderer) WriteReasoning(chunk string) {
 		sr.reasoningHasText = false
 		sr.reasoningEndedWithNewline = false
 		sr.pendingThoughtTextGap = false
-
-		dimStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
-		startSeq, resetSeq := dimStyle.GetSequence()
-		fmt.Fprint(sr.w, startSeq)
 		sr.reasoningResetSequence = resetSeq
 	}
 
 	sr.hasWrittenThoughts = true
 	sr.reasoningHasText = true
 	sr.reasoningEndedWithNewline = strings.HasSuffix(chunk, "\n")
-	fmt.Fprint(sr.w, chunk)
+	fmt.Fprint(sr.w, startSeq+chunk+resetSeq)
 }
 
 func (sr *StreamRenderer) EndThinking() {
@@ -108,6 +191,46 @@ func (sr *StreamRenderer) EndThinking() {
 }
 
 func (sr *StreamRenderer) endThinking() {
+	if !sr.echoFilterDone && sr.reasoningPrefixBuf != "" {
+		sr.echoFilterDone = true
+		cleanBuf := strings.TrimSpace(sr.reasoningPrefixBuf)
+		lowerBuf := strings.ToLower(cleanBuf)
+		lowerPrompt := strings.ToLower(sr.prompt)
+
+		matched := cleanBuf == "" || strings.EqualFold(lowerBuf, lowerPrompt)
+		if !matched {
+			for _, q := range []string{`"`, `'`, "`", "> "} {
+				trimmed := strings.Trim(cleanBuf, q)
+				if strings.EqualFold(strings.ToLower(trimmed), lowerPrompt) {
+					matched = true
+					break
+				}
+			}
+		}
+
+		if !matched {
+			chunk := sr.reasoningPrefixBuf
+			sr.reasoningPrefixBuf = ""
+			sr.checkFirstWrite()
+			dimStyle := sr.getThinkingStyle()
+			startSeq, resetSeq := dimStyle.GetSequence()
+			if !sr.inThinking {
+				sr.inThinking = true
+				sr.reasoningStart = time.Now()
+				sr.reasoningHasText = false
+				sr.reasoningEndedWithNewline = false
+				sr.pendingThoughtTextGap = false
+				sr.reasoningResetSequence = resetSeq
+			}
+			sr.hasWrittenThoughts = true
+			sr.reasoningHasText = true
+			sr.reasoningEndedWithNewline = strings.HasSuffix(chunk, "\n")
+			fmt.Fprint(sr.w, startSeq+chunk+resetSeq)
+		} else {
+			sr.reasoningPrefixBuf = ""
+		}
+	}
+
 	if !sr.inThinking {
 		return
 	}
@@ -442,6 +565,10 @@ func (sr *StreamRenderer) CompleteToolCall(index int, toolName string, toolArgs 
 	}
 	symbol := renderToolSymbol(toolName, status, sr.theme)
 	target := extractToolTarget(toolName, toolArgs)
+	if toolName == "bash" {
+		replaceTrackedStreamLine(sr.w, sr.parser.toolTitleLineNumbers[index], FormatBashCommandLine(symbol, target, sr.theme))
+		return
+	}
 	replaceTrackedStreamLine(sr.w, sr.parser.toolTitleLineNumbers[index], FormatToolTitle(symbol, toolName, target, sr.theme))
 }
 

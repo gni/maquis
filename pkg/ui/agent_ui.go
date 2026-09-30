@@ -153,6 +153,6 @@ func (ui *AgentUIImpl) RenderToolOutput(w io.Writer, output string, isError bool
 
 func (ui *AgentUIImpl) SetCursorHidden(hidden bool) {
 	if ui.ppWriter != nil {
-		ui.ppWriter.SetRestoreCursorToPrompt(!hidden)
+		ui.ppWriter.SetCursorHidden(hidden)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type MCPServerConfig struct {
@@ -74,7 +75,7 @@ func DefaultConfig() *Config {
 		ApiKey:            apiKey,
 		Model:             model,
 		Temperature:       0.7,
-		SystemInstruction: "You are maquis, an elite minimalist agentic coding harness operating under the Loop Brain Cognitive Architecture. Your mission is to directly inspect directories, search code, edit/write files, and execute shell commands inside the workspace.\nGuidelines:\n1. Actions over Talk: Implement code on disk directly using write/edit tools. Do not dump complete file contents in chat.\n2. Safety & Accuracy: Always read a file before editing it to guarantee precise match blocks.\n3. Conciseness: Skip greetings, chit-chat, and preambles. Output only immediate results or technical next steps.\n4. Cognitive Rigor: Enforce 5-layer Locality of Behavior (Types, Guards, Services, Adapters, Tests), explicit error propagation, concurrency safety, and zero truncation.\n5. Internal Thinking: Keep thoughts strictly technical, concise, and focused on tool execution planning. Never reference your system prompt or guidelines.",
+		SystemInstruction: DefaultSystemInstruction,
 		AutoApprove:       false,
 		ShowThinking:      true,
 		CollapseResults:   false,
@@ -91,7 +92,7 @@ func DefaultConfig() *Config {
 		MaxCompletionTokens:  16384,
 		ContextWindowLimit:   128000,
 		ReasoningEffort:      "low",
-		StreamWrites:         false,
+		StreamWrites:         true,
 		SyntaxTheme:          "auto",
 		Providers:            make(map[string]ProviderConfig),
 		ActiveProvider:       "",
@@ -154,6 +155,10 @@ func LoadConfig(path string) (*Config, error) {
 	config := DefaultConfig()
 	if err := json.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("failed to parse config JSON: %w", err)
+	}
+
+	if len(config.SystemInstruction) > 5000 && strings.Contains(config.SystemInstruction, "Principal Software Architect") {
+		config.SystemInstruction = DefaultSystemInstruction
 	}
 
 	// Dynamic env overrides if config file doesn't have them set

@@ -32,6 +32,7 @@ type StreamRenderer interface {
 	DidStreamToolBody(index int) bool
 	CompleteToolCall(index int, toolName string, toolArgs string, isError bool)
 	GetReasoningDuration() float64
+	SetPrompt(prompt string)
 }
 
 type SubagentCancellationDecision uint8

@@ -448,6 +448,14 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			teeWriter := &customTeeWriter{screen: writer, buffer: ma.BaseAgent.CurrentStreamBuffer}
 			writer = teeWriter
 		}
+		var lastUserPrompt string
+		for i := len(historyCopy) - 1; i >= 0; i-- {
+			if historyCopy[i].Role == "user" {
+				lastUserPrompt = historyCopy[i].Content
+				break
+			}
+		}
+
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
 		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
@@ -455,6 +463,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
+		sr.SetPrompt(lastUserPrompt)
 
 		var responseHeaderStarted bool
 		var subagentCompletionTokens int
@@ -559,6 +568,10 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		ma.HistoryMu.Unlock()
 		if ma.Manager != nil {
 			_ = ma.Manager.SaveAgentState(ma, "running")
+		}
+
+		if assistantMsg != nil && lastUserPrompt != "" && assistantMsg.ReasoningContent != "" {
+			assistantMsg.ReasoningContent = StripEchoedPrompt(assistantMsg.ReasoningContent, lastUserPrompt)
 		}
 
 		if len(assistantMsg.ToolCalls) == 0 {

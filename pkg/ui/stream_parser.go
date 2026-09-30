@@ -183,22 +183,11 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 				p.inString = true
 			} else if char == ':' {
 				p.inValue = true
-				isContentKey := (p.currentKey == "command" || p.currentKey == "CommandLine")
-				if isContentKey {
-					p.isContent = true
-					p.guessedLang = "bash"
-					p.markBodyStreamed()
-					if !p.titlePrinted {
-						p.printStreamTitle(w, theme)
-						if p.outputBuf.Len() > 0 {
-							fmt.Fprint(w, p.outputBuf.String())
-							p.outputBuf.Reset()
-						}
-					}
-					fmt.Fprintf(pw, "▸ %s: ", p.currentKey)
-				} else if p.currentKey == "path" || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" || p.currentKey == "task_id" || p.currentKey == "AbsolutePath" || p.currentKey == "TargetFile" {
+				isBashOrCmd := (p.currentKey == "command" || p.currentKey == "CommandLine") && (p.activeToolName == "bash" || p.activeToolName == "ls" || strings.Contains(p.activeToolName, "command") || strings.Contains(p.activeToolName, "exec") || strings.Contains(p.activeToolName, "run"))
+				isPathKey := p.currentKey == "path" || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" || p.currentKey == "task_id" || p.currentKey == "AbsolutePath" || p.currentKey == "TargetFile" || isBashOrCmd
+				if isPathKey {
 					p.isPath = true
-				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") {
+				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") || p.currentKey == "code" {
 					if p.streamWrites {
 						p.isContent = true
 						p.guessedLang = ""
@@ -249,8 +238,16 @@ func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
 	}
 	p.titlePrinted = true
 	p.ensureTrackingIndex()
-	p.toolTitleLineNumbers[p.activeToolIndex] = getNewlineCount(w)
 
+	if p.activeToolName == "bash" {
+		fmt.Fprintln(w, FormatToolDelimiter(theme))
+		p.toolTitleLineNumbers[p.activeToolIndex] = getNewlineCount(w)
+		symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
+		fmt.Fprintln(w, FormatBashCommandLine(symbol, p.path, theme))
+		return
+	}
+
+	p.toolTitleLineNumbers[p.activeToolIndex] = getNewlineCount(w)
 	symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
 	fmt.Fprintln(w, FormatToolTitle(symbol, p.activeToolName, p.path, theme))
 }
@@ -259,6 +256,10 @@ func (p *jsonStreamParser) updateStreamTitleWithPath(w io.Writer, theme UITheme)
 	p.ensureTrackingIndex()
 	line := p.toolTitleLineNumbers[p.activeToolIndex]
 	symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
+	if p.activeToolName == "bash" {
+		replaceTrackedStreamLine(w, line, FormatBashCommandLine(symbol, p.path, theme))
+		return
+	}
 	replaceTrackedStreamLine(w, line, FormatToolTitle(symbol, p.activeToolName, p.path, theme))
 }
 

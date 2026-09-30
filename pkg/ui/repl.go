@@ -11,10 +11,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -679,6 +681,55 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 
 	if bytes.Contains(p, []byte("\x1b[H")) || bytes.Contains(p, []byte("\x1b[1;1H")) {
 		return len(p), nil
+	}
+
+	if ki.isAtMainPrompt && ki.rl != nil {
+		termW, height := getTerminalSize()
+		if height > 3 {
+			if termW <= 0 {
+				termW = 80
+			}
+			line, pos := getTerminalLine(ki.rl)
+			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			availWidth := termW - prefixLen - 1
+			if availWidth < 10 {
+				availWidth = 10
+			}
+
+			runes := []rune(line)
+			totalRunes := len(runes)
+
+			displayStr := line
+			cursorCol := prefixLen + pos + 1
+
+			if totalRunes > availWidth {
+				start := pos - (availWidth / 2)
+				if start < 0 {
+					start = 0
+				}
+				end := start + availWidth
+				if end > totalRunes {
+					end = totalRunes
+					start = end - availWidth
+					if start < 0 {
+						start = 0
+					}
+				}
+				displayStr = string(runes[start:end])
+				cursorCol = prefixLen + (pos - start) + 1
+			}
+
+			var buf bytes.Buffer
+			cursorVisibility := "\x1b[?25h"
+			if ki.agent != nil && ki.agent.CurrentWriter != nil {
+				if pw, ok := ki.agent.CurrentWriter.(*PromptPreservingWriter); ok && pw.cursorHidden {
+					cursorVisibility = "\x1b[?25l"
+				}
+			}
+			fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s%s\x1b[%d;%dH%s", height-2, promptStr, displayStr, height-2, cursorCol, cursorVisibility)
+			_, _ = ki.writeToTerminal(buf.Bytes())
+			return len(p), nil
+		}
 	}
 
 	return ki.writeToTerminal(p)
@@ -1392,6 +1443,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 
 		kiReader.currentInputLine = ""
+		line = hist.GetFull(line)
 		line = strings.ReplaceAll(line, "↵", "\n")
 		if kiReader.pastedCodeBlocks != nil {
 			for tag, code := range kiReader.pastedCodeBlocks {
@@ -1769,10 +1821,14 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 
 	inputLine := ""
 	posOffset := 0
-	if drawPrompt && kiReader != nil {
-		inputLine = kiReader.currentInputLine
-		posOffset = kiReader.currentInputPos
-		if kiReader.pastedText != "" {
+	if drawPrompt {
+		if rl != nil {
+			inputLine, posOffset = getTerminalLine(rl)
+		} else if kiReader != nil {
+			inputLine = kiReader.currentInputLine
+			posOffset = kiReader.currentInputPos
+		}
+		if kiReader != nil && kiReader.pastedText != "" {
 			inputLine = inputLine + kiReader.pastedText
 			posOffset = len([]rune(inputLine))
 		}
@@ -2059,4 +2115,23 @@ func handleResize(w io.Writer, a *agent.Agent, kiReader *keyInterceptorReader, r
 			fr.ForceReposition()
 		}
 	}
+}
+
+func getTerminalLine(rl *term.Terminal) (string, int) {
+	if rl == nil {
+		return "", 0
+	}
+	val := reflect.ValueOf(rl).Elem()
+	lineField := val.FieldByName("line")
+	posField := val.FieldByName("pos")
+	if lineField.IsValid() && posField.IsValid() {
+		ptrLine := unsafe.Pointer(lineField.UnsafeAddr())
+		runes := *(*[]rune)(ptrLine)
+
+		ptrPos := unsafe.Pointer(posField.UnsafeAddr())
+		pos := *(*int)(ptrPos)
+
+		return string(runes), pos
+	}
+	return "", 0
 }

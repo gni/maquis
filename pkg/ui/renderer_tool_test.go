@@ -434,3 +434,74 @@ func TestToolCompletionUpdatesOnlyTrackedHeaderRow(t *testing.T) {
 		t.Fatalf("completion did not update the tracked title: %q", clean)
 	}
 }
+
+func TestBashToolHeaderAndCompletionFormat(t *testing.T) {
+	var terminal bytes.Buffer
+	promptWriter := NewPromptPreservingWriter(&terminal, 30)
+	counter := &wrappedRenderLineCounter{writer: promptWriter}
+	renderer := NewStreamRenderer(counter, UITheme{}, false, false, "test")
+	arguments := `{"command":"whoami"}`
+
+	renderer.StartToolCall("bash", 0)
+	renderer.WriteToolCall(arguments)
+	renderer.Flush()
+
+	initialOutput := stripAnsi(terminal.String())
+	if !strings.Contains(initialOutput, "▸ bash: whoami") {
+		t.Fatalf("expected initial bash command line '▸ bash: whoami', got: %q", initialOutput)
+	}
+	if strings.Contains(initialOutput, "─── ▸ bash") || strings.Contains(initialOutput, "─── bash") {
+		t.Fatalf("delimiter must not contain bash title: %q", initialOutput)
+	}
+	if !strings.Contains(initialOutput, "───") {
+		t.Fatalf("expected horizontal delimiter line, got: %q", initialOutput)
+	}
+
+	terminal.Reset()
+	renderer.CompleteToolCall(0, "bash", arguments, false)
+
+	update := stripAnsi(terminal.String())
+	if !strings.Contains(update, "✔ bash: whoami") {
+		t.Fatalf("expected completion bash command line '✔ bash: whoami', got: %q", update)
+	}
+	if strings.Contains(update, "─── ✔ bash") || strings.Contains(update, "─── bash") {
+		t.Fatalf("completion must not contain delimiter with bash title: %q", update)
+	}
+
+	// Verify session history formatting for bash
+	messages := []db.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []db.ToolCall{
+				{
+					ID:   "call-bash-1",
+					Type: "function",
+					Function: db.ToolFunction{
+						Name:      "bash",
+						Arguments: arguments,
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call-bash-1",
+			Name:       "bash",
+			Content:    "node",
+		},
+	}
+	var history bytes.Buffer
+	PrintSessionHistory(&history, messages, UITheme{}, &config.Config{})
+	historyText := stripAnsi(history.String())
+
+	if !strings.Contains(historyText, "✔ bash: whoami") {
+		t.Fatalf("expected session history to contain '✔ bash: whoami', got: %q", historyText)
+	}
+	if strings.Contains(historyText, "─── ✔ bash") || strings.Contains(historyText, "─── bash") {
+		t.Fatalf("expected session history delimiter not to contain bash title, got: %q", historyText)
+	}
+	if !strings.Contains(historyText, "node") {
+		t.Fatalf("expected session history to contain output 'node', got: %q", historyText)
+	}
+}
+

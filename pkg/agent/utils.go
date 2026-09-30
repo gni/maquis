@@ -119,8 +119,14 @@ func FormatToolExecutionFailure(toolName, output string, err error) string {
 	if err == nil {
 		return strings.TrimRight(output, "\r\n")
 	}
-	alert := FormatDefensiveError(toolName, err)
 	diagnostic := strings.Trim(output, "\r\n")
+	if toolName == "bash" {
+		if diagnostic != "" {
+			return diagnostic
+		}
+		return err.Error()
+	}
+	alert := FormatDefensiveError(toolName, err)
 	if strings.TrimSpace(diagnostic) == "" || strings.TrimSpace(diagnostic) == strings.TrimSpace(err.Error()) {
 		return alert
 	}
@@ -222,3 +228,39 @@ func TruncateRunes(s string, maxRunes int) string {
 	}
 	return string(runes[:maxRunes-3]) + "..."
 }
+
+// StripEchoedPrompt strips leading echoed prompt text and trailing newlines/whitespace
+// from model reasoning content if the model begins thinking by repeating the user's prompt.
+func StripEchoedPrompt(reasoning, prompt string) string {
+	normPrompt := strings.TrimSpace(prompt)
+	if normPrompt == "" || reasoning == "" {
+		return reasoning
+	}
+
+	cleanReasoning := strings.TrimLeft(reasoning, "\r\n\t ")
+	lowerPrompt := strings.ToLower(normPrompt)
+	lowerReasoning := strings.ToLower(cleanReasoning)
+
+	if strings.HasPrefix(lowerReasoning, lowerPrompt) {
+		remaining := cleanReasoning[len(normPrompt):]
+		return strings.TrimLeft(remaining, "\r\n\t ")
+	}
+
+	// Check if the echoed prompt was wrapped in quotes, backticks, or prompt marker
+	for _, wrapper := range []string{`"`, `'`, "`", "> "} {
+		if strings.HasPrefix(cleanReasoning, wrapper) {
+			trimmedPrefix := strings.TrimPrefix(cleanReasoning, wrapper)
+			lowerTrimmed := strings.ToLower(trimmedPrefix)
+			if strings.HasPrefix(lowerTrimmed, lowerPrompt) {
+				remaining := trimmedPrefix[len(normPrompt):]
+				if strings.HasPrefix(remaining, wrapper) {
+					remaining = strings.TrimPrefix(remaining, wrapper)
+				}
+				return strings.TrimLeft(remaining, "\r\n\t ")
+			}
+		}
+	}
+
+	return reasoning
+}
+

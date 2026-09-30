@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"golang.org/x/term"
+	"unicode/utf8"
 	"maquis/pkg/ui/style"
 )
 
@@ -131,13 +132,17 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 	}
 	getUI().LastStatusBarText = deltaKey
 
+	// Save cursor
+	buf.WriteString("\x1b[?2026h\x1b7")
+
 	// Draw separator line at height-1
 	fmt.Fprintf(&buf, "\x1b[%d;1H", height-1)
 	fmt.Fprint(&buf, "\x1b[2K")
 	borderStyle := style.NewStyle().Foreground(theme.Border)
 	collapseStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
 
-	dashesCount := (width - 1) - 2 // space + indicator
+	indicatorLen := utf8.RuneCountInString(indicator)
+	dashesCount := (width - 1) - indicatorLen - 1 // space + indicator
 	if dashesCount < 1 {
 		dashesCount = 1
 	}
@@ -151,7 +156,7 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 	fmt.Fprint(&buf, newStatusBarText)
 
 	// Restore cursor
-	fmt.Fprint(&buf, "\x1b8")
+	buf.WriteString("\x1b8\x1b[?2026l")
 
 	_, _ = w.Write(buf.Bytes())
 }

@@ -233,3 +233,47 @@ func TestExactWidthChunkFollowedByExplicitNewlineDoesNotCreateBlankRow(t *testin
 		t.Fatalf("explicit newline scrolled %d time(s), want exactly 1", got)
 	}
 }
+
+func TestStreamRendererSuppressesEchoedPrompt(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	// Case 1: Prompt echoed at start of reasoning
+	var term1 bytes.Buffer
+	w1 := NewPromptPreservingWriter(&term1, 30)
+	sr1 := NewStreamRenderer(w1, UITheme{}, true, false, "test")
+	sr1.SetPrompt("write here a long poem")
+
+	chunks := []string{"write", " here", " a", " long", " poem", "\n\n", "We need to write here a long poem."}
+	for _, c := range chunks {
+		sr1.WriteReasoning(c)
+	}
+	sr1.EndThinking()
+
+	rendered1 := sanitizeTerminalText(term1.String())
+	if strings.Contains(rendered1, "thought") && strings.HasPrefix(strings.TrimSpace(rendered1), "write here a long poem") {
+		t.Fatalf("echoed prompt was not suppressed from rendered reasoning: %q", rendered1)
+	}
+	if !strings.Contains(rendered1, "We need to write here a long poem.") {
+		t.Fatalf("actual thinking content was unexpectedly removed: %q", rendered1)
+	}
+
+	// Case 2: Only echoed prompt in reasoning (like "hi\n\n")
+	var term2 bytes.Buffer
+	w2 := NewPromptPreservingWriter(&term2, 30)
+	sr2 := NewStreamRenderer(w2, UITheme{}, true, false, "test")
+	sr2.SetPrompt("hi")
+
+	sr2.WriteReasoning("hi")
+	sr2.WriteReasoning("\n\n")
+	sr2.Write("Hi! How can I help you today?")
+	sr2.Flush()
+
+	rendered2 := sanitizeTerminalText(term2.String())
+	if strings.Contains(rendered2, "thought") {
+		t.Fatalf("expected no thought block for empty echoed reasoning, got: %q", rendered2)
+	}
+	if !strings.Contains(rendered2, "Hi! How can I help you today?") {
+		t.Fatalf("response text was not rendered: %q", rendered2)
+	}
+}
+
