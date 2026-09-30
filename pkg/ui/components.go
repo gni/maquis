@@ -895,7 +895,10 @@ func DrawStaticStatsLineLocked(w io.Writer, theme UITheme, spinnerFrame string, 
 	getUI().StateMu.Lock()
 	if spinnerFrame == "" {
 		if statsText != "" {
-			getUI().LastStatsText = statsText
+			clean := style.StripAnsi(statsText)
+			if !strings.HasPrefix(clean, "(") || strings.Contains(clean, "out •") {
+				getUI().LastStatsText = statsText
+			}
 		}
 	}
 	textToDraw := statsText

@@ -712,6 +712,27 @@ func TestDrawStaticStatsLine(t *testing.T) {
 	if !strings.Contains(rawCleared, "\x1b[2K") {
 		t.Errorf("empty activity status did not clear its row: %q", rawCleared)
 	}
+
+	// Test transient timer without loading spinner does not overwrite LastStatsText
+	buf.Reset()
+	DrawStaticStatsLine(&buf, theme, "", "(2.3s)")
+	rawTimerOnly := buf.String()
+	if !strings.Contains(rawTimerOnly, "(2.3s)") {
+		t.Errorf("expected timer text without spinner, got %q", rawTimerOnly)
+	}
+	fallbackUI.StateMu.Lock()
+	if fallbackUI.LastStatsText == "(2.3s)" {
+		t.Errorf("transient timer should not overwrite LastStatsText")
+	}
+	fallbackUI.StateMu.Unlock()
+
+	// Test soft dots loader with timer
+	buf.Reset()
+	DrawStaticStatsLine(&buf, theme, "• · ·", "(2.5s)")
+	rawDotsAndTimer := buf.String()
+	if !strings.Contains(rawDotsAndTimer, "• · ·") || !strings.Contains(rawDotsAndTimer, "(2.5s)") {
+		t.Errorf("expected both dots and timer, got %q", rawDotsAndTimer)
+	}
 }
 
 func TestKeyInterceptorReader_MultilinePaste(t *testing.T) {
