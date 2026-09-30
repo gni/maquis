@@ -1500,3 +1500,58 @@ func TestMultilineHistoryPreservation(t *testing.T) {
 		t.Fatalf("expected fallback replacement to contain newlines, got %q", fallback)
 	}
 }
+
+func TestQueueVisibilityAndFeedback(t *testing.T) {
+	theme := style.GetTheme("catppuccin")
+	a := &agent.Agent{Config: &config.Config{Model: "test-model"}}
+
+	// 1. Initial state: queue is 0, formatRight has no queue badge
+	getUI().StateMu.Lock()
+	getUI().State.Model = "test-model"
+	getUI().State.QueuedPromptsCount = 0
+	getUI().StateMu.Unlock()
+
+	right := formatRight(theme, 80)
+	if strings.Contains(right, "queue") {
+		t.Fatalf("expected no queue badge when queue is empty, got: %s", right)
+	}
+
+	// 2. When prompt is queued, formatRight shows [queue:1]
+	ki := &keyInterceptorReader{agent: a}
+	n := ki.EnqueuePrompt("test queued prompt")
+	if n != 1 {
+		t.Fatalf("expected 1 queued prompt, got %d", n)
+	}
+
+	getUI().StateMu.Lock()
+	getUI().State.QueuedPromptsCount = n
+	getUI().StateMu.Unlock()
+
+	right = formatRight(theme, 80)
+	if !strings.Contains(right, "[queue:1]") {
+		t.Fatalf("expected formatRight to contain [queue:1], got: %s", right)
+	}
+
+	// 3. Test redrawTypeAhead renders queue prefix [queue: 1] >
+	var outBuf bytes.Buffer
+	ki.w = &outBuf
+	ki.redrawTypeAhead()
+	renderedPrompt := stripAnsi(outBuf.String())
+	if !strings.Contains(renderedPrompt, "[queue: 1] >") {
+		t.Fatalf("expected redrawTypeAhead to render '[queue: 1] >', got: %s", renderedPrompt)
+	}
+
+	// 4. Test Dequeue updates queue count
+	item, ok := ki.DequeuePrompt()
+	if !ok || item != "test queued prompt" {
+		t.Fatalf("expected dequeued item 'test queued prompt', got %q, ok=%v", item, ok)
+	}
+	getUI().StateMu.Lock()
+	getUI().State.QueuedPromptsCount = ki.QueueLen()
+	getUI().StateMu.Unlock()
+
+	rightAfter := formatRight(theme, 80)
+	if strings.Contains(rightAfter, "queue") {
+		t.Fatalf("expected no queue badge after queue drained, got: %s", rightAfter)
+	}
+}

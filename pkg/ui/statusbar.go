@@ -26,6 +26,7 @@ type StatusBarState struct {
 	HasLastTps              bool
 	ActiveTasksCount        int
 	ShowTokens              bool
+	QueuedPromptsCount      int
 }
 
 func getTerminalSize() (int, int) {
@@ -188,15 +189,21 @@ func formatLeft(theme UITheme, width int) string {
 		cStr += fmt.Sprintf(" (%.1f t/s)", getUI().State.LastTps)
 	}
 
-	totalTokens := getUI().State.PromptTokens + getUI().State.CompletionTokens
+	contextTokens := getUI().State.PromptTokens + getUI().State.CurrentCompletionTokens
+	if getUI().State.CurrentCompletionTokens == 0 {
+		contextTokens = getUI().State.PromptTokens
+	}
+	if contextTokens == 0 {
+		contextTokens = getUI().State.CompletionTokens
+	}
 	var pct float64
 	if getUI().State.ContextLimit > 0 {
-		pct = (float64(totalTokens) / float64(getUI().State.ContextLimit)) * 100.0
+		pct = (float64(contextTokens) / float64(getUI().State.ContextLimit)) * 100.0
 	}
 
-	totStr := fmt.Sprintf("%d", totalTokens)
-	if totalTokens >= 1000 {
-		totStr = fmt.Sprintf("%.1fk", float64(totalTokens)/1000.0)
+	totStr := fmt.Sprintf("%d", contextTokens)
+	if contextTokens >= 1000 {
+		totStr = fmt.Sprintf("%.1fk", float64(contextTokens)/1000.0)
 	}
 	pctStr := fmt.Sprintf("%.1f%%", pct)
 	if getUI().State.IsGenerating || getUI().State.TokenEstimate {
@@ -247,6 +254,16 @@ func formatRight(theme UITheme, width int) string {
 	}
 	modelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 
+	queueStr := ""
+	if getUI().State.QueuedPromptsCount > 0 {
+		queueStyle := style.NewStyle().Foreground(theme.Highlight).Bold(true)
+		if width < 50 {
+			queueStr = queueStyle.Render(fmt.Sprintf("q:%d", getUI().State.QueuedPromptsCount)) + " "
+		} else {
+			queueStr = queueStyle.Render(fmt.Sprintf("[queue:%d]", getUI().State.QueuedPromptsCount)) + " "
+		}
+	}
+
 	taskStr := ""
 	if getUI().State.ActiveTasksCount > 0 {
 		taskStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
@@ -259,12 +276,13 @@ func formatRight(theme UITheme, width int) string {
 		}
 	}
 
+	rightInfo := queueStr + taskStr
 	if width < 45 {
-		return taskStr
+		return rightInfo
 	} else if width < 65 {
 		modelName := style.TruncateRunes(getUI().State.Model, 13)
-		return taskStr + modelStyle.Render(modelName) + " "
+		return rightInfo + modelStyle.Render(modelName) + " "
 	} else {
-		return taskStr + modelStyle.Render(getUI().State.Model) + " "
+		return rightInfo + modelStyle.Render(getUI().State.Model) + " "
 	}
 }

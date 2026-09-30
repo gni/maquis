@@ -73,6 +73,10 @@ func HandleSlashCommand(
 		}
 		if len(parts) > 1 && parts[1] == "clear" {
 			n := kiReader.ClearQueue()
+			getUI().StateMu.Lock()
+			getUI().State.QueuedPromptsCount = 0
+			getUI().StateMu.Unlock()
+			DrawStatusBar(os.Stderr, *theme)
 			fmt.Fprintf(w, "cleared %d queued prompt(s).\n", n)
 			return true, false
 		}
@@ -254,7 +258,8 @@ func HandleSlashCommand(
 			_ = config.SaveConfig(a.ConfigPath, a.Config)
 			fmt.Fprintf(w, "config updated. saved to %s\n", a.ConfigPath)
 			pTok, cTok, estimated := calcHistoryTokens()
-			UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
+			latestTurnTokens := a.GetLatestAssistantCompletionTokens(*messages)
+			UpdateStatus(a.Config.Model, pTok, cTok, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 			DrawStatusBar(w, *theme)
 		} else {
 			var input io.Reader = kiReader
@@ -334,6 +339,9 @@ func HandleSlashCommand(
 		}
 		if kiReader != nil {
 			kiReader.ClearQueue()
+			getUI().StateMu.Lock()
+			getUI().State.QueuedPromptsCount = 0
+			getUI().StateMu.Unlock()
 		}
 
 		if a.ClearAgentsFunc != nil {

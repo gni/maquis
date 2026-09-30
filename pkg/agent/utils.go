@@ -87,6 +87,38 @@ func (a *Agent) GetGlobalTokenUsage(messages []db.Message, _ []string) (int, int
 	return 0, 0, false
 }
 
+// GetSessionTotalCompletionTokens calculates the global sum of completion tokens generated across all assistant turns in the session.
+func (a *Agent) GetSessionTotalCompletionTokens(messages []db.Message) int {
+	total := 0
+	for _, m := range messages {
+		if m.Role == "assistant" {
+			hasPayload := m.Content != "" || m.ReasoningContent != "" || len(m.ToolCalls) > 0
+			if hasPayload {
+				if m.CompletionTokens > 0 {
+					total += m.CompletionTokens
+				} else {
+					total += (len(m.Content) + len(m.ReasoningContent)) / 4
+				}
+			}
+		}
+	}
+	return total
+}
+
+// GetLatestAssistantCompletionTokens returns the completion tokens of the latest assistant message.
+func (a *Agent) GetLatestAssistantCompletionTokens(messages []db.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if message.Role == "assistant" {
+			hasPayload := message.Content != "" || message.ReasoningContent != "" || len(message.ToolCalls) > 0
+			if hasPayload && message.CompletionTokens > 0 {
+				return message.CompletionTokens
+			}
+		}
+	}
+	return 0
+}
+
 // FormatDefensiveError turns syntax errors into descriptive, action-oriented correction prompts
 func FormatDefensiveError(toolName string, err error) string {
 	errStr := err.Error()

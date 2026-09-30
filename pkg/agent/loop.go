@@ -122,7 +122,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 		sr.SetPrompt(prompt)
 
-		globalPromptTokensEst, priorCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
+		globalPromptTokensEst, _ := a.GetGlobalTokens(*messages, allowlist)
+		priorCompletionTokens := a.GetSessionTotalCompletionTokens(*messages)
 
 		tickerDone := make(chan struct{})
 		var tickerOnce sync.Once
@@ -239,8 +240,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 		}
 
-		globalPromptTokens, globalCompletionTokens := a.GetGlobalTokens(*messages, allowlist)
-		if totalTokens := globalPromptTokens + globalCompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
+		globalPromptTokens, _ := a.GetGlobalTokens(*messages, allowlist)
+		globalCompletionTokens := a.GetSessionTotalCompletionTokens(*messages)
+		if totalTokens := globalPromptTokens + assistantMsg.CompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
 			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
 		}
 

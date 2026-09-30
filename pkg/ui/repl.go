@@ -435,7 +435,9 @@ func calculateActiveTokenUsage(
 		activeMessages = append([]db.Message(nil), mam.ActiveAgent.History...)
 		mam.ActiveAgent.HistoryMu.RUnlock()
 	}
-	return a.GetGlobalTokenUsage(activeMessages, allowedTools)
+	pTok, _, est := a.GetGlobalTokenUsage(activeMessages, allowedTools)
+	globalOut := a.GetSessionTotalCompletionTokens(activeMessages)
+	return pTok, globalOut, est
 }
 
 func (r *approvalByteReader) Read(p []byte) (int, error) {
@@ -552,8 +554,17 @@ func (ki *keyInterceptorReader) redrawTypeAhead() {
 	if ki.mam != nil && ki.mam.ActiveAgent != nil {
 		promptPrefix = fmt.Sprintf("[%s]%s", ki.mam.ActiveAgent.Name, promptPrefix)
 	}
+
+	qLen := ki.QueueLen()
+	queuePrefix := ""
+	fullPrefixPlain := promptPrefix
+	if qLen > 0 {
+		queuePrefix = style.NewStyle().Foreground(activeTheme.Highlight).Bold(true).Render(fmt.Sprintf("[queue: %d] ", qLen))
+		fullPrefixPlain = fmt.Sprintf("[queue: %d] %s", qLen, promptPrefix)
+	}
+
 	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
-	promptStr := promptStyle.Render(promptPrefix)
+	promptStr := queuePrefix + promptStyle.Render(promptPrefix)
 
 	termW, height := getTerminalSize()
 	if height <= 0 {
@@ -565,7 +576,7 @@ func (ki *keyInterceptorReader) redrawTypeAhead() {
 	pasteLinesOffset := getUI().PasteLinesOffset
 	getUI().StateMu.Unlock()
 
-	prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+	prefixLen := utf8.RuneCountInString(stripAnsi(fullPrefixPlain))
 	availableWidth := termW - prefixLen - 1
 	if availableWidth < 1 {
 		availableWidth = 1
@@ -1297,6 +1308,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					kiReader.typeAheadBuffer = nil
 					getUI().StateMu.Unlock()
 					cleared := kiReader.ClearQueue()
+					getUI().StateMu.Lock()
+					getUI().State.QueuedPromptsCount = 0
+					getUI().StateMu.Unlock()
+					activeTheme := GetConfiguredTheme(kiReader.agent.Config)
+					DrawStatusBar(os.Stderr, activeTheme)
 					if cleared > 0 {
 						output := kiReader.w
 						if kiReader.agent != nil && kiReader.agent.CurrentWriter != nil {
@@ -1306,7 +1322,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 								output = uiImpl.ppWriter
 							}
 						}
-						activeTheme := GetConfiguredTheme(kiReader.agent.Config)
 						qStyle := style.NewStyle().Foreground(activeTheme.Border).Italic(true)
 						fmt.Fprintf(output, "\n%s\n", qStyle.Render(fmt.Sprintf("[Queue cleared: %d item(s)]", cleared)))
 					}
@@ -1336,6 +1351,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 							kiReader.typeAheadBuffer = nil
 							getUI().StateMu.Unlock()
 							kiReader.ClearQueue()
+							getUI().StateMu.Lock()
+							getUI().State.QueuedPromptsCount = 0
+							getUI().StateMu.Unlock()
+							activeTheme := GetConfiguredTheme(kiReader.agent.Config)
+							DrawStatusBar(os.Stderr, activeTheme)
 						}
 					}
 					continue
@@ -1379,23 +1399,12 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					trimmed := strings.TrimSpace(typed)
 					if trimmed != "" {
 						count := kiReader.EnqueuePrompt(trimmed)
-						kiReader.redrawTypeAhead()
-
-						output := kiReader.w
-						if kiReader.agent != nil && kiReader.agent.CurrentWriter != nil {
-							output = kiReader.agent.CurrentWriter
-						} else if kiReader.agent != nil {
-							if uiImpl, ok := kiReader.agent.UI.(*AgentUIImpl); ok && uiImpl.ppWriter != nil {
-								output = uiImpl.ppWriter
-							}
-						}
+						getUI().StateMu.Lock()
+						getUI().State.QueuedPromptsCount = count
+						getUI().StateMu.Unlock()
 						activeTheme := GetConfiguredTheme(kiReader.agent.Config)
-						qStyle := style.NewStyle().Foreground(activeTheme.Secondary).Italic(true)
-						preview := trimmed
-						if len(preview) > 60 {
-							preview = preview[:57] + "..."
-						}
-						fmt.Fprintf(output, "\n%s\n", qStyle.Render(fmt.Sprintf("✦ Queued (%d): %s", count, preview)))
+						DrawStatusBar(os.Stderr, activeTheme)
+						kiReader.redrawTypeAhead()
 					} else {
 						kiReader.redrawTypeAhead()
 					}
@@ -1428,6 +1437,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	}
 
 	initialPromptTokens, initialCompletionTokens, initialTokensEstimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
+	latestTurnTokens := a.GetLatestAssistantCompletionTokens(messages)
 
 	PrintBanner(ppWriter, a)
 	if len(messages) > 1 {
@@ -1435,7 +1445,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	}
 
 	SetCollapseStatus(a.Config.CollapseResults)
-	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, initialTokensEstimated)
+	UpdateStatus(a.Config.Model, initialPromptTokens, initialCompletionTokens, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, initialTokensEstimated)
 	DrawStaticPromptSeparator(os.Stderr, a.Config.ShowThinking, a.Config.ReasoningEffort, theme)
 	getUI().StateMu.Lock()
 	savedStats := getUI().LastStatsText
@@ -1496,6 +1506,10 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		} else if queued, ok := kiReader.DequeuePrompt(); ok {
 			line = queued
 			fromQueue = true
+			getUI().StateMu.Lock()
+			getUI().State.QueuedPromptsCount = kiReader.QueueLen()
+			getUI().StateMu.Unlock()
+			DrawStatusBar(os.Stderr, theme)
 		} else {
 			kiReader.Drain()
 
@@ -1791,7 +1805,15 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 		promptStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 		if fromQueue {
-			queueBadge := style.NewStyle().Foreground(theme.Secondary).Italic(true).Render(" [queued]")
+			remaining := 0
+			if kiReader != nil {
+				remaining = kiReader.QueueLen()
+			}
+			queueInfo := " [from queue]"
+			if remaining > 0 {
+				queueInfo = fmt.Sprintf(" [from queue - %d remaining]", remaining)
+			}
+			queueBadge := style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(queueInfo)
 			fmt.Fprintf(ppWriter, "%s%s%s\n", promptStyle.Render(promptPrefix), line, queueBadge)
 		} else {
 			fmt.Fprintf(ppWriter, "%s%s\n", promptStyle.Render(promptPrefix), line)
@@ -1848,7 +1870,8 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 		}
 		pTok, cTok, estimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
-		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
+		latestTurnTokens := a.GetLatestAssistantCompletionTokens(messages)
+		UpdateStatus(a.Config.Model, pTok, cTok, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
 		refreshConsoleAfterTurn(os.Stderr, a, kiReader, rl)
 	}
 
@@ -1956,8 +1979,20 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 	if kiReader != nil && kiReader.mam != nil && kiReader.mam.ActiveAgent != nil {
 		promptPrefix = fmt.Sprintf("[%s]%s", kiReader.mam.ActiveAgent.Name, promptPrefix)
 	}
+
+	qLen := 0
+	if kiReader != nil {
+		qLen = kiReader.QueueLen()
+	}
+	queuePrefix := ""
+	fullPrefixPlain := promptPrefix
+	if qLen > 0 {
+		queuePrefix = style.NewStyle().Foreground(activeTheme.Highlight).Bold(true).Render(fmt.Sprintf("[queue: %d] ", qLen))
+		fullPrefixPlain = fmt.Sprintf("[queue: %d] %s", qLen, promptPrefix)
+	}
+
 	promptStyle := style.NewStyle().Foreground(activeTheme.Primary).Bold(true)
-	promptStr := promptStyle.Render(promptPrefix)
+	promptStr := queuePrefix + promptStyle.Render(promptPrefix)
 
 	getUI().StateMu.Lock()
 	inApproval := getUI().InApprovalPrompt
@@ -1982,7 +2017,7 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 	inputLine = strings.ReplaceAll(inputLine, "\r", "")
 	inputLine, posOffset = normalizeHistoryInput(inputLine, posOffset)
 
-	layout := CalculatePromptLayout(promptPrefix, inputLine, posOffset, termW)
+	layout := CalculatePromptLayout(fullPrefixPlain, inputLine, posOffset, termW)
 
 	getUI().StateMu.Lock()
 	oldOffset := getUI().PasteLinesOffset
@@ -2027,7 +2062,7 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 		var pBuf bytes.Buffer
 
 		if len(lines) > 1 {
-			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			prefixLen := utf8.RuneCountInString(stripAnsi(fullPrefixPlain))
 			indent := strings.Repeat(" ", prefixLen)
 			for i, line := range lines {
 				row := promptStartRow + i
@@ -2043,7 +2078,7 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 				pBuf.WriteString(line)
 			}
 		} else {
-			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			prefixLen := utf8.RuneCountInString(stripAnsi(fullPrefixPlain))
 			availWidth := termW - prefixLen - 1
 			if availWidth < 10 {
 				availWidth = 10
@@ -2084,7 +2119,7 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 		if drawPrompt {
 			fmt.Fprintf(&pBuf, "\x1b[%d;%dH\x1b[?25h", cursorRow, layout.CursorCol)
 		} else {
-			prefixLen := utf8.RuneCountInString(stripAnsi(promptPrefix))
+			prefixLen := utf8.RuneCountInString(stripAnsi(fullPrefixPlain))
 			promptCol := 1 + prefixLen
 			fmt.Fprintf(&pBuf, "\x1b[%d;%dH", promptStartRow, promptCol)
 		}
@@ -2196,8 +2231,9 @@ func redrawScreenWithNotice(w io.Writer, a *agent.Agent, kiReader *keyIntercepto
 		mam = kiReader.mam
 	}
 	pTok, cTok, estimated := calculateActiveTokenUsage(a, activeMessagesForTokens, activeToolAllowlist(kiReader), mam)
+	latestTurnTokens := a.GetLatestAssistantCompletionTokens(activeMessagesForTokens)
 
-	UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
+	UpdateStatus(a.Config.Model, pTok, cTok, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens, estimated)
 
 	drawConsoleStaticControlsLocked(cwFinal, a, kiReader, rl, true)
 
