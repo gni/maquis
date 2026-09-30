@@ -33,7 +33,7 @@ func (t *readTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "read",
-			Description: "Read the contents of a file. If the file is truncated, you MUST call this tool again with the 'offset' parameter to read the remaining contents.",
+			Description: "Read lines of a file using optional 'offset' and 'limit'. To locate a function, class, or symbol, use 'grep' first to get the line number, then use 'read' with 'offset' and 'limit' around that section instead of reading the entire file.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -43,11 +43,11 @@ func (t *readTool) Definition() Tool {
 					},
 					"offset": {
 						Type:        "number",
-						Description: "Line number to start reading from (1-indexed, optional).",
+						Description: "Line number to start reading from (1-indexed). Use with limit to view targeted sections.",
 					},
 					"limit": {
 						Type:        "number",
-						Description: "Maximum number of lines to read (optional).",
+						Description: "Maximum number of lines to read (e.g. 50-100 lines).",
 					},
 				},
 				Required: []string{"path"},
@@ -269,7 +269,7 @@ func (t *editTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "edit",
-			Description: "Edit one file using exact, unique search-and-replace blocks copied from the latest read. If oldText is stale, read the file again and retry a smaller unique block instead of overwriting the whole file.",
+			Description: "Edit one file using exact, unique search-and-replace blocks copied from the latest read. Target only the necessary element being modified with a small, focused block instead of rewriting untouched code. If oldText is stale, read the file again and retry a smaller unique block instead of overwriting the whole file.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{

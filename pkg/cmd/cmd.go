@@ -237,6 +237,14 @@ var rootCmd = &cobra.Command{
 				messages = []db.Message{
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
+			} else if messages[0].Role == "system" {
+				currentSysPrompt := a.GetSystemPrompt()
+				if messages[0].Content != currentSysPrompt {
+					messages[0].Content = currentSysPrompt
+					if sessionID != "" {
+						_ = db.RewriteSession(sessionID, messages)
+					}
+				}
 			}
 
 			a.RunAgentLoop(context.Background(), os.Stdout, &messages, prompt, allowedTools, theme, true, sessionID)

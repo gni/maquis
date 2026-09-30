@@ -132,6 +132,7 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewReadTool())
 	a.Registry.Register(tool.NewWriteTool())
 	a.Registry.Register(tool.NewEditTool())
+	a.Registry.Register(tool.NewGrepTool())
 	a.Registry.Register(tool.NewLoadSkillTool())
 	a.Registry.Register(tool.NewTaskStatusTool())
 	a.Registry.Register(tool.NewTaskKillTool())
@@ -287,7 +288,7 @@ func (a *Agent) SafePath(inputPath string) (string, error) {
 	return cleanTarget, nil
 }
 
-func (a *Agent) compressHistory(
+func (a *Agent) CompressHistory(
 	ctx context.Context,
 	messages *[]db.Message,
 	sessionID string,
@@ -301,6 +302,7 @@ func (a *Agent) compressHistory(
 
 	keepIdx := len(*messages) - keepMsgCount
 	if keepIdx <= 1 {
+		fmt.Fprintln(w, "conversation is already compact (too few messages to compress).")
 		return
 	}
 
@@ -353,7 +355,14 @@ func (a *Agent) compressHistory(
 
 	transcript := transcriptBuilder.String()
 	summaryPrompt := fmt.Sprintf(
-		"Summarize the following developer-agent conversation transcript, preserving all key actions, decisions, file modifications, tool outputs, and technical findings in a highly concise technical summary. Format as a brief technical log:\n\n%s",
+		"You are a technical context compression engine. Summarize the following developer-agent conversation transcript into a dense, high-signal technical log.\n\n"+
+			"Strict Requirements:\n"+
+			"1. User Goals & Constraints: Exact requirements, architectural preferences, and explicit rules stated by the user.\n"+
+			"2. Actions & Findings: Search results, files located or inspected, and diagnostic findings.\n"+
+			"3. File Modifications: Exact paths modified or created, and key symbols added or updated.\n"+
+			"4. Current State: What is complete, what failed, and immediate pending tasks.\n"+
+			"5. No pleasantries, preambles, or filler. Output only the structured technical summary.\n\n"+
+			"Transcript:\n%s",
 		transcript,
 	)
 

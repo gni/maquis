@@ -65,6 +65,16 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		}
 	}()
 
+	if len(*messages) > 0 && (*messages)[0].Role == "system" {
+		currentSysPrompt := a.GetSystemPrompt()
+		if (*messages)[0].Content != currentSysPrompt {
+			(*messages)[0].Content = currentSysPrompt
+			if sessionID != "" {
+				_ = db.RewriteSession(sessionID, *messages)
+			}
+		}
+	}
+
 	*messages = append(*messages, db.Message{Role: "user", Content: prompt})
 	if sessionID != "" {
 		if !db.HasMessages(sessionID) {
@@ -232,7 +242,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		globalPromptTokens, _ := a.GetGlobalTokens(*messages, allowlist)
 		globalCompletionTokens := a.GetSessionTotalCompletionTokens(*messages)
 		if totalTokens := globalPromptTokens + assistantMsg.CompletionTokens; totalTokens >= int(a.Config.CompressionThreshold*float64(a.Config.ContextWindowLimit)) {
-			a.compressHistory(ctx, messages, sessionID, theme, writerToUse)
+			a.CompressHistory(ctx, messages, sessionID, theme, writerToUse)
 		}
 
 		var finalTps float64
@@ -373,7 +383,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 
 				// Update agent state
-				isReadOnlyTool := tc.Function.Name == "read"
+				isReadOnlyTool := tc.Function.Name == "read" || tc.Function.Name == "grep"
 				isPrevEdit := a.lastToolWasEdit
 				if !isReadOnlyTool || !isPrevEdit || a.lastToolOutput == "" {
 					a.lastToolOutput = toolOutput
@@ -685,7 +695,7 @@ func (f *fallbackStreamRenderer) GetReasoningDuration() float64 { return 0 }
 func (f *fallbackStreamRenderer) SetPrompt(prompt string)       {}
 
 func isReadOnly(toolName string) bool {
-	return toolName == "read" || toolName == "task_status"
+	return toolName == "read" || toolName == "task_status" || toolName == "grep"
 }
 
 func getTerminalSize() (int, int) {

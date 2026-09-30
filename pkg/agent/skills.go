@@ -250,9 +250,16 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 	}
 
 	if cfg.CompactPrompt {
+		baseInstruction := cfg.BaseInstruction
+		if idx := strings.Index(baseInstruction, "\nGuidelines:\n"); idx != -1 {
+			baseInstruction = strings.TrimSpace(baseInstruction[:idx])
+		}
+
 		thinkingGuidelines := fmt.Sprintf("\n\nThinking Guidelines:\n"+
-			"- Workspace root: `%s`. Operate as a senior human engineer for coding tasks or a direct assistant for general requests. Only invoke workspace tools (read, write, edit, bash) when explicitly needed to interact with the workspace or when implementing changes requested by the user. Do not call tools for general discussions, explanations, creative writing, poetry, or architectural questions.\n"+
-			"- Before editing a file, read it first to verify its content and avoid replace errors.\n"+
+			"- Workspace root: `%s`. Operate as a senior human engineer for coding tasks or a direct assistant for general requests. Only invoke workspace tools (read, write, edit, grep, bash) when explicitly needed to interact with the workspace or when implementing changes requested by the user. Do not call tools for general discussions, explanations, creative writing, poetry, or architectural questions.\n"+
+			"- Search before read: always use 'grep' first to locate the target function, symbol, or line number. Never read entire files just to locate or modify a specific element.\n"+
+			"- Windowed reading: inspect code narrowly using 'read' with 'offset' and 'limit' (30-50 lines) around the target section. Avoid reading full files into context.\n"+
+			"- Surgical edits: modify only the necessary element using 'edit' with a small, unique 'oldText' block (2-6 lines). Do not rewrite untouched code.\n"+
 			"- If edit reports an oldText mismatch, read the latest file and retry a smaller exact unique block. Never recover by overwriting the existing file with write.\n"+
 			"- Omit explanation text or thinking before calling a tool. Invoke the tool immediately.\n"+
 			"- If native tool calling fails, output: `<tool_call name=\"tool_name\">arguments_or_raw_text</tool_call>` inside your response text.\n"+
@@ -263,7 +270,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 			workspaceRoot)
 
 		var sb strings.Builder
-		sb.WriteString(cfg.BaseInstruction + thinkingGuidelines)
+		sb.WriteString(baseInstruction + thinkingGuidelines)
 		sb.WriteString(subagentSkillGuidance(skillsForGuidance))
 		if cfg.MemoryContext != "" {
 			sb.WriteString(cfg.MemoryContext)
@@ -273,13 +280,15 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	thinkingGuidelines := fmt.Sprintf("\n\nThinking/Reasoning Guidelines:\n"+
 		"- You are running in the workspace directory: `%s`. Any relative file paths you access or create must resolve relative to this directory. You must only read, edit, write, or list files inside this workspace directory tree.\n"+
-		"- Operate as a senior human software engineer for coding tasks or a direct assistant for general requests. Only invoke workspace tools (read, write, edit, bash) when explicitly needed to interact with the workspace or when implementing changes requested by the user. Do not call tools for general discussions, explanations, creative writing, poetry, or architectural questions. Every development step must be executed with senior human craft, precision, zero truncation, and security.\n"+
-		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\"}</tool_call>`.\n"+
-		"- For direct shell commands and read/write/edit tools, you MUST NOT write any internal thought process, reasoning, or text explanations before calling the tool. Invoke the tool immediately with zero reasoning tokens.\n"+
-		"- Before editing or modifying a file, you MUST read the file (or the relevant part of it) first to ensure your edits match the current content exactly and avoid \"oldText block not found\" errors.\n"+
+		"- Operate as a senior human software engineer for coding tasks or a direct assistant for general requests. Only invoke workspace tools (read, write, edit, grep, bash) when explicitly needed to interact with the workspace or when implementing changes requested by the user. Do not call tools for general discussions, explanations, creative writing, poetry, or architectural questions. Every development step must be executed with senior human craft, precision, zero truncation, and security.\n"+
+		"- Fallback Tool Execution Format: If your environment does not support native tool-calling structures, or as a reliable fallback, you can invoke tools by wrapping your tool call in explicit XML tags directly within your message content: `<tool_call name=\"tool_name\">arguments_json_or_raw_text</tool_call>`. For example: `<tool_call name=\"bash\">go test ./...</tool_call>` or `<tool_call name=\"grep\">{\"pattern\": \"MyFunc\"}</tool_call>` or `<tool_call name=\"read\">{\"path\": \"main.go\", \"offset\": 50, \"limit\": 30}</tool_call>`.\n"+
+		"- Tool Call Directness: You MUST NOT output conversational preambles, introductory text, explanations, or warnings before calling a tool. The tool call must be the absolute first content in your response.\n"+
+		"- Internal Thoughts: Keep all internal thoughts extremely short (1 to 2 sentences max) and strictly restricted to immediate technical execution planning. Avoid conversational monologues, introspective reflections, or debating choices in thoughts.\n"+
+		"- Search First Workflow: When asked to find, view, or modify an existing function, class, configuration, or element, ALWAYS use the 'grep' tool first to find its exact file and line number. NEVER invoke 'read' on entire large files to search for code.\n"+
+		"- Windowed Reading: When inspecting code around a target element found by grep, use 'read' with 'offset' (line number) and 'limit' (e.g. 30 to 50 lines) to view only the relevant surrounding lines. Do not read the entire file into context.\n"+
+		"- Surgical Modifications: When editing code, modify ONLY the necessary element. Keep 'oldText' as compact as possible while remaining unique (typically 2 to 6 lines). Target a smaller block copied from the latest read. Never replace entire files or functions when only modifying a specific line, parameter, or return value.\n"+
+		"- Before editing or modifying a file, read only the target section around the element first to ensure your edits match the current content exactly and avoid \"oldText block not found\" errors.\n"+
 		"- If edit reports an oldText mismatch, read the latest file and retry a smaller exact unique block. Never recover by overwriting the existing file with write.\n"+
-		"- Keep all internal thoughts extremely short (under 2-3 sentences max) and strictly restricted to immediate technical execution planning. Avoid conversational monologues, introspective reflections, or debating choices in thoughts.\n"+
-		"- You MUST NOT output any conversational preambles, introductory text, explanations, or warnings before calling a tool. The tool call must be the absolute first content you generate.\n"+
 		"- For greetings, basic chit-chat, or simple acknowledgments, respond immediately with zero reasoning and minimal text. Do NOT call any tools for social replies.\n"+
 		"- Do NOT summarize, paraphrase, or quote tool outputs (such as command output, file reads, or directory listings) in your final response. The user already sees them in the terminal. Simply provide your next direct action or instruction.\n"+
 		"- When calling tools, you MUST always output the 'path' or 'command' argument first in the JSON payload, before 'content' or 'edits'. This is critical for live streaming visual terminal formatting.\n"+
@@ -292,41 +301,24 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		workspaceRoot)
 
 	skillsInfo := fmt.Sprintf("\n\nSkills System (Reference Guides):\n"+
-		"- You can create or modify skills (reference guides) for yourself or other agents. Skills are stored as Markdown files in the configured skills directory: `%s`.\n"+
-		"- To create a new skill, write a Markdown file in that directory (e.g. `%s/my-skill.md`) containing a YAML frontmatter block at the very top:\n"+
-		"  ---\n"+
-		"  name: my-skill\n"+
-		"  description: A brief description of what this skill does\n"+
-		"  ---\n"+
-		"  followed by your markdown formatted technical guidance and instructions.\n"+
-		"- Newly created skills will automatically be discoverable by you and all subagents via the 'load_skill' tool, and can be assigned when spawning new subagents.",
+		"- Installed reference skills are stored in `%s`. Use the 'load_skill' tool to read detailed instructions for any installed skill.\n"+
+		"- To create a new reference skill, write a markdown file in `%s/<name>.md` with YAML frontmatter (name, description) followed by guidance.\n"+
+		"- Newly created skills will automatically be discoverable by you and all subagents via 'load_skill'.",
 		skillsDir, skillsDir)
 
-	var swarmInfo string
+	var swarmInfo strings.Builder
+	swarmInfo.WriteString("\n\nMulti-Agent Swarm System (Subagents):\n")
 	if len(cfg.ActiveAgents) > 0 {
-		swarmInfo = fmt.Sprintf("\n\nMulti-Agent Swarm System (Subagents):\n"+
-			"- Active spawned subagents in the swarm: %s\n"+
-			"- You can spawn specialized subagents to delegate subtasks to them using the 'spawn_subagent' tool.\n"+
-			"- IMPORTANT: If a subagent is ALREADY listed in Active spawned subagents above, DO NOT call 'spawn_subagent' again! Invoke its dynamic tool 'subagent__<name>' (e.g. 'subagent__%s') directly to send tasks to it.\n"+
-			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n"+
-			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n"+
-			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n"+
-			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n"+
-			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n"+
-			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.",
-			strings.Join(cfg.ActiveAgents, ", "), cfg.ActiveAgents[0])
+		swarmInfo.WriteString(fmt.Sprintf("- Active spawned subagents in the swarm: %s.\n", strings.Join(cfg.ActiveAgents, ", ")))
+		swarmInfo.WriteString(fmt.Sprintf("- IMPORTANT: Do NOT call 'spawn_subagent' for existing agents. Call their registered dynamic tool directly (e.g. 'subagent__%s').\n", cfg.ActiveAgents[0]))
 	} else {
-		swarmInfo = "\n\nMulti-Agent Swarm System (Subagents):\n" +
-			"- You can spawn specialized subagents to delegate subtasks to them using the 'spawn_subagent' tool.\n" +
-			"- Once spawned, a new tool named 'subagent__<name>' (e.g. 'subagent__coder') is dynamically registered for you.\n" +
-			"- You can delegate prompts/tasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n" +
-			"- You can view the tree hierarchy of all active spawned subagents and their loaded skills by calling the 'swarm_topology' tool.\n" +
-			"- You can remove any running subagent by calling the 'remove_subagent' tool with its name.\n" +
-			"- You can audit the exact step-by-step actions, thoughts, and tool executions of a subagent by calling the 'swarm_audit' tool with its name.\n" +
-			"- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate."
+		swarmInfo.WriteString("- You can spawn specialized subagents using 'spawn_subagent'. Each spawned subagent dynamically registers a 'subagent__<name>' tool.\n")
 	}
+	swarmInfo.WriteString("- Delegate subtasks to a spawned subagent by invoking its dynamic 'subagent__<name>' tool with the task content. This blocks and runs the subagent in a separate context, returning their final response to you.\n")
+	swarmInfo.WriteString("- Use 'swarm_topology' to view active subagents, 'swarm_audit' to inspect their execution trace, and 'remove_subagent' to terminate them.\n")
+	swarmInfo.WriteString("- Use subagents to break down complex tasks, delegate domain-specific duties (like writing code, running tests, or doing research), and parallelize work when appropriate.")
 
-	basePrompt := cfg.BaseInstruction + thinkingGuidelines + skillsInfo + swarmInfo
+	basePrompt := cfg.BaseInstruction + thinkingGuidelines + skillsInfo + swarmInfo.String()
 
 	var sb strings.Builder
 	sb.WriteString(basePrompt)

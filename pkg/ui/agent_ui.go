@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"maquis/pkg/agent"
 	"maquis/pkg/config"
@@ -33,6 +34,9 @@ type AgentUIImpl struct {
 	LastStatsText        string
 	LastStatusBarText    string
 	IsInteractive        bool
+	PromptHint           string
+	LastCtrlD            time.Time
+	CtrlDTimer           *time.Timer
 	TriggerRedraw        func()
 
 	StateMu    sync.Mutex
@@ -167,3 +171,61 @@ func (ui *AgentUIImpl) SetCursorHidden(hidden bool) {
 		ui.ppWriter.SetCursorHidden(hidden)
 	}
 }
+
+// SetPromptHint sets a transient hint message to be displayed at the prompt,
+// optionally scheduling a timer to clear the hint and call onExpire if not cancelled.
+func (ui *AgentUIImpl) SetPromptHint(hint string, d time.Duration, onExpire func()) {
+	ui.StateMu.Lock()
+	defer ui.StateMu.Unlock()
+	if ui.CtrlDTimer != nil {
+		ui.CtrlDTimer.Stop()
+		ui.CtrlDTimer = nil
+	}
+	ui.PromptHint = hint
+	ui.LastCtrlD = time.Now()
+	if d > 0 && onExpire != nil {
+		targetTime := ui.LastCtrlD
+		ui.CtrlDTimer = time.AfterFunc(d, func() {
+			ui.StateMu.Lock()
+			if ui.LastCtrlD.Equal(targetTime) {
+				ui.PromptHint = ""
+				ui.LastCtrlD = time.Time{}
+				ui.CtrlDTimer = nil
+				ui.StateMu.Unlock()
+				onExpire()
+			} else {
+				ui.StateMu.Unlock()
+			}
+		})
+	}
+}
+
+// ClearPromptHint cancels any active prompt hint and timer immediately.
+func (ui *AgentUIImpl) ClearPromptHint() {
+	ui.StateMu.Lock()
+	defer ui.StateMu.Unlock()
+	if ui.CtrlDTimer != nil {
+		ui.CtrlDTimer.Stop()
+		ui.CtrlDTimer = nil
+	}
+	ui.PromptHint = ""
+	ui.LastCtrlD = time.Time{}
+}
+
+// CheckCtrlDConfirmation checks if Ctrl+D was pressed within the timeout window.
+// If confirmed, it clears the hint state and returns true.
+func (ui *AgentUIImpl) CheckCtrlDConfirmation(timeout time.Duration) bool {
+	ui.StateMu.Lock()
+	defer ui.StateMu.Unlock()
+	if !ui.LastCtrlD.IsZero() && time.Since(ui.LastCtrlD) <= timeout {
+		if ui.CtrlDTimer != nil {
+			ui.CtrlDTimer.Stop()
+			ui.CtrlDTimer = nil
+		}
+		ui.PromptHint = ""
+		ui.LastCtrlD = time.Time{}
+		return true
+	}
+	return false
+}
+

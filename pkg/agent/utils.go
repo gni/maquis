@@ -23,7 +23,7 @@ func (a *Agent) LoadMemoryContext() string {
 		if data, err := os.ReadFile(globalPath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if len(trimmed) > 0 {
-				sb.WriteString(fmt.Sprintf("\n\n--- Global Memory & Personalization Context (%s) ---\n%s\n--- End Global Memory ---", globalPath, trimmed))
+				sb.WriteString(fmt.Sprintf("\n\nUser Directives (%s):\nAdhere to these global preferences and personal mandates strictly:\n%s", globalPath, trimmed))
 			}
 		}
 	}
@@ -38,7 +38,7 @@ func (a *Agent) LoadMemoryContext() string {
 			if data, err := os.ReadFile(projectPath); err == nil {
 				trimmed := strings.TrimSpace(string(data))
 				if len(trimmed) > 0 {
-					sb.WriteString(fmt.Sprintf("\n\n--- Project Memory & Learnings (%s) ---\n%s\n--- End Project Memory ---", projectPath, trimmed))
+					sb.WriteString(fmt.Sprintf("\n\nProject Architecture & Learnings (%s):\nFollow these repository conventions and architectural decisions strictly:\n%s", projectPath, trimmed))
 				}
 				break
 			}
@@ -47,7 +47,7 @@ func (a *Agent) LoadMemoryContext() string {
 			if data, err := os.ReadFile(projectDotPath); err == nil {
 				trimmed := strings.TrimSpace(string(data))
 				if len(trimmed) > 0 {
-					sb.WriteString(fmt.Sprintf("\n\n--- Project Memory & Learnings (%s) ---\n%s\n--- End Project Memory ---", projectDotPath, trimmed))
+					sb.WriteString(fmt.Sprintf("\n\nProject Architecture & Learnings (%s):\nFollow these repository conventions and architectural decisions strictly:\n%s", projectDotPath, trimmed))
 				}
 				break
 			}
@@ -226,6 +226,8 @@ func buildToolCall(name string, args string) db.ToolCall {
 			finalArgs = fmt.Sprintf(`{"command": %s}`, escapedArgsStr)
 		case name == "read":
 			finalArgs = fmt.Sprintf(`{"path": %s}`, escapedArgsStr)
+		case name == "grep":
+			finalArgs = fmt.Sprintf(`{"pattern": %s}`, escapedArgsStr)
 		case name == "load_skill":
 			finalArgs = fmt.Sprintf(`{"name": %s}`, escapedArgsStr)
 		case name == "task_status" || name == "task_kill":

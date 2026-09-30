@@ -39,7 +39,7 @@ type jsonStreamParser struct {
 }
 
 func (p *jsonStreamParser) needsPath() bool {
-	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "bash" || p.activeToolName == "ls" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
+	return p.activeToolName == "read" || p.activeToolName == "write" || p.activeToolName == "edit" || p.activeToolName == "grep" || p.activeToolName == "bash" || p.activeToolName == "ls" || p.activeToolName == "spawn_subagent" || p.activeToolName == "load_skill" || p.activeToolName == "task_status" || p.activeToolName == "task_kill" || strings.HasPrefix(p.activeToolName, "subagent__")
 }
 
 type parserWriter struct {
@@ -184,7 +184,7 @@ func (p *jsonStreamParser) feed(chunk string, w io.Writer, theme UITheme) {
 			} else if char == ':' {
 				p.inValue = true
 				isBashOrCmd := (p.currentKey == "command" || p.currentKey == "CommandLine") && (p.activeToolName == "bash" || p.activeToolName == "ls" || strings.Contains(p.activeToolName, "command") || strings.Contains(p.activeToolName, "exec") || strings.Contains(p.activeToolName, "run"))
-				isPathKey := p.currentKey == "path" || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" || p.currentKey == "task_id" || p.currentKey == "AbsolutePath" || p.currentKey == "TargetFile" || isBashOrCmd
+				isPathKey := p.currentKey == "path" || p.currentKey == "pattern" || p.currentKey == "name" || p.currentKey == "id" || p.currentKey == "prompt" || p.currentKey == "task_id" || p.currentKey == "AbsolutePath" || p.currentKey == "TargetFile" || isBashOrCmd
 				if isPathKey {
 					p.isPath = true
 				} else if p.currentKey == "write_content" || p.currentKey == "content" || strings.Contains(p.currentKey, "Content") || p.currentKey == "code" {

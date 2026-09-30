@@ -204,11 +204,27 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		apiMessages = validMessages
 	}
 
+	cleanMessages := make([]db.Message, 0, len(apiMessages))
+	cutoff := len(apiMessages) - 6
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	for i, m := range apiMessages {
+		msgCopy := m
+		// Omit historical reasoning content from outgoing API messages; saves thousands of prompt tokens per turn.
+		msgCopy.ReasoningContent = ""
+		// Prune older tool outputs beyond the recent turn window to prevent context blowouts while keeping recent ones intact.
+		if m.Role == "tool" && i < cutoff && len(m.Content) > 1000 {
+			msgCopy.Content = m.Content[:1000] + "\n... (output truncated for context optimization)"
+		}
+		cleanMessages = append(cleanMessages, msgCopy)
+	}
+
 	finalTools := prepareToolDefinitions(tools, p.Config.CompactPrompt)
 
 	reqBody := ChatCompletionRequest{
 		Model:       p.Config.Model,
-		Messages:    apiMessages,
+		Messages:    cleanMessages,
 		Tools:       finalTools,
 		Temperature: p.Config.Temperature,
 		Stream:      true,
@@ -681,7 +697,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["background"] = prop
 		}
 	case "read":
-		compressed.Function.Description = "Read file lines. Read full contents when preparing to edit."
+		compressed.Function.Description = "Read file lines with offset and limit. Use grep first to locate target lines instead of reading entire files."
 		if compressed.Function.Parameters.Properties != nil {
 			if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 				prop.Description = "File path"
@@ -696,6 +712,38 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 				compressed.Function.Parameters.Properties["limit"] = prop
 			}
 		}
+	case "grep":
+		compressed.Function.Description = "Search for functions, symbols, or regex across files. Use this first to locate elements before editing."
+		if compressed.Function.Parameters.Properties != nil {
+			if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
+				prop.Description = "Search regex or string"
+				compressed.Function.Parameters.Properties["pattern"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+				prop.Description = "Dir or file to search"
+				compressed.Function.Parameters.Properties["path"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["glob"]; ok {
+				prop.Description = "File glob filter (e.g. *.go)"
+				compressed.Function.Parameters.Properties["glob"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["ignore_case"]; ok {
+				prop.Description = "Case-insensitive"
+				compressed.Function.Parameters.Properties["ignore_case"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["literal"]; ok {
+				prop.Description = "Literal string search"
+				compressed.Function.Parameters.Properties["literal"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["context"]; ok {
+				prop.Description = "Surrounding context lines"
+				compressed.Function.Parameters.Properties["context"] = prop
+			}
+			if prop, ok := compressed.Function.Parameters.Properties["limit"]; ok {
+				prop.Description = "Max matches"
+				compressed.Function.Parameters.Properties["limit"] = prop
+			}
+		}
 	case "write":
 		compressed.Function.Description = "Create or intentionally replace a complete file. Never use after an edit mismatch."
 		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
@@ -707,7 +755,7 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["write_content"] = prop
 		}
 	case "edit":
-		compressed.Function.Description = "Replace exact unique blocks copied from the latest read. On mismatch, read again and retry a smaller block."
+		compressed.Function.Description = "Replace exact unique blocks copied from the latest read. Target only the necessary element using a smaller block. Never overwrite whole files."
 		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 			prop.Description = "File path"
 			compressed.Function.Parameters.Properties["path"] = prop

@@ -787,6 +787,23 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 				cursorCol = prefixLen + (pos - start) + 1
 			}
 
+			hintText := ""
+			getUI().StateMu.Lock()
+			hint := getUI().PromptHint
+			getUI().StateMu.Unlock()
+			if displayStr != "" {
+				if hint != "" {
+					getUI().ClearPromptHint()
+				}
+			} else if hint != "" {
+				hintRunes := []rune(hint)
+				if len(hintRunes) > availWidth && availWidth > 5 {
+					hint = string(hintRunes[:availWidth])
+				}
+				hintStyle := style.NewStyle().Foreground(activeTheme.Border).Italic(true)
+				hintText = hintStyle.Render(hint)
+			}
+
 			var buf bytes.Buffer
 			cursorVisibility := "\x1b[?25h"
 			if ki.agent != nil && ki.agent.CurrentWriter != nil {
@@ -794,8 +811,10 @@ func (ki *keyInterceptorReader) Write(p []byte) (int, error) {
 					cursorVisibility = "\x1b[?25l"
 				}
 			}
-			fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s%s\x1b[%d;%dH%s", height-2, promptStr, displayStr, height-2, cursorCol, cursorVisibility)
+			fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K%s%s%s\x1b[%d;%dH%s", height-2, promptStr, displayStr, hintText, height-2, cursorCol, cursorVisibility)
+			TerminalMu.Lock()
 			_, _ = ki.writeToTerminal(buf.Bytes())
+			TerminalMu.Unlock()
 			return len(p), nil
 		}
 	}
@@ -925,6 +944,10 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			b = input
+		}
+
+		if b != 4 {
+			getUI().ClearPromptHint()
 		}
 
 		p[0] = b
@@ -1137,6 +1160,13 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 	var messages []db.Message
 	if dbHistory, err := db.LoadMessages(currentSessionID); err == nil && len(dbHistory) > 0 {
 		messages = dbHistory
+		if len(messages) > 0 && messages[0].Role == "system" {
+			currentSysPrompt := a.GetSystemPrompt()
+			if messages[0].Content != currentSysPrompt {
+				messages[0].Content = currentSysPrompt
+				_ = db.RewriteSession(currentSessionID, messages)
+			}
+		}
 	} else {
 		messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
@@ -1490,8 +1520,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		signal.Stop(sigChan)
 	}()
 
-	var lastCtrlD time.Time
-
 	for {
 		promptPrefix := getPromptSymbol(a.Config)
 		if mam.ActiveAgent != nil {
@@ -1576,7 +1604,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 
 			if kiReader.ctrlCInterrupted {
-				lastCtrlD = time.Time{}
+				getUI().ClearPromptHint()
 				kiReader.ctrlCInterrupted = false
 				kiReader.currentInputLine = ""
 				kiReader.pastedText = ""
@@ -1599,21 +1627,20 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			if err != nil {
 				isEOF := err == io.EOF || errors.Is(err, io.EOF) || strings.Contains(err.Error(), "EOF")
 				if isEOF && term.IsTerminal(fd) {
-					if !lastCtrlD.IsZero() && time.Since(lastCtrlD) <= 3*time.Second {
+					if getUI().CheckCtrlDConfirmation(3 * time.Second) {
 						break
 					}
-					lastCtrlD = time.Now()
 					rl = createTerminal()
-					hintStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-					fmt.Fprintf(ppWriter, "\n%s\n", hintStyle.Render("(Press Ctrl+D again to exit)"))
-					refreshConsoleAfterPromptCancellation(os.Stderr, a, kiReader, rl)
+					getUI().SetPromptHint("(Press Ctrl+D again to exit)", 3*time.Second, func() {
+						refreshConsoleAfterPromptCancellation(os.Stderr, a, kiReader, rl)
+					})
 					continue
 				}
 				break
 			}
 		}
 
-		lastCtrlD = time.Time{}
+		getUI().ClearPromptHint()
 		kiReader.currentInputLine = ""
 		line = hist.GetFull(line)
 		line = strings.ReplaceAll(line, "↵", "\n")
@@ -2128,6 +2155,18 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 			pBuf.WriteString(promptStr)
 			if displayStr != "" {
 				pBuf.WriteString(displayStr)
+			} else {
+				getUI().StateMu.Lock()
+				hint := getUI().PromptHint
+				getUI().StateMu.Unlock()
+				if hint != "" {
+					hintRunes := []rune(hint)
+					if len(hintRunes) > availWidth && availWidth > 5 {
+						hint = string(hintRunes[:availWidth])
+					}
+					hintStyle := style.NewStyle().Foreground(activeTheme.Border).Italic(true)
+					pBuf.WriteString(hintStyle.Render(hint))
+				}
 			}
 		}
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -66,7 +67,7 @@ func HandleSlashCommand(
 			redrawScreen(w, a, nil, nil)
 		}
 		return true, false
-	case "/queue":
+	case "/queue", "/queues":
 		if kiReader == nil {
 			fmt.Fprintln(w, "queue is not available.")
 			return true, false
@@ -90,7 +91,7 @@ func HandleSlashCommand(
 			fmt.Fprintf(w, "  %d. %s\n", i+1, p)
 		}
 		return true, false
-	case "/task":
+	case "/task", "/tasks":
 		if len(parts) < 2 {
 			fmt.Fprintln(w, "usage: /task [list | view <id> | stream <id> | kill <id>]")
 			return true, false
@@ -284,7 +285,7 @@ func HandleSlashCommand(
 	case "/provider", "/providers":
 		HandleProviderCommand(a, parts, messages, *theme, w, kiReader)
 		return true, false
-	case "/skills":
+	case "/skills", "/skill":
 		if len(parts) > 1 && parts[1] == "load" {
 			if len(parts) < 3 {
 				fmt.Fprintln(w, "usage: /skills load <skill-name>")
@@ -391,7 +392,7 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, headerStyle.Render("╰───────────────────────────────────────────────────────────────────────────────────────────────────╯"))
 		}
 		return true, false
-	case "/session":
+	case "/session", "/sessions":
 		if len(parts) > 1 {
 			sub := parts[1]
 			switch sub {
@@ -453,6 +454,13 @@ func HandleSlashCommand(
 						*currentSessionID = selected
 						_ = db.SetLatestSessionID(*currentSessionID)
 						*messages = dbHistory
+						if len(*messages) > 0 && (*messages)[0].Role == "system" {
+							currentSysPrompt := a.GetSystemPrompt()
+							if (*messages)[0].Content != currentSysPrompt {
+								(*messages)[0].Content = currentSysPrompt
+								_ = db.RewriteSession(selected, *messages)
+							}
+						}
 						if kiReader != nil {
 							redrawScreen(w, a, kiReader, kiReader.rl)
 						} else {
@@ -483,6 +491,13 @@ func HandleSlashCommand(
 							*currentSessionID = selected
 							_ = db.SetLatestSessionID(*currentSessionID)
 							*messages = dbHistory
+							if len(*messages) > 0 && (*messages)[0].Role == "system" {
+								currentSysPrompt := a.GetSystemPrompt()
+								if (*messages)[0].Content != currentSysPrompt {
+									(*messages)[0].Content = currentSysPrompt
+									_ = db.RewriteSession(selected, *messages)
+								}
+							}
 						}
 					}
 				}
@@ -516,6 +531,12 @@ func HandleSlashCommand(
 			fmt.Fprintf(w, "active session: %s\n", *currentSessionID)
 			fmt.Fprintln(w, "usage: /session [list | new | load | branch <new_session_id> | clear]")
 		}
+		return true, false
+	case "/compress":
+		a.CompressHistory(context.Background(), messages, *currentSessionID, *theme, w)
+		pTok, cTok, estimated := calcHistoryTokens()
+		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
+		DrawStatusBar(os.Stderr, *theme)
 		return true, false
 	case "/mcp", "/mcps":
 		HandleMCPCommand(a, parts, messages, *theme, w, kiReader)
@@ -720,7 +741,7 @@ func HandleSlashCommand(
 			fmt.Fprintln(w, "reload ok")
 		}
 		return true, false
-	case "/plugins":
+	case "/plugins", "/plugin":
 		executors := a.Registry.GetAllExecutors()
 		var pluginNames []string
 		for name := range executors {
@@ -742,7 +763,7 @@ func HandleSlashCommand(
 			)
 		}
 		return true, false
-	case "/extensions":
+	case "/extensions", "/extension":
 		var dirs []string
 		home, err := os.UserHomeDir()
 		if err == nil {

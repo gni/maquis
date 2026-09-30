@@ -121,24 +121,21 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	fmt.Fprintln(w)
 
 	commands := [][]string{
-		{"/config", "open interactive settings editor"},
-		{"/config show", "display current settings summary"},
-		{"/config set <key> <value>", "modify settings dynamically"},
-		{"/set <key> <value>", "modify settings dynamically (alias)"},
-		{"/session <list/new/load/clear>", "manage persistent chat sessions interactively"},
-		{"/skills", "list all available reference skills"},
-		{"/skills load <name>", "explicitly load a reference skill into the context"},
-		{"/mcp <enable/disable>", "list and toggle mcp servers and active tool schemas"},
+		{"/config [show|set <k> <v>]", "view or modify runtime settings"},
+		{"/session [list|new|load|clear]", "manage persistent conversation sessions"},
 		{"/provider", "manage ai endpoints, keys, and model profiles"},
-		{"/plugins", "list all registered custom plugin tools"},
-		{"/extensions", "list all custom slash command extensions"},
-		{"/reload", "re-scan and hot-reload custom plugins and tools"},
-		{"/agent <list/join/spawn/skill/remove>", "manage multi-agent swarm threads interactively"},
-		{"/task <list/view/stream/remove>", "manage async background tasks"},
-		{"/queue <list/clear>", "view or clear pending queued prompts"},
-		{"/clear", "clear conversation and start a new one"},
-		{"/help, /commands, ?", "display this help menu"},
-		{"/exit, /quit", "exit the maquis CLI application"},
+		{"/skills [load <name>]", "list or load reference skills"},
+		{"/mcp [enable|disable]", "manage and toggle mcp servers"},
+		{"/plugins", "list registered custom tool plugins"},
+		{"/extensions", "list custom slash command extensions"},
+		{"/reload", "hot-reload plugins and extensions"},
+		{"/agent [list|spawn|remove]", "manage multi-agent swarm threads"},
+		{"/task [list|view|stream|kill]", "manage background tasks"},
+		{"/queue [list|clear]", "view or clear queued prompts"},
+		{"/compress", "compress history to reclaim context tokens"},
+		{"/clear", "clear conversation history and start fresh"},
+		{"/help", "display this help menu"},
+		{"/exit", "exit the maquis application"},
 	}
 
 	for _, cmd := range commands {
@@ -495,6 +492,8 @@ func getToolGlyph(toolName string) string {
 	switch {
 	case lower == "read" || strings.Contains(lower, "read") || strings.Contains(lower, "view"):
 		return "◈"
+	case lower == "grep" || strings.Contains(lower, "grep") || strings.Contains(lower, "search"):
+		return "⌕"
 	case lower == "write" || strings.Contains(lower, "write"):
 		return "◆"
 	case lower == "edit" || strings.Contains(lower, "edit") || strings.Contains(lower, "replace") || strings.Contains(lower, "patch"):
