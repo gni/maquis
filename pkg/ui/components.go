@@ -866,9 +866,9 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 			relPath = string(pathRunes[:maxPathRunes-3]) + "..."
 		}
 		if symbol != "" {
-			return fmt.Sprintf("%s %s  %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
+			return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
 		}
-		return fmt.Sprintf("%s  %s", toolStyle.Render(toolName), pathStyle.Render(relPath))
+		return fmt.Sprintf("%s %s", toolStyle.Render(toolName), pathStyle.Render(relPath))
 	}
 
 	if symbol != "" {

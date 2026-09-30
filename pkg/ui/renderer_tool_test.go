@@ -186,7 +186,7 @@ func TestSessionHistoryUsesFinalToolStatus(t *testing.T) {
 	PrintSessionHistory(&output, messages, UITheme{}, &config.Config{})
 
 	rendered := stripAnsi(output.String())
-	if !strings.Contains(rendered, "read  test_security.py") || strings.Contains(rendered, "───") {
+	if !strings.Contains(rendered, "read test_security.py") || strings.Contains(rendered, "───") {
 		t.Fatalf("persisted successful tool header did not use expected format: %q", rendered)
 	}
 }

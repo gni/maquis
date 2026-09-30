@@ -5,6 +5,7 @@ package ui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1428,13 +1429,22 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 	}()
 
-	rl := term.NewTerminal(kiReader, "")
-	kiReader.rl = rl
-	rl.History = hist
-
-	if w, h, err := term.GetSize(fd); err == nil {
-		rl.SetSize(w, h)
+	createTerminal := func() *term.Terminal {
+		t := term.NewTerminal(kiReader, "")
+		kiReader.rl = t
+		t.History = hist
+		if w, h, err := term.GetSize(fd); err == nil {
+			t.SetSize(w, h)
+		}
+		t.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
+			kiReader.currentInputLine = line
+			kiReader.currentInputPos = pos
+			return autoCompleteCallback(line, pos, key, a)
+		}
+		return t
 	}
+
+	rl := createTerminal()
 
 	initialPromptTokens, initialCompletionTokens, initialTokensEstimated := calculateActiveTokenUsage(a, messages, allowedTools, mam)
 	latestTurnTokens := a.GetLatestAssistantCompletionTokens(messages)
@@ -1480,11 +1490,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		signal.Stop(sigChan)
 	}()
 
-	rl.AutoCompleteCallback = func(line string, pos int, key rune) (string, int, bool) {
-		kiReader.currentInputLine = line
-		kiReader.currentInputPos = pos
-		return autoCompleteCallback(line, pos, key, a)
-	}
+	var lastCtrlD time.Time
 
 	for {
 		promptPrefix := getPromptSymbol(a.Config)
@@ -1570,6 +1576,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 
 			if kiReader.ctrlCInterrupted {
+				lastCtrlD = time.Time{}
 				kiReader.ctrlCInterrupted = false
 				kiReader.currentInputLine = ""
 				kiReader.pastedText = ""
@@ -1590,10 +1597,23 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			}
 
 			if err != nil {
+				isEOF := err == io.EOF || errors.Is(err, io.EOF) || strings.Contains(err.Error(), "EOF")
+				if isEOF && term.IsTerminal(fd) {
+					if !lastCtrlD.IsZero() && time.Since(lastCtrlD) <= 3*time.Second {
+						break
+					}
+					lastCtrlD = time.Now()
+					rl = createTerminal()
+					hintStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+					fmt.Fprintf(ppWriter, "\n%s\n", hintStyle.Render("(Press Ctrl+D again to exit)"))
+					refreshConsoleAfterPromptCancellation(os.Stderr, a, kiReader, rl)
+					continue
+				}
 				break
 			}
 		}
 
+		lastCtrlD = time.Time{}
 		kiReader.currentInputLine = ""
 		line = hist.GetFull(line)
 		line = strings.ReplaceAll(line, "↵", "\n")
