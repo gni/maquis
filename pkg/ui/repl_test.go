@@ -308,6 +308,40 @@ func TestClearTerminalForStartupErasesPreviousViewport(t *testing.T) {
 	}
 }
 
+func TestAlternateScreenRefCounting(t *testing.T) {
+	alternateScreenMu.Lock()
+	alternateScreenDepth = 0
+	alternateScreenMu.Unlock()
+
+	var buf bytes.Buffer
+	// First enter: outputs alternate screen escape sequence
+	EnterAlternateScreen(&buf)
+	if !strings.Contains(buf.String(), "\x1b[?1049h") {
+		t.Fatalf("expected \\x1b[?1049h on initial enter, got %q", buf.String())
+	}
+
+	// Nested enter: ref count incremented, no redundant escape sequences sent
+	buf.Reset()
+	EnterAlternateScreen(&buf)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output on nested enter, got %q", buf.String())
+	}
+
+	// First exit: ref count decremented from 2 to 1, no exit sequence sent yet
+	buf.Reset()
+	ExitAlternateScreen(&buf)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output on nested exit, got %q", buf.String())
+	}
+
+	// Final exit: ref count reaches 0, sends \x1b[?1049l\x1b[?25h
+	buf.Reset()
+	ExitAlternateScreen(&buf)
+	if !strings.Contains(buf.String(), "\x1b[?1049l") {
+		t.Fatalf("expected \\x1b[?1049l on final exit, got %q", buf.String())
+	}
+}
+
 func TestRefreshConsoleAfterTurnDoesNotRepaintHistory(t *testing.T) {
 	useIsolatedCursorTestUI(t)
 
@@ -1316,5 +1350,153 @@ func TestHistoryReturnSymbolNormalization(t *testing.T) {
 	}
 	if layout.ExtraOffset < 9 {
 		t.Fatalf("expected extra offset at least 9, got %d", layout.ExtraOffset)
+	}
+}
+
+func TestPromptQueue(t *testing.T) {
+	ki := &keyInterceptorReader{}
+
+	if ki.HasQueuedPrompts() {
+		t.Fatal("expected queue to be empty initially")
+	}
+	if ki.QueueLen() != 0 {
+		t.Fatalf("expected queue length 0, got %d", ki.QueueLen())
+	}
+
+	// Empty and whitespace prompts should be ignored
+	if n := ki.EnqueuePrompt(""); n != 0 {
+		t.Fatalf("expected 0 for empty prompt, got %d", n)
+	}
+	if n := ki.EnqueuePrompt("   \t  \n "); n != 0 {
+		t.Fatalf("expected 0 for whitespace prompt, got %d", n)
+	}
+
+	// Enqueue valid items
+	n1 := ki.EnqueuePrompt("prompt 1")
+	if n1 != 1 || ki.QueueLen() != 1 {
+		t.Fatalf("expected 1 item in queue, got count=%d, len=%d", n1, ki.QueueLen())
+	}
+
+	n2 := ki.EnqueuePrompt("  prompt 2  ")
+	if n2 != 2 || ki.QueueLen() != 2 {
+		t.Fatalf("expected 2 items in queue, got count=%d, len=%d", n2, ki.QueueLen())
+	}
+
+	n3 := ki.EnqueuePrompt("prompt 3")
+	if n3 != 3 || ki.QueueLen() != 3 {
+		t.Fatalf("expected 3 items in queue, got count=%d, len=%d", n3, ki.QueueLen())
+	}
+
+	// Verify GetQueuedPrompts snapshot
+	items := ki.GetQueuedPrompts()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items in snapshot, got %d", len(items))
+	}
+	if items[0] != "prompt 1" || items[1] != "prompt 2" || items[2] != "prompt 3" {
+		t.Fatalf("unexpected items in snapshot: %v", items)
+	}
+
+	// FIFO dequeue
+	p1, ok1 := ki.DequeuePrompt()
+	if !ok1 || p1 != "prompt 1" {
+		t.Fatalf("expected 'prompt 1', got %q, ok=%v", p1, ok1)
+	}
+
+	p2, ok2 := ki.DequeuePrompt()
+	if !ok2 || p2 != "prompt 2" {
+		t.Fatalf("expected 'prompt 2', got %q, ok=%v", p2, ok2)
+	}
+
+	if ki.QueueLen() != 1 {
+		t.Fatalf("expected 1 item left in queue, got %d", ki.QueueLen())
+	}
+
+	// ClearQueue
+	cleared := ki.ClearQueue()
+	if cleared != 1 {
+		t.Fatalf("expected 1 item cleared, got %d", cleared)
+	}
+	if ki.HasQueuedPrompts() {
+		t.Fatal("expected queue to be empty after clear")
+	}
+
+	// Dequeue from empty queue
+	pEmpty, okEmpty := ki.DequeuePrompt()
+	if okEmpty || pEmpty != "" {
+		t.Fatalf("expected empty dequeue, got %q, ok=%v", pEmpty, okEmpty)
+	}
+}
+
+func TestSlashCommandQueue(t *testing.T) {
+	a := &agent.Agent{Config: &config.Config{}}
+	theme := style.GetTheme("catppuccin")
+	ki := &keyInterceptorReader{}
+
+	var buf bytes.Buffer
+	// Empty queue
+	handled, quit := HandleSlashCommand(a, "/queue", nil, nil, &theme, &buf, nil, nil, nil, ki)
+	if !handled || quit {
+		t.Fatalf("expected handled=true, quit=false, got %v, %v", handled, quit)
+	}
+	if !strings.Contains(buf.String(), "prompt queue is empty") {
+		t.Fatalf("expected empty notice, got: %s", buf.String())
+	}
+
+	// Enqueue items
+	ki.EnqueuePrompt("fix tests")
+	ki.EnqueuePrompt("deploy")
+
+	buf.Reset()
+	handled, quit = HandleSlashCommand(a, "/queue", nil, nil, &theme, &buf, nil, nil, nil, ki)
+	if !handled || quit {
+		t.Fatalf("expected handled=true, quit=false, got %v, %v", handled, quit)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "2 item(s)") || !strings.Contains(out, "fix tests") || !strings.Contains(out, "deploy") {
+		t.Fatalf("expected queue list, got: %s", out)
+	}
+
+	// Clear queue
+	buf.Reset()
+	handled, quit = HandleSlashCommand(a, "/queue clear", nil, nil, &theme, &buf, nil, nil, nil, ki)
+	if !handled || quit {
+		t.Fatalf("expected handled=true, quit=false, got %v, %v", handled, quit)
+	}
+	if !strings.Contains(buf.String(), "cleared 2 queued prompt(s)") {
+		t.Fatalf("expected cleared notice, got: %s", buf.String())
+	}
+	if ki.HasQueuedPrompts() {
+		t.Fatal("expected queue to be empty after /queue clear")
+	}
+}
+
+func TestMultilineHistoryPreservation(t *testing.T) {
+	hist := &customHistory{}
+	rawPrompt := "function main() {\n    fmt.Println(\"hello\")\n}"
+	hist.Add(rawPrompt)
+
+	if hist.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", hist.Len())
+	}
+
+	// Terminal navigation gets the single-line entry with return symbols
+	displayEntry := hist.At(0)
+	if !strings.Contains(displayEntry, "↵") {
+		t.Fatalf("expected display entry to contain return symbol ↵, got %q", displayEntry)
+	}
+	if strings.Contains(displayEntry, "\n") {
+		t.Fatalf("display entry must not contain raw newlines, got %q", displayEntry)
+	}
+
+	// When user submits or GetFull is called, full multiline text is restored
+	restored := hist.GetFull(displayEntry)
+	if restored != rawPrompt {
+		t.Fatalf("expected restored full multiline string, got %q", restored)
+	}
+
+	// Fallback conversion also restores newlines
+	fallback := strings.ReplaceAll(displayEntry, "↵", "\n")
+	if !strings.Contains(fallback, "\n") {
+		t.Fatalf("expected fallback replacement to contain newlines, got %q", fallback)
 	}
 }

@@ -250,8 +250,12 @@ func RunInteractiveMCPConfig(
 	}
 	defer term.Restore(fd, oldState)
 
-	fmt.Fprint(rlOutput, "\x1b[?1049h\x1b[?25l")
-	defer fmt.Fprint(rlOutput, "\x1b[?25h\x1b[?1049l")
+	EnterAlternateScreen(rlOutput)
+	fmt.Fprint(rlOutput, "\x1b[?25l")
+	defer func() {
+		fmt.Fprint(rlOutput, "\x1b[?25h")
+		ExitAlternateScreen(rlOutput)
+	}()
 
 	cloned := *cfg
 	if cloned.MCPServers == nil {

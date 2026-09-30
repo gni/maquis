@@ -110,6 +110,7 @@ func SaveMessage(sessionID string, msg Message) error {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 
+	_ = SetLatestSessionID(sessionID)
 	return nil
 }
 
@@ -267,12 +268,50 @@ func ClearSession(sessionID string) error {
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete session file: %w", err)
 	}
+	latestPath := filepath.Join(sessionsDir, ".latest_session")
+	if data, err := os.ReadFile(latestPath); err == nil && strings.TrimSpace(string(data)) == sessionID {
+		_ = os.Remove(latestPath)
+	}
 	return nil
+}
+
+// SetLatestSessionID persists the ID of the most recently used session so that
+// resuming (--resume) always connects to the session the user actually interacted with.
+func SetLatestSessionID(sessionID string) error {
+	if sessionsDir == "" {
+		return fmt.Errorf("sessions directory not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+
+	filePath := filepath.Join(sessionsDir, sessionID+".jsonl")
+	now := time.Now()
+	_ = os.Chtimes(filePath, now, now)
+
+	latestPath := filepath.Join(sessionsDir, ".latest_session")
+	return os.WriteFile(latestPath, []byte(sessionID), 0644)
 }
 
 func GetLatestSessionID() (string, error) {
 	if sessionsDir == "" {
 		return "", fmt.Errorf("sessions directory not initialized")
+	}
+
+	// First check explicit .latest_session reference so resume takes the actively used session
+	latestPath := filepath.Join(sessionsDir, ".latest_session")
+	if data, err := os.ReadFile(latestPath); err == nil {
+		id := strings.TrimSpace(string(data))
+		if id != "" && validateSessionID(id) == nil {
+			sessionFile := filepath.Join(sessionsDir, id+".jsonl")
+			if fi, err := os.Stat(sessionFile); err == nil && !fi.IsDir() {
+				return id, nil
+			}
+		}
 	}
 
 	entries, err := os.ReadDir(sessionsDir)

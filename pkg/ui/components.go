@@ -134,6 +134,7 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/reload", "re-scan and hot-reload custom plugins and tools"},
 		{"/agent <list/join/spawn/skill/remove>", "manage multi-agent swarm threads interactively"},
 		{"/task <list/view/stream/remove>", "manage async background tasks"},
+		{"/queue <list/clear>", "view or clear pending queued prompts"},
 		{"/clear", "clear conversation and start a new one"},
 		{"/help, /commands, ?", "display this help menu"},
 		{"/exit, /quit", "exit the maquis CLI application"},
@@ -149,6 +150,7 @@ func RenderHelp(w io.Writer, theme UITheme) {
 	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+A"), descStyle.Render("move to the beginning of the prompt"))
 	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+Left / Ctrl+Right"), descStyle.Render("move backward or forward by one prompt word"))
 	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Ctrl+O"), descStyle.Render("toggle tool results collapsing (collapsed vs. full)"))
+	fmt.Fprintf(w, "  %-35s %s\n", cmdStyle.Render("Type + Enter (in-flight)"), descStyle.Render("queue prompt while agent is generating or acting"))
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, headerStyle.Render("local command execution:"))

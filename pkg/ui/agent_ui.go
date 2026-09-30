@@ -96,21 +96,32 @@ func (ui *AgentUIImpl) InitStatusBar(w io.Writer) {
 
 func (ui *AgentUIImpl) ShutdownStatusBar(w io.Writer) {
 	ui.StateMu.Lock()
+	if !ui.Enabled {
+		ui.StateMu.Unlock()
+		return
+	}
 	ui.Enabled = false
 	ui.StateMu.Unlock()
 
 	_, height := getTerminalSize()
 	var buf bytes.Buffer
 	if height > 0 {
-		// Clear stats line (height-4), prompt separator (height-3), status bar border (height-1) and status bar (height)
+		// Clear stats line (height-4), prompt separator (height-3), prompt line (height-2), status bar border (height-1) and status bar (height)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-4)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-3)
+		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-2)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height-1)
 		fmt.Fprintf(&buf, "\x1b[%d;1H\x1b[2K", height)
-		// Reset cursor position to height (bottom line)
+	}
+	// Reset scrolling region (moves cursor to 1,1) and show cursor
+	fmt.Fprint(&buf, "\x1b[r\x1b[?25h")
+	if height > 4 {
+		// Reposition cursor to height-4 AFTER \x1b[r where the cleared UI controls began
+		// so goodbye message and shell prompt appear cleanly right below conversation history
+		fmt.Fprintf(&buf, "\x1b[%d;1H", height-4)
+	} else if height > 0 {
 		fmt.Fprintf(&buf, "\x1b[%d;1H", height)
 	}
-	fmt.Fprint(&buf, "\x1b[r\x1b[?25h") // Reset scrolling region and show cursor
 	_, _ = w.Write(buf.Bytes())
 }
 

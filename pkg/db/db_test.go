@@ -130,3 +130,54 @@ func TestRewriteSession(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestSessionTracking(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := InitDB(tempDir); err != nil {
+		t.Fatalf("failed to init DB: %v", err)
+	}
+
+	session1 := "session-alpha-111"
+	session2 := "session-beta-222"
+
+	// Save message in session 1
+	if err := SaveMessage(session1, Message{Role: "user", Content: "hello alpha"}); err != nil {
+		t.Fatalf("failed to save msg1: %v", err)
+	}
+
+	latest, err := GetLatestSessionID()
+	if err != nil || latest != session1 {
+		t.Fatalf("expected latest session to be %s, got %s, err: %v", session1, latest, err)
+	}
+
+	// Save message in session 2
+	if err := SaveMessage(session2, Message{Role: "user", Content: "hello beta"}); err != nil {
+		t.Fatalf("failed to save msg2: %v", err)
+	}
+
+	latest, err = GetLatestSessionID()
+	if err != nil || latest != session2 {
+		t.Fatalf("expected latest session to be %s, got %s, err: %v", session2, latest, err)
+	}
+
+	// Explicitly switch/use session 1
+	if err := SetLatestSessionID(session1); err != nil {
+		t.Fatalf("SetLatestSessionID failed: %v", err)
+	}
+
+	latest, err = GetLatestSessionID()
+	if err != nil || latest != session1 {
+		t.Fatalf("expected latest session to be %s after switch, got %s", session1, latest)
+	}
+
+	// Delete session 1
+	if err := ClearSession(session1); err != nil {
+		t.Fatalf("ClearSession failed: %v", err)
+	}
+
+	// Should fall back to session 2
+	latest, err = GetLatestSessionID()
+	if err != nil || latest != session2 {
+		t.Fatalf("expected fallback to %s after clearing session 1, got %s", session2, latest)
+	}
+}

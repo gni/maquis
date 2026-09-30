@@ -29,9 +29,14 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			ui.ShutdownStatusBar(os.Stderr)
-			fmt.Fprint(os.Stderr, "\x1b[?25h") // Show cursor
+			ui.ForceExitAlternateScreen(os.Stderr)
+			fmt.Fprint(os.Stderr, "\x1b[?25h\x1b[?2004l") // Show cursor
 			panic(r)
 		}
+	}()
+
+	defer func() {
+		ui.ForceExitAlternateScreen(os.Stderr)
 	}()
 
 	// Restore cursor on startup in case a previous crashed run left it hidden
@@ -48,6 +53,7 @@ func main() {
 				// If Ctrl+C is pressed twice within 1.5 seconds, force exit
 				if now.Sub(lastInterrupt) < 1500*time.Millisecond {
 					ui.ShutdownStatusBar(os.Stderr)
+					ui.ForceExitAlternateScreen(os.Stderr)
 					os.Exit(130)
 				}
 				lastInterrupt = now
@@ -58,10 +64,12 @@ func main() {
 					}
 					// If there is no active operation to cancel, exit immediately
 					ui.ShutdownStatusBar(os.Stderr)
+					ui.ForceExitAlternateScreen(os.Stderr)
 					os.Exit(130)
 				}
 			}
 			ui.ShutdownStatusBar(os.Stderr)
+			ui.ForceExitAlternateScreen(os.Stderr)
 			os.Exit(0)
 		}
 	}()

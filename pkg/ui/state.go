@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"io"
 	"sync"
 
@@ -56,4 +57,45 @@ func ShutdownStatusBar(w io.Writer) {
 
 func stripAnsi(str string) string {
 	return style.StripAnsi(str)
+}
+
+var (
+	alternateScreenDepth int
+	alternateScreenMu    sync.Mutex
+)
+
+// EnterAlternateScreen switches the terminal to the alternate screen buffer.
+// It is reference-counted so nested full-screen components (like sub-menus)
+// don't prematurely exit the alternate screen.
+func EnterAlternateScreen(w io.Writer) {
+	alternateScreenMu.Lock()
+	defer alternateScreenMu.Unlock()
+	if alternateScreenDepth == 0 {
+		fmt.Fprint(w, "\x1b[?1049h\x1b[r\x1b[2J\x1b[H")
+	}
+	alternateScreenDepth++
+}
+
+// ExitAlternateScreen decrements the alternate screen reference count and
+// restores the primary screen buffer when the count reaches zero.
+func ExitAlternateScreen(w io.Writer) {
+	alternateScreenMu.Lock()
+	defer alternateScreenMu.Unlock()
+	if alternateScreenDepth > 0 {
+		alternateScreenDepth--
+		if alternateScreenDepth == 0 {
+			fmt.Fprint(w, "\x1b[?1049l\x1b[?25h")
+		}
+	}
+}
+
+// ForceExitAlternateScreen unconditionally exits the alternate screen buffer
+// and restores the primary terminal buffer and visible cursor.
+func ForceExitAlternateScreen(w io.Writer) {
+	alternateScreenMu.Lock()
+	defer alternateScreenMu.Unlock()
+	if alternateScreenDepth > 0 {
+		alternateScreenDepth = 0
+		fmt.Fprint(w, "\x1b[?1049l\x1b[?25h")
+	}
 }

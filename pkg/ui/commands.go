@@ -66,6 +66,26 @@ func HandleSlashCommand(
 			redrawScreen(w, a, nil, nil)
 		}
 		return true, false
+	case "/queue":
+		if kiReader == nil {
+			fmt.Fprintln(w, "queue is not available.")
+			return true, false
+		}
+		if len(parts) > 1 && parts[1] == "clear" {
+			n := kiReader.ClearQueue()
+			fmt.Fprintf(w, "cleared %d queued prompt(s).\n", n)
+			return true, false
+		}
+		prompts := kiReader.GetQueuedPrompts()
+		if len(prompts) == 0 {
+			fmt.Fprintln(w, "prompt queue is empty. (type and press Enter during generation to queue prompts)")
+			return true, false
+		}
+		fmt.Fprintf(w, "prompt queue (%d item(s)):\n", len(prompts))
+		for i, p := range prompts {
+			fmt.Fprintf(w, "  %d. %s\n", i+1, p)
+		}
+		return true, false
 	case "/task":
 		if len(parts) < 2 {
 			fmt.Fprintln(w, "usage: /task [list | view <id> | stream <id> | kill <id>]")
@@ -310,6 +330,10 @@ func HandleSlashCommand(
 		_ = db.SaveMessage(*currentSessionID, (*messages)[0])
 		if ch, ok := rlHistory.(*customHistory); ok {
 			ch.entries = nil
+			ch.fullMap = nil
+		}
+		if kiReader != nil {
+			kiReader.ClearQueue()
 		}
 
 		if a.ClearAgentsFunc != nil {
@@ -395,6 +419,7 @@ func HandleSlashCommand(
 			case "new":
 				getUI().LastStatsText = ""
 				*currentSessionID = db.NewUUID()
+				_ = db.SetLatestSessionID(*currentSessionID)
 				*messages = []db.Message{
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
@@ -419,6 +444,7 @@ func HandleSlashCommand(
 					_ = db.SaveMessage(branchID, msg)
 				}
 				*currentSessionID = branchID
+				_ = db.SetLatestSessionID(*currentSessionID)
 				fmt.Fprintf(w, "successfully branched session into '%s'. active session is now '%s'.\n", branchID, branchID)
 				DrawStatusBar(os.Stderr, *theme)
 			case "load":
@@ -428,6 +454,7 @@ func HandleSlashCommand(
 					if err == nil && len(dbHistory) > 0 {
 						getUI().LastStatsText = ""
 						*currentSessionID = selected
+						_ = db.SetLatestSessionID(*currentSessionID)
 						*messages = dbHistory
 						if kiReader != nil {
 							redrawScreen(w, a, kiReader, kiReader.rl)
@@ -460,6 +487,7 @@ func HandleSlashCommand(
 					getUI().LastStatsText = ""
 					if startNew {
 						*currentSessionID = db.NewUUID()
+						_ = db.SetLatestSessionID(*currentSessionID)
 						*messages = []db.Message{
 							{Role: "system", Content: a.GetSystemPrompt()},
 						}
@@ -467,6 +495,7 @@ func HandleSlashCommand(
 						dbHistory, loadErr := db.LoadMessages(selected)
 						if loadErr == nil && len(dbHistory) > 0 {
 							*currentSessionID = selected
+							_ = db.SetLatestSessionID(*currentSessionID)
 							*messages = dbHistory
 						}
 					}
@@ -485,6 +514,7 @@ func HandleSlashCommand(
 				}
 				getUI().LastStatsText = ""
 				*currentSessionID = db.NewUUID()
+				_ = db.SetLatestSessionID(*currentSessionID)
 				*messages = []db.Message{
 					{Role: "system", Content: a.GetSystemPrompt()},
 				}
