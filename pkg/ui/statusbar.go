@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
-
-	"golang.org/x/term"
 	"unicode/utf8"
+
 	"maquis/pkg/ui/style"
 )
 
@@ -30,16 +28,7 @@ type StatusBarState struct {
 }
 
 func getTerminalSize() (int, int) {
-	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	if w, h, err := term.GetSize(int(os.Stderr.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	return 80, 24
+	return style.GetTerminalSize()
 }
 
 func UpdateStatus(model string, promptTokens, completionTokens, currentCompletionTokens int, contextLimit int, isGenerating bool, tps float64, activeTasks int, showTokens bool, tokenEstimate ...bool) {
@@ -121,9 +110,9 @@ func DrawStatusBarLocked(w io.Writer, theme UITheme) {
 
 	newStatusBarText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", padding), rightPart)
 
-	indicator := "▼"
+	indicator := "▾"
 	if getUI().CollapseResults {
-		indicator = "▸"
+		indicator = "›"
 	}
 	deltaKey := newStatusBarText + indicator
 

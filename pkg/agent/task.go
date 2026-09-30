@@ -27,11 +27,11 @@ type Task struct {
 }
 
 type TaskInfo struct {
-	ID        string
-	Command   string
-	Status    string
-	Duration  time.Duration
-	BytesOut  int
+	ID       string
+	Command  string
+	Status   string
+	Duration time.Duration
+	BytesOut int
 }
 
 type taskWriter struct {
@@ -133,7 +133,7 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 			fmt.Fprintf(w, "\n[Task %s finished with status: %s]\n", task.ID, finalStatus)
 		}
 		a.TasksMu.Unlock()
-		
+
 		// Send event to the agent loop!
 		select {
 		case a.SystemEvents <- fmt.Sprintf("System Event: Background task %s finished with status %s. Please review the output or logs.", task.ID, finalStatus):
@@ -193,7 +193,7 @@ func (a *Agent) GetTaskStatus(id string) (string, string, error) {
 	defer task.mu.Unlock()
 
 	var sb bytes.Buffer
-	
+
 	// Helper function to get the tail of a byte slice
 	getTail := func(b []byte, maxLen int) []byte {
 		if len(b) > maxLen {
@@ -304,4 +304,23 @@ func (a *Agent) GetLastRunningTaskId() string {
 		}
 	}
 	return lastRunningId
+}
+
+// CountActiveTasks returns the number of currently running background tasks.
+func (a *Agent) CountActiveTasks() int {
+	if a == nil {
+		return 0
+	}
+	a.TasksMu.Lock()
+	defer a.TasksMu.Unlock()
+	count := 0
+	for _, t := range a.Tasks {
+		t.mu.Lock()
+		isRunning := t.Status == "running"
+		t.mu.Unlock()
+		if isRunning {
+			count++
+		}
+	}
+	return count
 }

@@ -430,6 +430,12 @@ func extractToolTarget(toolName string, argsJSON string) string {
 		if p := getString("DirectoryPath"); p != "" {
 			return p
 		}
+		if p := getString("file_path"); p != "" {
+			return p
+		}
+		if p := getString("file"); p != "" {
+			return p
+		}
 		if p := getString("path"); p != "" {
 			return p
 		}
@@ -484,29 +490,24 @@ func isWriteLikeTool(toolName string) bool {
 }
 
 func renderToolSymbol(toolName string, status toolRenderStatus, theme UITheme) string {
-	color := theme.Highlight
+	color := theme.TextMuted
 	if status == toolStatusSuccess {
 		color = theme.Success
 	} else if status == toolStatusError {
 		color = theme.Error
 	}
 
-	symbol := "▸"
-	if isWriteLikeTool(toolName) {
-		symbol = "◆"
-	} else if status == toolStatusSuccess {
-		symbol = "✔"
-	} else if status == toolStatusError {
-		symbol = "✖"
+	symbol := "›"
+	if status == toolStatusError {
+		symbol = "!"
 	}
-	return style.NewStyle().Foreground(color).Bold(true).Render(symbol)
+	return style.NewStyle().Foreground(color).Render(symbol)
 }
 
 func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
 	symbol := renderToolSymbol(toolName, toolStatusPending, theme)
 	pathVal := extractToolTarget(toolName, argsJSON)
 	if toolName == "bash" {
-		fmt.Fprintln(w, FormatToolDelimiter(theme))
 		fmt.Fprintln(w, FormatBashCommandLine(symbol, pathVal, theme))
 		return
 	}
@@ -555,43 +556,37 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	isCodeTool := toolName == "read" || toolName == "write" ||
+	isCodeTool := toolName == "read" || toolName == "write" || toolName == "edit" ||
 		strings.Contains(toolName, "read") ||
 		strings.Contains(toolName, "write") ||
+		strings.Contains(toolName, "edit") ||
+		strings.Contains(toolName, "replace") ||
 		strings.Contains(toolName, "view") ||
-		strings.Contains(toolName, "content")
+		strings.Contains(toolName, "content") ||
+		strings.Contains(toolName, "file")
 
 	if !isError && (isCodeTool || isJSON) {
 		lang := "plaintext"
 		if isJSON {
 			lang = "json"
 		} else {
-			var args struct {
-				Path               string `json:"path"`
-				AbsolutePath       string `json:"AbsolutePath"`
-				TargetFile         string `json:"TargetFile"`
-				Content            string `json:"content"`
-				WriteContent       string `json:"write_content"`
-				CodeContent        string `json:"CodeContent"`
-				ReplacementContent string `json:"ReplacementContent"`
+			filePath := extractToolTarget(toolName, argsJSON)
+			if filePath != "" {
+				ext := filepath.Ext(filePath)
+				if len(ext) > 1 {
+					lang = ext[1:]
+				}
 			}
-			if argsJSON != "" {
-				err := json.Unmarshal([]byte(argsJSON), &args)
-				filePath := args.Path
-				if filePath == "" {
-					filePath = args.AbsolutePath
-				}
-				if filePath == "" {
-					filePath = args.TargetFile
-				}
-				if filePath != "" {
-					ext := filepath.Ext(filePath)
-					if len(ext) > 1 {
-						lang = ext[1:]
-					}
-				}
 
-				if isWriteLikeTool(toolName) && !bodyWasStreamed {
+			if isWriteLikeTool(toolName) && !bodyWasStreamed {
+				var args struct {
+					Content            string `json:"content"`
+					WriteContent       string `json:"write_content"`
+					CodeContent        string `json:"CodeContent"`
+					ReplacementContent string `json:"ReplacementContent"`
+				}
+				if argsJSON != "" {
+					err := json.Unmarshal([]byte(argsJSON), &args)
 					if err != nil {
 						body = argsJSON
 						lang = "json"
@@ -611,12 +606,16 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 
 		chromaStyle := theme.ChromaStyle
-		if chromaStyle == "" {
+		if chromaStyle == "" || chromaStyle == "bw" {
 			chromaStyle = "friendly"
 		}
 		var codeBuf bytes.Buffer
-		err := quick.Highlight(&codeBuf, body, lang, "terminal16", chromaStyle)
-		if err == nil {
+		err := quick.Highlight(&codeBuf, body, lang, "terminal256", chromaStyle)
+		if err != nil {
+			codeBuf.Reset()
+			err = quick.Highlight(&codeBuf, body, lang, "terminal16", chromaStyle)
+		}
+		if err == nil && codeBuf.Len() > 0 {
 			body = codeBuf.String()
 		}
 	}
@@ -732,21 +731,12 @@ func RenderMCPStartupErrors(w io.Writer, startErrors map[string]error, theme UIT
 }
 
 func FormatToolDelimiter(theme UITheme) string {
-	width, _ := getTerminalSize()
-	if width <= 0 {
-		width = 80
-	}
-	targetWidth := width - 2
-	if targetWidth < 3 {
-		targetWidth = 3
-	}
-	borderStyle := style.NewStyle().Foreground(theme.Border)
-	return borderStyle.Render(strings.Repeat("─", targetWidth))
+	return ""
 }
 
 func FormatBashCommandLine(symbol string, command string, theme UITheme) string {
-	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-	cmdStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
+	promptStyle := style.NewStyle().Foreground(theme.Success)
+	cmdStyle := style.NewStyle().Foreground(theme.Text)
 
 	command = strings.Join(strings.FieldsFunc(command, func(r rune) bool {
 		return r == '\n' || r == '\r' || r == '\t'
@@ -763,8 +753,7 @@ func FormatBashCommandLine(symbol string, command string, theme UITheme) string 
 		width = 80
 	}
 	targetWidth := width - 2
-	symbolLen := utf8.RuneCountInString(stripAnsi(symbol))
-	maxCmdRunes := targetWidth - symbolLen - 8
+	maxCmdRunes := targetWidth - 4
 	if maxCmdRunes < 8 {
 		maxCmdRunes = 8
 	}
@@ -774,14 +763,28 @@ func FormatBashCommandLine(symbol string, command string, theme UITheme) string 
 	}
 
 	if command != "" {
-		return fmt.Sprintf("%s %s %s", symbol, toolStyle.Render("bash:"), cmdStyle.Render(command))
+		return fmt.Sprintf("%s %s", promptStyle.Render("$"), cmdStyle.Render(command))
 	}
-	return fmt.Sprintf("%s %s", symbol, toolStyle.Render("bash:"))
+	return promptStyle.Render("$")
+}
+
+func getActionStyle(toolName string, theme UITheme) style.Style {
+	lower := strings.ToLower(toolName)
+	switch {
+	case lower == "task_kill" || lower == "kill":
+		return style.NewStyle().Foreground(theme.Error)
+	case lower == "task_status" || lower == "task_list" || lower == "ps":
+		return style.NewStyle().Foreground(theme.TextMuted)
+	case lower == "spawn_subagent" || strings.HasPrefix(lower, "subagent__") || strings.HasPrefix(lower, "swarm_") || lower == "delegate":
+		return style.NewStyle().Foreground(theme.Secondary)
+	default:
+		return style.NewStyle().Foreground(theme.Primary)
+	}
 }
 
 func FormatToolTitle(symbol string, toolName string, path string, theme UITheme) string {
-	toolStyle := style.NewStyle().Foreground(theme.Secondary).Bold(true)
-	pathStyle := style.NewStyle().Foreground(style.Color("#ffffff"))
+	toolStyle := getActionStyle(toolName, theme)
+	pathStyle := style.NewStyle().Foreground(theme.Text)
 
 	width, _ := getTerminalSize()
 	if width <= 0 {
@@ -799,7 +802,6 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 		return r
 	}, path)
 
-	var innerTitle string
 	if path != "" {
 		relPath := path
 		isNonFilePathTool := toolName == "spawn_subagent" || strings.HasPrefix(toolName, "subagent__") || toolName == "task_status" || toolName == "task_kill" || toolName == "load_skill" || toolName == "bash"
@@ -812,7 +814,7 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 			}
 		}
 		symbolLen := utf8.RuneCountInString(stripAnsi(symbol))
-		maxPathRunes := targetWidth - symbolLen - utf8.RuneCountInString(toolName) - 12
+		maxPathRunes := targetWidth - symbolLen - utf8.RuneCountInString(toolName) - 6
 		if maxPathRunes < 8 {
 			maxPathRunes = 8
 		}
@@ -820,19 +822,16 @@ func FormatToolTitle(symbol string, toolName string, path string, theme UITheme)
 		if len(pathRunes) > maxPathRunes {
 			relPath = string(pathRunes[:maxPathRunes-3]) + "..."
 		}
-		innerTitle = fmt.Sprintf("%s %s %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
-	} else {
-		innerTitle = fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
+		if symbol != "" {
+			return fmt.Sprintf("%s %s  %s", symbol, toolStyle.Render(toolName), pathStyle.Render(relPath))
+		}
+		return fmt.Sprintf("%s  %s", toolStyle.Render(toolName), pathStyle.Render(relPath))
 	}
 
-	borderStyle := style.NewStyle().Foreground(theme.Border)
-	innerLen := utf8.RuneCountInString(stripAnsi(innerTitle))
-	dashesCount := targetWidth - 5 - innerLen
-	if dashesCount < 3 {
-		dashesCount = 3
+	if symbol != "" {
+		return fmt.Sprintf("%s %s", symbol, toolStyle.Render(toolName))
 	}
-	dashes := strings.Repeat("─", dashesCount)
-	return fmt.Sprintf("%s%s %s", borderStyle.Render("─── "), innerTitle, borderStyle.Render(dashes))
+	return toolStyle.Render(toolName)
 }
 
 func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEffort string, theme UITheme, spinnerFrame string) {
@@ -1274,12 +1273,11 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 						fmt.Fprintln(w)
 					}
 
-					iconStyle := style.NewStyle().Foreground(theme.Success)
 					labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 					if msg.ReasoningDuration > 0 {
-						fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
+						fmt.Fprintf(w, "%s\n", labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
 					} else {
-						fmt.Fprintf(w, "%s %s\n", iconStyle.Render("✔"), labelStyle.Render("thought"))
+						fmt.Fprintf(w, "%s\n", labelStyle.Render("thought"))
 					}
 					hasPrintedAnything = true
 				}
@@ -1312,14 +1310,8 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 
 						isWriteTool := tc.Function.Name == "write" || strings.Contains(tc.Function.Name, "write") || strings.Contains(tc.Function.Name, "replace")
 						path := extractToolTarget(tc.Function.Name, tc.Function.Arguments)
-						var symbol string
-						if isWriteTool {
-							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("◆")
-						} else {
-							symbol = style.NewStyle().Foreground(theme.Highlight).Bold(true).Render("▸")
-						}
+						symbol := renderToolSymbol(tc.Function.Name, toolStatusPending, theme)
 						if tc.Function.Name == "bash" {
-							fmt.Fprintln(w, FormatToolDelimiter(theme))
 							fmt.Fprintln(w, FormatBashCommandLine(symbol, path, theme))
 						} else {
 							title := FormatToolTitle(symbol, tc.Function.Name, path, theme)
@@ -1383,7 +1375,6 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			symbol := renderToolSymbol(toolName, status, theme)
 			path := extractToolTarget(toolName, argsJSON)
 			if toolName == "bash" {
-				fmt.Fprintln(w, FormatToolDelimiter(theme))
 				fmt.Fprintln(w, FormatBashCommandLine(symbol, path, theme))
 			} else {
 				title := FormatToolTitle(symbol, toolName, path, theme)

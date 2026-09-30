@@ -323,54 +323,37 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	streamBuffer := ""
 	var chunk ChatCompletionResponseChunk
 
+	finalizePartial := func() *db.Message {
+		if streamBuffer != "" {
+			if inThoughtMode {
+				reasoningBuilder.WriteString(streamBuffer)
+				chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
+			} else {
+				emitText(streamBuffer)
+			}
+			streamBuffer = ""
+		}
+		textFilter.Flush()
+
+		tokens := completionTokens
+		if tokens == 0 {
+			tokens = (rawTextBuilder.Len() + reasoningBuilder.Len()) / 4
+		}
+
+		return &db.Message{
+			Role:             "assistant",
+			Content:          textBuilder.String(),
+			ReasoningContent: reasoningBuilder.String(),
+			PromptTokens:     promptTokens,
+			CompletionTokens: tokens,
+			ToolCalls:        assembleToolCalls(toolCallsMap, rawTextBuilder.String()),
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Build partial message before returning
-			if streamBuffer != "" {
-				if inThoughtMode {
-					reasoningBuilder.WriteString(streamBuffer)
-					chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
-				} else {
-					emitText(streamBuffer)
-				}
-				streamBuffer = ""
-			}
-			textFilter.Flush()
-
-			if completionTokens == 0 {
-				completionTokens = (rawTextBuilder.Len() + reasoningBuilder.Len()) / 4
-			}
-
-			partialMsg := &db.Message{
-				Role:             "assistant",
-				Content:          textBuilder.String(),
-				ReasoningContent: reasoningBuilder.String(),
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-			}
-
-			// Append tool calls to partial msg
-			if len(toolCallsMap) > 0 {
-				maxIdx := -1
-				for idx := range toolCallsMap {
-					if idx > maxIdx {
-						maxIdx = idx
-					}
-				}
-				for i := 0; i <= maxIdx; i++ {
-					if tc, ok := toolCallsMap[i]; ok {
-						partialMsg.ToolCalls = append(partialMsg.ToolCalls, *tc)
-					}
-				}
-			} else {
-				fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
-				if len(fallbackCalls) > 0 {
-					partialMsg.ToolCalls = fallbackCalls
-				}
-			}
-
-			return partialMsg, ctx.Err()
+			return finalizePartial(), ctx.Err()
 		default:
 		}
 
@@ -380,49 +363,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 				break
 			}
 			if ctx.Err() != nil {
-				// Context cancelled while reading, return partial message
-				if streamBuffer != "" {
-					if inThoughtMode {
-						reasoningBuilder.WriteString(streamBuffer)
-						chunkChan <- StreamChunk{Type: "reasoning", Content: streamBuffer}
-					} else {
-						emitText(streamBuffer)
-					}
-					streamBuffer = ""
-				}
-				textFilter.Flush()
-
-				if completionTokens == 0 {
-					completionTokens = (rawTextBuilder.Len() + reasoningBuilder.Len()) / 4
-				}
-
-				partialMsg := &db.Message{
-					Role:             "assistant",
-					Content:          textBuilder.String(),
-					ReasoningContent: reasoningBuilder.String(),
-					PromptTokens:     promptTokens,
-					CompletionTokens: completionTokens,
-				}
-
-				if len(toolCallsMap) > 0 {
-					maxIdx := -1
-					for idx := range toolCallsMap {
-						if idx > maxIdx {
-							maxIdx = idx
-						}
-					}
-					for i := 0; i <= maxIdx; i++ {
-						if tc, ok := toolCallsMap[i]; ok {
-							partialMsg.ToolCalls = append(partialMsg.ToolCalls, *tc)
-						}
-					}
-				} else {
-					fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
-					if len(fallbackCalls) > 0 {
-						partialMsg.ToolCalls = fallbackCalls
-					}
-				}
-				return partialMsg, ctx.Err()
+				return finalizePartial(), ctx.Err()
 			}
 			return nil, fmt.Errorf("error reading stream: %w", err)
 		}
@@ -628,25 +569,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		CompletionTokens: completionTokens,
 	}
 
-	if len(toolCallsMap) > 0 {
-		maxIdx := -1
-		for idx := range toolCallsMap {
-			if idx > maxIdx {
-				maxIdx = idx
-			}
-		}
-		for i := 0; i <= maxIdx; i++ {
-			if tc, ok := toolCallsMap[i]; ok {
-				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, *tc)
-			}
-		}
-	} else {
-		// Fallback parser: extract tool calls from text content if native tool calls are empty
-		fallbackCalls := ParseFallbackToolCalls(rawTextBuilder.String())
-		if len(fallbackCalls) > 0 {
-			assistantMsg.ToolCalls = fallbackCalls
-		}
-	}
+	assistantMsg.ToolCalls = assembleToolCalls(toolCallsMap, rawTextBuilder.String())
 
 	// Store duration in context/metadata or handle via caller setting
 	ctxVal := ctx.Value("generation_duration_callback")
@@ -655,6 +578,25 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	}
 
 	return assistantMsg, nil
+}
+
+func assembleToolCalls(toolCallsMap map[int]*db.ToolCall, rawText string) []db.ToolCall {
+	if len(toolCallsMap) > 0 {
+		maxIdx := -1
+		for idx := range toolCallsMap {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+		var calls []db.ToolCall
+		for i := 0; i <= maxIdx; i++ {
+			if tc, ok := toolCallsMap[i]; ok {
+				calls = append(calls, *tc)
+			}
+		}
+		return calls
+	}
+	return ParseFallbackToolCalls(rawText)
 }
 
 // Delegators on Agent struct to maintain backwards compatibility
@@ -810,11 +752,43 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			prop.Description = "Task ID"
 			compressed.Function.Parameters.Properties["task_id"] = prop
 		}
+	case "spawn_subagent":
+		compressed.Function.Description = "Spawn specialized subagent"
+		if prop, ok := compressed.Function.Parameters.Properties["name"]; ok {
+			prop.Description = "Subagent name"
+			compressed.Function.Parameters.Properties["name"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["system_prompt"]; ok {
+			prop.Description = "Role and instructions"
+			compressed.Function.Parameters.Properties["system_prompt"] = prop
+		}
+	case "remove_subagent":
+		compressed.Function.Description = "Terminate subagent"
+		if prop, ok := compressed.Function.Parameters.Properties["name"]; ok {
+			prop.Description = "Subagent name"
+			compressed.Function.Parameters.Properties["name"] = prop
+		}
+	case "swarm_topology":
+		compressed.Function.Description = "View active subagents"
+	case "swarm_audit":
+		compressed.Function.Description = "Audit subagent execution"
+		if prop, ok := compressed.Function.Parameters.Properties["name"]; ok {
+			prop.Description = "Subagent name"
+			compressed.Function.Parameters.Properties["name"] = prop
+		}
 	default:
-		compressed.Function.Description = TruncateRunes(compressed.Function.Description, 30)
-		for k, prop := range compressed.Function.Parameters.Properties {
-			prop.Description = TruncateRunes(prop.Description, 20)
-			compressed.Function.Parameters.Properties[k] = prop
+		if strings.HasPrefix(t.Function.Name, "subagent__") {
+			compressed.Function.Description = "Delegate task to subagent"
+			if prop, ok := compressed.Function.Parameters.Properties["prompt"]; ok {
+				prop.Description = "Task prompt"
+				compressed.Function.Parameters.Properties["prompt"] = prop
+			}
+		} else {
+			compressed.Function.Description = TruncateRunes(compressed.Function.Description, 50)
+			for k, prop := range compressed.Function.Parameters.Properties {
+				prop.Description = TruncateRunes(prop.Description, 40)
+				compressed.Function.Parameters.Properties[k] = prop
+			}
 		}
 	}
 	return compressed

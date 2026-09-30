@@ -31,6 +31,39 @@ type settingItem struct {
 	onEdit      func(newVal string) error
 }
 
+// getInteractiveIO resolves the appropriate input reader and output writer for
+// interactive modals, falling back to /dev/tty if available, and returning
+// a cleanup callback to close any opened file handles.
+func getInteractiveIO(kiReader io.Reader) (io.Reader, io.Writer, func()) {
+	var input io.Reader = kiReader
+	var inputCloser io.Closer
+	if input == nil {
+		input = os.Stdin
+		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+			input = tty
+			inputCloser = tty
+		}
+	}
+
+	var output io.Writer = os.Stdout
+	var outputCloser io.Closer
+	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		output = tty
+		outputCloser = tty
+	}
+
+	cleanup := func() {
+		if inputCloser != nil {
+			_ = inputCloser.Close()
+		}
+		if outputCloser != nil && outputCloser != inputCloser {
+			_ = outputCloser.Close()
+		}
+	}
+
+	return input, output, cleanup
+}
+
 func runSettingsMenuLoop(rlInput io.Reader, rlOutput io.Writer, theme UITheme, title string, itemsProvider func() []*settingItem, extraRender func(buf *strings.Builder)) error {
 	searchQuery := ""
 	selectedIdx := 0
@@ -101,7 +134,7 @@ func runSettingsMenuLoop(rlInput io.Reader, rlOutput io.Writer, theme UITheme, t
 					if valStr != "" {
 						valStrFormatted = fmt.Sprintf("%s %s %s", bracketStyle.Render("["), valStyle.Render(valStr), bracketStyle.Render("]"))
 					}
-					buf.WriteString(fmt.Sprintf("%s  %s %s %s\n", markerStyle.Render("▸"), nameStyle.Render(nameStr), leaderStyle.Render(leader), valStrFormatted))
+					buf.WriteString(fmt.Sprintf("%s  %s %s %s\n", markerStyle.Render("›"), nameStyle.Render(nameStr), leaderStyle.Render(leader), valStrFormatted))
 				} else {
 					nameStyle := style.NewStyle().Foreground(theme.Text)
 					leaderStyle := style.NewStyle().Foreground(theme.Border)
@@ -513,9 +546,9 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 			name:        "visual theme",
 			value:       func() string { return cloned.Theme },
 			description: "Visual aesthetic style of the terminal theme",
-			options:     []string{"dark", "neon", "light", "gruvbox", "mono", "minimal", "plain"},
+			options:     []string{"kanagawa", "catppuccin", "rose-pine", "everforest", "nord", "zenburn", "gruvbox", "tokyonight", "mono", "light"},
 			onToggle: func() {
-				themes := []string{"dark", "neon", "light", "gruvbox", "mono", "minimal", "plain"}
+				themes := []string{"kanagawa", "catppuccin", "rose-pine", "everforest", "nord", "zenburn", "gruvbox", "tokyonight", "mono", "light"}
 				idx := -1
 				for i, t := range themes {
 					if strings.ToLower(cloned.Theme) == t {
@@ -1162,7 +1195,7 @@ func runInteractiveSelect(sr *sessionReader, sigChan chan os.Signal, rlOutput io
 			if idx == selectedIdx {
 				markerStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
 				itemStyle := style.NewStyle().Foreground(theme.Primary).Bold(true)
-				buf.WriteString(fmt.Sprintf("    %s %s\n", markerStyle.Render("▸"), itemStyle.Render(item)))
+				buf.WriteString(fmt.Sprintf("    %s %s\n", markerStyle.Render("›"), itemStyle.Render(item)))
 			} else {
 				itemStyle := style.NewStyle().Foreground(theme.Text)
 				buf.WriteString(fmt.Sprintf("      %s\n", itemStyle.Render(item)))

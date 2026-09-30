@@ -58,12 +58,32 @@ func (t *readTool) Definition() Tool {
 
 func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
+		Path     string `json:"path"`
+		File     string `json:"file"`
+		FilePath string `json:"file_path"`
+		Offset   int    `json:"offset"`
+		Limit    int    `json:"limit"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+		var rawPath string
+		if errStr := json.Unmarshal([]byte(arguments), &rawPath); errStr == nil && strings.TrimSpace(rawPath) != "" {
+			args.Path = rawPath
+		} else {
+			trimmed := strings.TrimSpace(arguments)
+			if !strings.HasPrefix(trimmed, "{") && trimmed != "" {
+				args.Path = trimmed
+			} else {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+		}
+	}
+
+	if args.Path == "" {
+		if args.FilePath != "" {
+			args.Path = args.FilePath
+		} else if args.File != "" {
+			args.Path = args.File
+		}
 	}
 
 	safePath, err := ctx.SafePath(args.Path)
@@ -179,14 +199,35 @@ func (t *writeTool) Definition() Tool {
 func (t *writeTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
 		Path         string `json:"path"`
+		File         string `json:"file"`
+		FilePath     string `json:"file_path"`
 		Content      string `json:"content"`
 		WriteContent string `json:"write_content"`
+		Text         string `json:"text"`
+		Body         string `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.Content == "" && args.WriteContent != "" {
-		args.Content = args.WriteContent
+	if args.Path == "" {
+		if args.FilePath != "" {
+			args.Path = args.FilePath
+		} else if args.File != "" {
+			args.Path = args.File
+		}
+	}
+	if args.Path == "" {
+		return "", fmt.Errorf("missing required argument: path")
+	}
+
+	if args.Content == "" {
+		if args.WriteContent != "" {
+			args.Content = args.WriteContent
+		} else if args.Text != "" {
+			args.Content = args.Text
+		} else if args.Body != "" {
+			args.Content = args.Body
+		}
 	}
 
 	safePath, err := ctx.SafePath(args.Path)
@@ -263,13 +304,32 @@ func (t *editTool) Definition() Tool {
 
 func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
-		Path    string        `json:"path"`
-		Edits   []ReplaceEdit `json:"updates"`
-		OldText string        `json:"oldText,omitempty"`
-		NewText string        `json:"newText,omitempty"`
+		Path         string        `json:"path"`
+		File         string        `json:"file"`
+		FilePath     string        `json:"file_path"`
+		Updates      []ReplaceEdit `json:"updates"`
+		Edits        []ReplaceEdit `json:"edits"`
+		Replacements []ReplaceEdit `json:"replacements"`
+		OldText      string        `json:"oldText,omitempty"`
+		NewText      string        `json:"newText,omitempty"`
+		OldTextSnake string        `json:"old_text,omitempty"`
+		NewTextSnake string        `json:"new_text,omitempty"`
+		OldString    string        `json:"old_string,omitempty"`
+		NewString    string        `json:"new_string,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if args.Path == "" {
+		if args.FilePath != "" {
+			args.Path = args.FilePath
+		} else if args.File != "" {
+			args.Path = args.File
+		}
+	}
+	if args.Path == "" {
+		return "", fmt.Errorf("missing required argument: path")
 	}
 
 	safePath, err := ctx.SafePath(args.Path)
@@ -280,9 +340,32 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	unlock := lockPath(safePath)
 	defer unlock()
 
-	edits := args.Edits
-	if args.OldText != "" && args.NewText != "" {
-		edits = append(edits, ReplaceEdit{OldText: args.OldText, NewText: args.NewText})
+	edits := args.Updates
+	if len(edits) == 0 && len(args.Edits) > 0 {
+		edits = args.Edits
+	} else if len(edits) == 0 && len(args.Replacements) > 0 {
+		edits = args.Replacements
+	}
+
+	oldSingle := args.OldText
+	if oldSingle == "" {
+		if args.OldTextSnake != "" {
+			oldSingle = args.OldTextSnake
+		} else if args.OldString != "" {
+			oldSingle = args.OldString
+		}
+	}
+	newSingle := args.NewText
+	if newSingle == "" {
+		if args.NewTextSnake != "" {
+			newSingle = args.NewTextSnake
+		} else if args.NewString != "" {
+			newSingle = args.NewString
+		}
+	}
+
+	if oldSingle != "" {
+		edits = append(edits, ReplaceEdit{OldText: oldSingle, NewText: newSingle})
 	}
 
 	// Code Omission Protection

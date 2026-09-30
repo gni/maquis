@@ -51,7 +51,13 @@ func (t *bashTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		Arguments  string `json:"arguments"`
 		Background bool   `json:"background"`
 	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+	trimmed := strings.TrimSpace(arguments)
+	if strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"") && len(trimmed) >= 2 {
+		var unquoted string
+		if err := json.Unmarshal([]byte(trimmed), &unquoted); err == nil {
+			args.Command = unquoted
+		}
+	} else if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 	if args.Command == "" {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"maquis/pkg/db"
+	"maquis/pkg/ui/style"
 )
 
 // LoadMemoryContext loads global (~/.maquis/MAQUIS.md) and project (MEMORY.md) memory context.
@@ -248,17 +249,7 @@ func buildToolCall(name string, args string) db.ToolCall {
 
 // TruncateRunes safely truncates a string to maxRunes without slicing multi-byte UTF-8 runes.
 func TruncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	if maxRunes <= 3 {
-		return string(runes[:maxRunes])
-	}
-	return string(runes[:maxRunes-3]) + "..."
+	return style.TruncateRunes(s, maxRunes)
 }
 
 // StripEchoedPrompt strips leading echoed prompt text and trailing newlines/whitespace
@@ -295,4 +286,3 @@ func StripEchoedPrompt(reasoning, prompt string) string {
 
 	return reasoning
 }
-

@@ -964,13 +964,13 @@ func TestJsonStreamParserStreamWrites(t *testing.T) {
 		var buf bytes.Buffer
 		p.feed(`{"command": "find /workspace/tests"}`, &buf, theme)
 		got := stripAnsi(buf.String())
-		if strings.Contains(got, "▸ command:") {
+		if strings.Contains(got, "› command:") {
 			t.Errorf("expected no duplicate command marker, got %q", got)
 		}
-		if !strings.Contains(got, "bash: find /workspace/tests") {
-			t.Errorf("expected bash: command line, got %q", got)
+		if !strings.Contains(got, "$ find /workspace/tests") {
+			t.Errorf("expected $ command line, got %q", got)
 		}
-		if strings.Contains(got, "─── ▸ bash") || strings.Contains(got, "─── bash") {
+		if strings.Contains(got, "─── › $") || strings.Contains(got, "─── $") {
 			t.Errorf("expected pure delimiter line without bash tool title, got %q", got)
 		}
 	})

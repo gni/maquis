@@ -410,8 +410,8 @@ func (a *Agent) compressHistory(
 	}
 	*messages = newMessages
 
-	successStyle := style.NewStyle().Foreground(theme.Success).Italic(true)
-	fmt.Fprintf(w, "%s Context successfully compressed. Freed %d messages.\n\n", successStyle.Render("✔"), keepIdx-1)
+	compressedStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+	fmt.Fprintf(w, "%s\n\n", compressedStyle.Render(fmt.Sprintf("context compressed · freed %d messages", keepIdx-1)))
 }
 
 func (a *Agent) runBeforeToolHook(tc db.ToolCall) (bool, string) {

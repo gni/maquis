@@ -5,16 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/term"
-	"maquis/pkg/ui/style"
-
 	"maquis/pkg/config"
 	"maquis/pkg/db"
+	"maquis/pkg/ui/style"
 )
 
 func unwrapWriter(w io.Writer) io.Writer {
@@ -131,13 +128,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			tickerOnce.Do(func() {
 				close(tickerDone)
 				if a.UI != nil && !isNonInteractive {
-					activeTasks := 0
-					for _, t := range a.ListTasks() {
-						if t.Status == "running" {
-							activeTasks++
-						}
-					}
-					a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, activeTasks, a.Config.ShowTokens)
+					a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, false, 0, a.CountActiveTasks(), a.Config.ShowTokens)
 					a.UI.DrawStatusBar(rawW, theme)
 				}
 			})
@@ -145,13 +136,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		defer stopTicker()
 
 		if a.UI != nil && !isNonInteractive {
-			activeTasks := 0
-			for _, t := range a.ListTasks() {
-				if t.Status == "running" {
-					activeTasks++
-				}
-			}
-			a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, true, 0, activeTasks, a.Config.ShowTokens)
+			a.UI.UpdateStatus(a.Config.Model, globalPromptTokensEst, priorCompletionTokens, 0, a.Config.ContextWindowLimit, true, 0, a.CountActiveTasks(), a.Config.ShowTokens)
 			a.UI.DrawStatusBar(rawW, theme)
 		}
 
@@ -169,13 +154,17 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 				sr.Write(chunk.Content)
 			} else if chunk.Type == "tool_name" {
-				sr.StartToolCall(chunk.Content, chunk.ToolCallIndex)
+				if chunk.ToolCallIndex == 0 {
+					sr.StartToolCall(chunk.Content, chunk.ToolCallIndex)
+				}
 				if loader != nil {
 					loader.ShowDots()
 					loader.Feed()
 				}
 			} else if chunk.Type == "tool_call" {
-				sr.WriteToolCall(chunk.Content)
+				if chunk.ToolCallIndex == 0 {
+					sr.WriteToolCall(chunk.Content)
+				}
 				if sr.DidStreamToolBody(chunk.ToolCallIndex) {
 					if loader != nil {
 						loader.PauseDots()
@@ -284,13 +273,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 			if !isNonInteractive {
 				if a.UI != nil {
-					activeTasks := 0
-					for _, t := range a.ListTasks() {
-						if t.Status == "running" {
-							activeTasks++
-						}
-					}
-					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks, a.Config.ShowTokens)
+					a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, a.CountActiveTasks(), a.Config.ShowTokens)
 					a.UI.DrawStatusBar(rawW, theme)
 				}
 			}
@@ -299,13 +282,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		if !isNonInteractive {
 			if a.UI != nil {
-				activeTasks := 0
-				for _, t := range a.ListTasks() {
-					if t.Status == "running" {
-						activeTasks++
-					}
-				}
-				a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, activeTasks, a.Config.ShowTokens)
+				a.UI.UpdateStatus(a.Config.Model, globalPromptTokens, globalCompletionTokens, assistantMsg.CompletionTokens, a.Config.ContextWindowLimit, false, finalTps, a.CountActiveTasks(), a.Config.ShowTokens)
 				a.UI.DrawStatusBar(rawW, theme)
 			}
 		}
@@ -325,7 +302,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			isSubagent := strings.HasPrefix(tc.Function.Name, "subagent__")
 			wasStreamed := sr.GetToolTitleLineNumber(idx) != -1
 
-			if !wasStreamed {
+			if !wasStreamed || (len(assistantMsg.ToolCalls) > 1 && idx > 0) {
 				// Render the tool header only if it wasn't already streamed
 				if a.UI != nil {
 					a.UI.RenderToolHeader(ncw, theme, tc.Function.Name, tc.Function.Arguments)
@@ -382,7 +359,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 					toolOutput = "(no output)"
 				}
 
-				if !isSubagent && !approvalRendered {
+				if !isSubagent && !approvalRendered && len(assistantMsg.ToolCalls) == 1 {
 					sr.CompleteToolCall(idx, tc.Function.Name, tc.Function.Arguments, toolErr != nil)
 				}
 
@@ -421,7 +398,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				a.lastToolOutput = toolOutput
 				a.lastToolIsError = true
 
-				if !approvalRendered {
+				if !approvalRendered && len(assistantMsg.ToolCalls) == 1 {
 					sr.CompleteToolCall(idx, tc.Function.Name, tc.Function.Arguments, true)
 				}
 				if a.UI != nil {
@@ -454,12 +431,12 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 }
 
 type turnLoader struct {
-	agent      *Agent
-	w          io.Writer
-	theme      style.UITheme
-	startTime  time.Time
-	done       chan struct{}
-	stopOnce   sync.Once
+	agent     *Agent
+	w         io.Writer
+	theme     style.UITheme
+	startTime time.Time
+	done      chan struct{}
+	stopOnce  sync.Once
 
 	mu         sync.Mutex
 	hasDots    bool
@@ -705,23 +682,14 @@ func (f *fallbackStreamRenderer) DidStreamToolBody(index int) bool              
 func (f *fallbackStreamRenderer) CompleteToolCall(index int, toolName string, toolArgs string, isError bool) {
 }
 func (f *fallbackStreamRenderer) GetReasoningDuration() float64 { return 0 }
-func (f *fallbackStreamRenderer) SetPrompt(prompt string)        {}
+func (f *fallbackStreamRenderer) SetPrompt(prompt string)       {}
 
 func isReadOnly(toolName string) bool {
 	return toolName == "read" || toolName == "task_status"
 }
 
 func getTerminalSize() (int, int) {
-	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	if w, h, err := term.GetSize(int(os.Stderr.Fd())); err == nil && h > 0 {
-		return w, h
-	}
-	return 80, 24
+	return style.GetTerminalSize()
 }
 
 type customTeeWriter struct {

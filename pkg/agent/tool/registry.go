@@ -72,7 +72,12 @@ func (j JSONSchema) MarshalJSON() ([]byte, error) {
 		requiredJSON = fmt.Sprintf(",%q:%s", "required", string(reqBytes))
 	}
 
-	fullJSON := fmt.Sprintf("{%q:%q,%q:%s%s}", "type", j.Type, "properties", propsJSON, requiredJSON)
+	typeName := j.Type
+	if typeName == "" {
+		typeName = "object"
+	}
+
+	fullJSON := fmt.Sprintf("{%q:%q,%q:%s%s}", "type", typeName, "properties", propsJSON, requiredJSON)
 	return []byte(fullJSON), nil
 }
 
@@ -173,42 +178,7 @@ func repairJSON(js string) string {
 		js = strings.TrimSpace(js)
 	}
 
-	// 2. Fix extra closing braces/brackets at the end
-	for len(js) > 0 {
-		openBraces := strings.Count(js, "{")
-		closeBraces := strings.Count(js, "}")
-		if closeBraces > openBraces && strings.HasSuffix(js, "}") {
-			js = strings.TrimSuffix(js, "}")
-			js = strings.TrimSpace(js)
-		} else {
-			break
-		}
-	}
-	for len(js) > 0 {
-		openBrackets := strings.Count(js, "[")
-		closeBrackets := strings.Count(js, "]")
-		if closeBrackets > openBrackets && strings.HasSuffix(js, "]") {
-			js = strings.TrimSuffix(js, "]")
-			js = strings.TrimSpace(js)
-		} else {
-			break
-		}
-	}
-
-	// 3. Fix missing closing brackets/braces
-	openBraces := strings.Count(js, "{")
-	closeBraces := strings.Count(js, "}")
-	if openBraces > closeBraces {
-		js += strings.Repeat("}", openBraces-closeBraces)
-	}
-
-	openBrackets := strings.Count(js, "[")
-	closeBrackets := strings.Count(js, "]")
-	if openBrackets > closeBrackets {
-		js += strings.Repeat("]", openBrackets-closeBrackets)
-	}
-
-	// 4. Fix unescaped newlines inside JSON string values
+	// 2. Fix unescaped newlines/tabs inside JSON string values first
 	var sb strings.Builder
 	inString := false
 	inEscape := false
@@ -239,7 +209,68 @@ func repairJSON(js string) string {
 			sb.WriteByte(c)
 		}
 	}
-	return sb.String()
+	if inString {
+		sb.WriteByte('"')
+	}
+	js = sb.String()
+
+	// 3. Count braces and brackets outside string literals
+	openBraces := 0
+	closeBraces := 0
+	openBrackets := 0
+	closeBrackets := 0
+	inString = false
+	inEscape = false
+
+	for i := 0; i < len(js); i++ {
+		c := js[i]
+		if inEscape {
+			inEscape = false
+			continue
+		}
+		if c == '\\' {
+			inEscape = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if !inString {
+			switch c {
+			case '{':
+				openBraces++
+			case '}':
+				closeBraces++
+			case '[':
+				openBrackets++
+			case ']':
+				closeBrackets++
+			}
+		}
+	}
+
+	// 4. Fix extra closing braces/brackets at the end
+	for len(js) > 0 && closeBraces > openBraces && strings.HasSuffix(js, "}") {
+		js = strings.TrimSuffix(js, "}")
+		js = strings.TrimSpace(js)
+		closeBraces--
+	}
+	for len(js) > 0 && closeBrackets > openBrackets && strings.HasSuffix(js, "]") {
+		js = strings.TrimSuffix(js, "]")
+		js = strings.TrimSpace(js)
+		closeBrackets--
+	}
+
+	// 5. Fix missing closing brackets/braces
+	if openBrackets > closeBrackets {
+		js += strings.Repeat("]", openBrackets-closeBrackets)
+	}
+	if openBraces > closeBraces {
+		js += strings.Repeat("}", openBraces-closeBraces)
+	}
+
+	return js
 }
 
 func (r *ToolRegistry) GetAvailableTools(allowlist []string) []Tool {

@@ -73,9 +73,9 @@ func TestThoughtCompletesBeforeToolHeader(t *testing.T) {
 	renderer.Flush()
 
 	rendered := stripAnsi(output.String())
-	thoughtIndex := strings.Index(rendered, "✔ thought")
-	toolIndex := strings.Index(rendered, "spawn_subagent devops_audit")
-	if thoughtIndex < 0 || toolIndex < 0 {
+	thoughtIndex := strings.Index(rendered, "thought (")
+	toolIndex := strings.Index(rendered, "spawn_subagent")
+	if thoughtIndex < 0 || toolIndex < 0 || !strings.Contains(rendered, "devops_audit") {
 		t.Fatalf("missing thought completion or tool header: %q", rendered)
 	}
 	if thoughtIndex > toolIndex {
@@ -95,7 +95,7 @@ func TestThoughtUsesOneBlankRowBeforeAnswerText(t *testing.T) {
 	renderer.Flush()
 
 	rendered := stripAnsi(output.String())
-	thoughtIndex := strings.Index(rendered, "✔ thought")
+	thoughtIndex := strings.Index(rendered, "thought (")
 	answerIndex := strings.Index(rendered, "final answer")
 	if thoughtIndex < 0 || answerIndex < 0 || thoughtIndex > answerIndex {
 		t.Fatalf("missing ordered thought and answer: %q", rendered)
@@ -161,7 +161,7 @@ func TestLiveThoughtToolLayoutMatchesSessionHistory(t *testing.T) {
 	var history bytes.Buffer
 	PrintSessionHistory(&history, messages, theme, &config.Config{ShowThinking: true})
 
-	liveText := strings.Replace(stripAnsi(live.String()), "▸ read", "✔ read", 1)
+	liveText := stripAnsi(live.String())
 	historyText := stripAnsi(history.String())
 	if liveText != historyText {
 		t.Fatalf("live and persisted layouts differ:\nlive:    %q\nhistory: %q", liveText, historyText)
@@ -186,8 +186,8 @@ func TestSessionHistoryUsesFinalToolStatus(t *testing.T) {
 	PrintSessionHistory(&output, messages, UITheme{}, &config.Config{})
 
 	rendered := stripAnsi(output.String())
-	if !strings.Contains(rendered, "✔ read test_security.py") {
-		t.Fatalf("persisted successful tool header did not use its final status: %q", rendered)
+	if !strings.Contains(rendered, "read  test_security.py") || strings.Contains(rendered, "───") {
+		t.Fatalf("persisted successful tool header did not use expected format: %q", rendered)
 	}
 }
 
@@ -430,7 +430,7 @@ func TestToolCompletionUpdatesOnlyTrackedHeaderRow(t *testing.T) {
 		t.Fatalf("completion must not clear the surrounding screen: %q", update)
 	}
 	clean := stripAnsi(update)
-	if !strings.Contains(clean, "✔") || !strings.Contains(clean, "read") || !strings.Contains(clean, "README.md") {
+	if !strings.Contains(clean, "read") || !strings.Contains(clean, "README.md") || strings.Contains(clean, "───") {
 		t.Fatalf("completion did not update the tracked title: %q", clean)
 	}
 }
@@ -447,24 +447,21 @@ func TestBashToolHeaderAndCompletionFormat(t *testing.T) {
 	renderer.Flush()
 
 	initialOutput := stripAnsi(terminal.String())
-	if !strings.Contains(initialOutput, "▸ bash: whoami") {
-		t.Fatalf("expected initial bash command line '▸ bash: whoami', got: %q", initialOutput)
+	if !strings.Contains(initialOutput, "$ whoami") || strings.Contains(initialOutput, "›") {
+		t.Fatalf("expected initial bash command line '$ whoami' without chevron, got: %q", initialOutput)
 	}
-	if strings.Contains(initialOutput, "─── ▸ bash") || strings.Contains(initialOutput, "─── bash") {
-		t.Fatalf("delimiter must not contain bash title: %q", initialOutput)
-	}
-	if !strings.Contains(initialOutput, "───") {
-		t.Fatalf("expected horizontal delimiter line, got: %q", initialOutput)
+	if strings.Contains(initialOutput, "───") {
+		t.Fatalf("tool call line must not contain horizontal delimiter: %q", initialOutput)
 	}
 
 	terminal.Reset()
 	renderer.CompleteToolCall(0, "bash", arguments, false)
 
 	update := stripAnsi(terminal.String())
-	if !strings.Contains(update, "✔ bash: whoami") {
-		t.Fatalf("expected completion bash command line '✔ bash: whoami', got: %q", update)
+	if !strings.Contains(update, "$ whoami") || strings.Contains(update, "›") {
+		t.Fatalf("expected completion bash command line '$ whoami', got: %q", update)
 	}
-	if strings.Contains(update, "─── ✔ bash") || strings.Contains(update, "─── bash") {
+	if strings.Contains(update, "─── $") {
 		t.Fatalf("completion must not contain delimiter with bash title: %q", update)
 	}
 
@@ -494,10 +491,10 @@ func TestBashToolHeaderAndCompletionFormat(t *testing.T) {
 	PrintSessionHistory(&history, messages, UITheme{}, &config.Config{})
 	historyText := stripAnsi(history.String())
 
-	if !strings.Contains(historyText, "✔ bash: whoami") {
-		t.Fatalf("expected session history to contain '✔ bash: whoami', got: %q", historyText)
+	if !strings.Contains(historyText, "$ whoami") || strings.Contains(historyText, "›") {
+		t.Fatalf("expected session history to contain '$ whoami', got: %q", historyText)
 	}
-	if strings.Contains(historyText, "─── ✔ bash") || strings.Contains(historyText, "─── bash") {
+	if strings.Contains(historyText, "─── $") {
 		t.Fatalf("expected session history delimiter not to contain bash title, got: %q", historyText)
 	}
 	if !strings.Contains(historyText, "node") {

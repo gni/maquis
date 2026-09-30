@@ -240,7 +240,6 @@ func (p *jsonStreamParser) printStreamTitle(w io.Writer, theme UITheme) {
 	p.ensureTrackingIndex()
 
 	if p.activeToolName == "bash" {
-		fmt.Fprintln(w, FormatToolDelimiter(theme))
 		p.toolTitleLineNumbers[p.activeToolIndex] = getNewlineCount(w)
 		symbol := renderToolSymbol(p.activeToolName, toolStatusPending, theme)
 		fmt.Fprintln(w, FormatBashCommandLine(symbol, p.path, theme))

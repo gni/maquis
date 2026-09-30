@@ -3,7 +3,42 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
+
+func parseTaskID(arguments string) (string, error) {
+	trimmed := strings.TrimSpace(arguments)
+	if strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"") && len(trimmed) >= 2 {
+		var unquoted string
+		if err := json.Unmarshal([]byte(trimmed), &unquoted); err == nil {
+			trimmed = unquoted
+		}
+	} else if strings.HasPrefix(trimmed, "{") {
+		var args struct {
+			TaskID    string `json:"task_id"`
+			TaskIDAlt string `json:"taskId"`
+			ID        string `json:"id"`
+			Task      string `json:"task"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			return "", fmt.Errorf("invalid arguments: %w", err)
+		}
+		if args.TaskID != "" {
+			trimmed = args.TaskID
+		} else if args.TaskIDAlt != "" {
+			trimmed = args.TaskIDAlt
+		} else if args.ID != "" {
+			trimmed = args.ID
+		} else if args.Task != "" {
+			trimmed = args.Task
+		}
+	}
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return "", fmt.Errorf("missing required argument: task_id")
+	}
+	return trimmed, nil
+}
 
 type taskStatusTool struct{}
 
@@ -34,19 +69,17 @@ func (t *taskStatusTool) Definition() Tool {
 }
 
 func (t *taskStatusTool) Execute(ctx AgentContext, arguments string) (string, error) {
-	var args struct {
-		TaskId string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	status, output, err := ctx.GetTaskStatus(args.TaskId)
+	taskID, err := parseTaskID(arguments)
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("Task %s is currently: %s\n\nOutput:\n%s", args.TaskId, status, output), nil
+	status, output, err := ctx.GetTaskStatus(taskID)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Task %s is currently: %s\n\nOutput:\n%s", taskID, status, output), nil
 }
 
 type taskKillTool struct{}
@@ -78,17 +111,15 @@ func (t *taskKillTool) Definition() Tool {
 }
 
 func (t *taskKillTool) Execute(ctx AgentContext, arguments string) (string, error) {
-	var args struct {
-		TaskId string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	err := ctx.KillTask(args.TaskId)
+	taskID, err := parseTaskID(arguments)
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("Task %s successfully terminated.", args.TaskId), nil
+	err = ctx.KillTask(taskID)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Task %s successfully terminated.", taskID), nil
 }

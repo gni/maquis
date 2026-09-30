@@ -32,21 +32,8 @@ func HandleMCPCommand(
 	}
 
 	if len(parts) < 2 {
-		var input io.Reader
-		if kiReader != nil {
-			input = kiReader
-		} else {
-			input = os.Stdin
-			if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-				defer tty.Close()
-				input = tty
-			}
-		}
-		var output io.Writer = os.Stdout
-		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-			defer tty.Close()
-			output = tty
-		}
+		input, output, cleanup := getInteractiveIO(kiReader)
+		defer cleanup()
 
 		ShutdownStatusBar(os.Stderr)
 		newConfig, errInteractive := RunInteractiveMCPConfig(a.Config, theme, input, output, a.ConfigPath)

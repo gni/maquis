@@ -3,6 +3,7 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type loadSkillTool struct{}
@@ -34,14 +35,35 @@ func (t *loadSkillTool) Definition() Tool {
 }
 
 func (t *loadSkillTool) Execute(ctx AgentContext, arguments string) (string, error) {
-	var args struct {
-		Name string `json:"name"`
+	name := strings.TrimSpace(arguments)
+	if strings.HasPrefix(name, "\"") && strings.HasSuffix(name, "\"") && len(name) >= 2 {
+		var unquoted string
+		if err := json.Unmarshal([]byte(name), &unquoted); err == nil {
+			name = unquoted
+		}
+	} else if strings.HasPrefix(name, "{") {
+		var args struct {
+			Name      string `json:"name"`
+			Skill     string `json:"skill"`
+			SkillName string `json:"skill_name"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &args); err == nil {
+			if args.Name != "" {
+				name = args.Name
+			} else if args.Skill != "" {
+				name = args.Skill
+			} else if args.SkillName != "" {
+				name = args.SkillName
+			}
+		}
 	}
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("missing required argument: skill name")
 	}
+
 	for _, s := range ctx.GetActiveSkills() {
-		if s.Name == args.Name {
+		if strings.EqualFold(s.Name, name) {
 			return fmt.Sprintf("SKILL INSTRUCTIONS FOR '%s':\n\n%s", s.Name, s.Content), nil
 		}
 	}
@@ -49,10 +71,10 @@ func (t *loadSkillTool) Execute(ctx AgentContext, arguments string) (string, err
 	// Not found, reload from disk and check again
 	reloaded := ctx.ReloadSkills()
 	for _, s := range reloaded {
-		if s.Name == args.Name {
+		if strings.EqualFold(s.Name, name) {
 			return fmt.Sprintf("SKILL INSTRUCTIONS FOR '%s':\n\n%s", s.Name, s.Content), nil
 		}
 	}
 
-	return "", fmt.Errorf("skill '%s' not found", args.Name)
+	return "", fmt.Errorf("skill '%s' not found", name)
 }

@@ -262,19 +262,8 @@ func HandleSlashCommand(
 			UpdateStatus(a.Config.Model, pTok, cTok, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 			DrawStatusBar(w, *theme)
 		} else {
-			var input io.Reader = kiReader
-			if input == nil {
-				input = os.Stdin
-				if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-					defer tty.Close()
-					input = tty
-				}
-			}
-			var output io.Writer = os.Stdout
-			if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-				defer tty.Close()
-				output = tty
-			}
+			input, output, cleanup := getInteractiveIO(kiReader)
+			defer cleanup()
 
 			ShutdownStatusBar(os.Stderr)
 			newConfig, errInteractive := RunInteractiveConfig(a.Config, *theme, input, output)
@@ -475,19 +464,8 @@ func HandleSlashCommand(
 					return true, false
 				}
 
-				var input io.Reader = kiReader
-				if input == nil {
-					input = os.Stdin
-					if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-						defer tty.Close()
-						input = tty
-					}
-				}
-				var output io.Writer = os.Stdout
-				if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-					defer tty.Close()
-					output = tty
-				}
+				input, output, cleanup := getInteractiveIO(kiReader)
+				defer cleanup()
 
 				selected, startNew, err := RunSessionExplorer(*theme, input, output)
 				InitStatusBar(os.Stderr)
@@ -544,19 +522,8 @@ func HandleSlashCommand(
 		return true, false
 	case "/agent", "/agents":
 		if len(parts) < 2 {
-			var input io.Reader = kiReader
-			if input == nil {
-				input = os.Stdin
-				if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-					defer tty.Close()
-					input = tty
-				}
-			}
-			var output io.Writer = os.Stdout
-			if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-				defer tty.Close()
-				output = tty
-			}
+			input, output, cleanup := getInteractiveIO(kiReader)
+			defer cleanup()
 
 			ShutdownStatusBar(os.Stderr)
 			_ = RunInteractiveAgentManager(mam, *theme, input, output)
@@ -858,15 +825,10 @@ func HandleSlashCommand(
 }
 
 func getActiveTasks(a *agent.Agent) int {
-	activeTasks := 0
-	if a != nil {
-		for _, t := range a.ListTasks() {
-			if t.Status == "running" {
-				activeTasks++
-			}
-		}
+	if a == nil {
+		return 0
 	}
-	return activeTasks
+	return a.CountActiveTasks()
 }
 
 // fieldStartIndex returns the start index of the fieldIndex-th word (0-based) in s.

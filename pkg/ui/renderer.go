@@ -249,11 +249,9 @@ func (sr *StreamRenderer) endThinking() {
 
 	elapsed := time.Since(sr.reasoningStart).Seconds()
 	sr.reasoningDuration = elapsed
-	iconStyle := style.NewStyle().Foreground(sr.theme.Success)
 	labelStyle := style.NewStyle().Foreground(sr.theme.Border).Italic(true)
 
-	fmt.Fprintf(sr.w, "%s %s\n",
-		iconStyle.Render("✔"),
+	fmt.Fprintf(sr.w, "%s\n",
 		labelStyle.Render(fmt.Sprintf("thought (%.1fs)", elapsed)),
 	)
 	sr.reasoningHasText = false

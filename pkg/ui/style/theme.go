@@ -141,19 +141,73 @@ func GetTheme(themeName string) UITheme {
 			ChromaStyle:    "solarized-light",
 		}
 
+	// Japanese mineral pigments (Ultra-low eye fatigue, zero glare)
+	case "kanagawa", "kanagawa-wave":
+		return UITheme{
+			Primary:        Color("#7E9CD8"), // Crystal Blue (Muted, anti-glare)
+			Secondary:      Color("#957FB8"), // Spring Violet (Low-saturation iris)
+			Highlight:      Color("#DCA561"), // Autumn Ochre (Warm desaturated sand)
+			Text:           Color("#DCD7BA"), // Fuji White (Warm parchment, zero eye strain)
+			TextMuted:      Color("#727169"), // Sumi Gray (Balanced readable neutral)
+			Background:     Color("#1F1F28"), // Sumi Ink (Deep matte charcoal)
+			Border:         Color("#2A2A37"), // Subdued ink divider
+			BorderActive:   Color("#7E9CD8"), // Focused crystal blue
+			BorderInactive: Color("#2A2A37"), // Subdued ink divider
+			Success:        Color("#76946A"), // Forest Moss (Calm organic green)
+			Warning:        Color("#E6C384"), // Pale Ochre (Soft natural caution)
+			Error:          Color("#C34043"), // Lacquer Red (Deep brick red, not neon)
+			ChromaStyle:    "dracula",
+		}
+
+	// Nocturnal foam & desaturated mauve (Zero retina burn)
+	case "rose-pine", "rose-pine-moon", "rosepine":
+		return UITheme{
+			Primary:        Color("#9CCFD8"), // Foam Aqua (Calm sea foam)
+			Secondary:      Color("#C4A7E7"), // Iris Mauve (Gentle desaturated lilac)
+			Highlight:      Color("#F6C177"), // Desert Gold (Warm honey sand)
+			Text:           Color("#E0DEF4"), // Soft White (Gentle lavender-tinted foreground)
+			TextMuted:      Color("#6E6A86"), // Muted Slate (Low-contrast background text)
+			Background:     Color("#232136"), // Dark Plum Navy (Restful midnight canvas)
+			Border:         Color("#393552"), // Subtle plum border
+			BorderActive:   Color("#9CCFD8"), // Focused foam border
+			BorderInactive: Color("#393552"), // Subtle plum border
+			Success:        Color("#3E8FB0"), // Pine Cyan (Cool oceanic green-blue)
+			Warning:        Color("#F6C177"), // Desert Gold (Warm honey caution)
+			Error:          Color("#EB6F92"), // Muted Berry (Soft rose, no retina burn)
+			ChromaStyle:    "dracula",
+		}
+
+	// Natural earth & paper tone (Zero blue-light fatigue, warm incandescence)
+	case "zenburn", "earth-calm", "earth":
+		return UITheme{
+			Primary:        Color("#8CD0D3"), // Sea Green (Low-contrast aqua)
+			Secondary:      Color("#DC8CC3"), // Muted Plum (Subdued lavender)
+			Highlight:      Color("#DFAF8F"), // Peach Tan (Warm earthen accent)
+			Text:           Color("#DCDCCC"), // Bleached Parchment (Zero glare paper tone)
+			TextMuted:      Color("#7F9F7F"), // Lichen Sage (Soft green-gray secondary)
+			Background:     Color("#2B2B2B"), // Warm Charcoal (No pure black eye strain)
+			Border:         Color("#3F3F3F"), // Subdued charcoal border
+			BorderActive:   Color("#8CD0D3"), // Focused aqua border
+			BorderInactive: Color("#3F3F3F"), // Subdued charcoal border
+			Success:        Color("#7F9F7F"), // Lichen Green (Restful organic green)
+			Warning:        Color("#DFAF8F"), // Peach Tan (Low-saturation warning)
+			Error:          Color("#CC9393"), // Muted Brick (Dusty terracotta red)
+			ChromaStyle:    "friendly",
+		}
+
 	// Arctic, clean, blue-gray tone
-	case "dark", "nord":
+	case "dark", "nord", "nord-calm":
 		fallthrough
 	default:
 		return UITheme{
 			Primary:        Color("#88C0D0"), // Frost Cyan
-			Secondary:      Color("#B48EAD"), // Frost Purple
+			Secondary:      Color("#81A1C1"), // Glacier Slate (Balanced auxiliary tone)
 			Highlight:      Color("#8FBCBB"), // Soft Sea Green
-			Text:           Color("#ECEFF4"), // Snow White
-			TextMuted:      Color("#4C566A"), // Polar Night Gray
+			Text:           Color("#D8DEE9"), // Snow Mist (Subdued gray-white, prevents halation)
+			TextMuted:      Color("#616E88"), // Polar Twilight Gray
 			Background:     Color("#2E3440"), // Deep Polar Blue
 			Border:         Color("#3B4252"), // Subdued Dark Polar
-			BorderActive:   Color("#81A1C1"), // Bright Ice Blue
+			BorderActive:   Color("#88C0D0"), // Bright Ice Blue
 			BorderInactive: Color("#3B4252"), // Subdued Dark Polar
 			Success:        Color("#A3BE8C"), // Sage Green
 			Warning:        Color("#EBCB8B"), // Soft Ochre
