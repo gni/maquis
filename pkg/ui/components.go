@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"path/filepath"
@@ -489,19 +490,57 @@ func isWriteLikeTool(toolName string) bool {
 	return toolName == "write" || strings.Contains(toolName, "write") || strings.Contains(toolName, "replace")
 }
 
+func getToolGlyph(toolName string) string {
+	lower := strings.ToLower(toolName)
+	switch {
+	case lower == "read" || strings.Contains(lower, "read") || strings.Contains(lower, "view"):
+		return "◈"
+	case lower == "write" || strings.Contains(lower, "write"):
+		return "◆"
+	case lower == "edit" || strings.Contains(lower, "edit") || strings.Contains(lower, "replace") || strings.Contains(lower, "patch"):
+		return "✎"
+	case lower == "bash" || lower == "exec" || lower == "sh" || strings.Contains(lower, "command"):
+		return "$"
+	case lower == "load_skill" || strings.Contains(lower, "skill"):
+		return "✦"
+	case lower == "spawn_subagent" || strings.HasPrefix(lower, "subagent__") || strings.HasPrefix(lower, "swarm_") || lower == "delegate":
+		return "❖"
+	case lower == "task_kill" || lower == "kill":
+		return "✖"
+	case lower == "task_status" || lower == "task_list" || lower == "ps":
+		return "≡"
+	default:
+		return "●"
+	}
+}
+
 func renderToolSymbol(toolName string, status toolRenderStatus, theme UITheme) string {
-	color := theme.TextMuted
-	if status == toolStatusSuccess {
-		color = theme.Success
-	} else if status == toolStatusError {
-		color = theme.Error
+	glyph := getToolGlyph(toolName)
+	if status == toolStatusError {
+		return style.NewStyle().Foreground(theme.Error).Bold(true).Render("!")
 	}
 
-	symbol := "›"
-	if status == toolStatusError {
-		symbol = "!"
+	var color color.Color
+	if status == toolStatusSuccess {
+		color = theme.Success
+	} else {
+		lower := strings.ToLower(toolName)
+		switch {
+		case lower == "read" || strings.Contains(lower, "read") || strings.Contains(lower, "view"):
+			color = theme.Primary
+		case lower == "write" || strings.Contains(lower, "write"):
+			color = theme.Success
+		case lower == "edit" || strings.Contains(lower, "edit") || strings.Contains(lower, "replace"):
+			color = theme.Highlight
+		case lower == "spawn_subagent" || strings.HasPrefix(lower, "subagent__") || strings.HasPrefix(lower, "swarm_") || lower == "delegate":
+			color = theme.Secondary
+		case lower == "load_skill" || strings.Contains(lower, "skill"):
+			color = theme.Highlight
+		default:
+			color = theme.Primary
+		}
 	}
-	return style.NewStyle().Foreground(color).Render(symbol)
+	return style.NewStyle().Foreground(color).Render(glyph)
 }
 
 func RenderToolHeader(w io.Writer, theme UITheme, toolName string, argsJSON string) {
@@ -556,16 +595,16 @@ func RenderToolOutput(w io.Writer, output string, isError bool, collapse bool, t
 		}
 	}
 
-	isCodeTool := toolName == "read" || toolName == "write" || toolName == "edit" ||
+	isCodeTool := (toolName == "read" || toolName == "write" ||
 		strings.Contains(toolName, "read") ||
 		strings.Contains(toolName, "write") ||
-		strings.Contains(toolName, "edit") ||
-		strings.Contains(toolName, "replace") ||
 		strings.Contains(toolName, "view") ||
 		strings.Contains(toolName, "content") ||
-		strings.Contains(toolName, "file")
+		strings.Contains(toolName, "file")) &&
+		!strings.Contains(toolName, "edit") &&
+		!strings.Contains(toolName, "replace")
 
-	if !isError && (isCodeTool || isJSON) {
+	if !isError && (isCodeTool || isJSON) && !strings.Contains(body, "\x1b[") {
 		lang := "plaintext"
 		if isJSON {
 			lang = "json"
@@ -772,13 +811,17 @@ func getActionStyle(toolName string, theme UITheme) style.Style {
 	lower := strings.ToLower(toolName)
 	switch {
 	case lower == "task_kill" || lower == "kill":
-		return style.NewStyle().Foreground(theme.Error)
+		return style.NewStyle().Foreground(theme.Error).Bold(true)
 	case lower == "task_status" || lower == "task_list" || lower == "ps":
-		return style.NewStyle().Foreground(theme.TextMuted)
+		return style.NewStyle().Foreground(theme.TextMuted).Bold(true)
 	case lower == "spawn_subagent" || strings.HasPrefix(lower, "subagent__") || strings.HasPrefix(lower, "swarm_") || lower == "delegate":
-		return style.NewStyle().Foreground(theme.Secondary)
+		return style.NewStyle().Foreground(theme.Secondary).Bold(true)
+	case lower == "edit" || strings.Contains(lower, "edit") || strings.Contains(lower, "replace"):
+		return style.NewStyle().Foreground(theme.Highlight).Bold(true)
+	case lower == "write" || strings.Contains(lower, "write"):
+		return style.NewStyle().Foreground(theme.Success).Bold(true)
 	default:
-		return style.NewStyle().Foreground(theme.Primary)
+		return style.NewStyle().Foreground(theme.Primary).Bold(true)
 	}
 }
 
