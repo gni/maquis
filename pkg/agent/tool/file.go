@@ -33,21 +33,21 @@ func (t *readTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "read",
-			Description: "Read lines of a file using optional 'offset' and 'limit'. To locate a function, class, or symbol, use 'grep' first to get the line number, then use 'read' with 'offset' and 'limit' around that section instead of reading the entire file.",
+			Description: "Read file contents. Use read to examine files instead of cat or sed in bash. Optional offset and limit for large files",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
 					"path": {
 						Type:        "string",
-						Description: "Path to the file to read (relative or absolute).",
+						Description: "Path to the file to read (relative or absolute)",
 					},
 					"offset": {
 						Type:        "number",
-						Description: "Line number to start reading from (1-indexed). Use with limit to view targeted sections.",
+						Description: "Line number to start reading from (1-indexed). Optional",
 					},
 					"limit": {
 						Type:        "number",
-						Description: "Maximum number of lines to read (e.g. 50-100 lines).",
+						Description: "Maximum number of lines to read. Optional",
 					},
 				},
 				Required: []string{"path"},
@@ -103,7 +103,11 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", fmt.Errorf("failed to read file info: %w", err)
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("cannot read: path '%s' is a directory", args.Path)
+		tree, err := ListDirectoryTree(safePath, ctx.GetWorkspaceRoot(), 2, 150)
+		if err != nil {
+			return "", fmt.Errorf("path '%s' is a directory and failed to list contents: %w", args.Path, err)
+		}
+		return fmt.Sprintf("[Path '%s' is a directory. Showing directory contents below. Call 'read' with a specific file path to view its content:]\n\n%s", args.Path, tree), nil
 	}
 	if info.Size() > 500*1024 { // 500KB limit
 		return "", fmt.Errorf("file size (%d bytes) is too large; maximum allowed size is 500KB", info.Size())
@@ -120,8 +124,8 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	}
 
 	contentStr := SanitizeUTF8(data)
-	if strings.TrimSpace(contentStr) == "" {
-		return "", fmt.Errorf("file is empty or contains only whitespace")
+	if len(data) == 0 || strings.TrimSpace(contentStr) == "" {
+		return "(empty file)", nil
 	}
 
 	lines := strings.Split(contentStr, "\n")
@@ -135,9 +139,9 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	limit := args.Limit
 	if limit <= 0 {
-		limit = 500 // default to 500 lines to prevent token blowup
-	} else if limit > 1000 {
-		limit = 1000 // cap maximum lines per read to 1000
+		limit = 1000 // default to 1000 lines so normal files are read completely in one call
+	} else if limit > 2000 {
+		limit = 2000 // cap maximum lines per read to 2000
 	}
 
 	end := offset + limit - 1
@@ -159,7 +163,7 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	result := strings.Join(resultLines, "\n")
 	if truncated {
-		result += fmt.Sprintf("\n\n[File truncated. Showing lines %d-%d of %d. IMPORTANT: You MUST call the read tool again with offset=%d to read the next section!]", offset, end, len(lines), end+1)
+		result += fmt.Sprintf("\n\n[Showing lines %d to %d of %d. Use read with offset=%d to view more]", offset, end, len(lines), end+1)
 	}
 	return result, nil
 }

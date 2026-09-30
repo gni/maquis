@@ -25,17 +25,17 @@ func (t *bashTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "bash",
-			Description: "Execute a shell command inside the workspace and return stdout and stderr.",
+			Description: "Execute a shell command inside the workspace (such as builds, tests, package installation, git commands, and process management). Use dedicated tools for file operations: use 'read' instead of cat/head/tail, and 'edit'/'write' instead of sed/echo",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
 					"command": {
 						Type:        "string",
-						Description: "The command to run in the terminal.",
+						Description: "The command to run in the terminal",
 					},
 					"background": {
 						Type:        "boolean",
-						Description: "Whether to run the command in the background (as a background task). Useful for long-running processes, servers, or large builds so you don't block.",
+						Description: "Whether to run the command in the background as a background task",
 					},
 				},
 				Required: []string{"command"},

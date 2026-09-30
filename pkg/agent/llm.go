@@ -686,8 +686,8 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 	compressed.Function.Parameters.Properties = newProps
 
 	switch t.Function.Name {
-	case "bash", "ls":
-		compressed.Function.Description = "Run bash command"
+	case "bash":
+		compressed.Function.Description = "Run shell commands (builds, tests, git). Use read instead of cat/head/tail to inspect files."
 		if prop, ok := compressed.Function.Parameters.Properties["command"]; ok {
 			prop.Description = "Command string"
 			compressed.Function.Parameters.Properties["command"] = prop
@@ -696,8 +696,28 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			prop.Description = "Run in background"
 			compressed.Function.Parameters.Properties["background"] = prop
 		}
+	case "list", "ls":
+		compressed.Function.Description = "List directory contents"
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Directory path"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["depth"]; ok {
+			prop.Description = "Depth limit"
+			compressed.Function.Parameters.Properties["depth"] = prop
+		}
+	case "find":
+		compressed.Function.Description = "Find files matching a glob pattern"
+		if prop, ok := compressed.Function.Parameters.Properties["pattern"]; ok {
+			prop.Description = "Glob pattern"
+			compressed.Function.Parameters.Properties["pattern"] = prop
+		}
+		if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
+			prop.Description = "Search directory"
+			compressed.Function.Parameters.Properties["path"] = prop
+		}
 	case "read":
-		compressed.Function.Description = "Read file lines with offset and limit. Use grep first to locate target lines instead of reading entire files."
+		compressed.Function.Description = "Read file contents. Use read to examine files instead of cat or sed in bash."
 		if compressed.Function.Parameters.Properties != nil {
 			if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
 				prop.Description = "File path"

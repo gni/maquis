@@ -92,6 +92,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	if maxSteps <= 0 {
 		maxSteps = 30
 	}
+	callCounts := make(map[string]int)
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return
@@ -367,6 +368,16 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				}
 				if toolOutput == "" {
 					toolOutput = "(no output)"
+				}
+
+				if tc.Function.Name == "write" || tc.Function.Name == "edit" {
+					callCounts = make(map[string]int)
+				} else {
+					callKey := tc.Function.Name + ":" + strings.TrimSpace(tc.Function.Arguments)
+					callCounts[callKey]++
+					if callCounts[callKey] >= 2 && toolErr == nil {
+						toolOutput += "\n\n[Notice: You have inspected this target multiple times with identical arguments. The content has not changed. If no changes are needed, conclude your response or proceed to write/edit.]"
+					}
 				}
 
 				if !isSubagent && !approvalRendered && len(assistantMsg.ToolCalls) == 1 {

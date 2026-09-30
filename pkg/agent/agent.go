@@ -133,6 +133,8 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 	a.Registry.Register(tool.NewWriteTool())
 	a.Registry.Register(tool.NewEditTool())
 	a.Registry.Register(tool.NewGrepTool())
+	a.Registry.Register(tool.NewListTool())
+	a.Registry.Register(tool.NewFindTool())
 	a.Registry.Register(tool.NewLoadSkillTool())
 	a.Registry.Register(tool.NewTaskStatusTool())
 	a.Registry.Register(tool.NewTaskKillTool())
@@ -281,7 +283,24 @@ func (a *Agent) SafePath(inputPath string) (string, error) {
 		prefix += string(filepath.Separator)
 	}
 
+	// Resilient fallback: if cleanTarget does not exist, check if inputPath repeated the workspace root folder name
+	// (for example calling 'tests/fastapi_boilerplate' when workspace root is already '/workspace/tests').
+	if _, err := os.Stat(cleanTarget); os.IsNotExist(err) {
+		rootBase := filepath.Base(cleanRoot)
+		slashInput := filepath.ToSlash(inputPath)
+		if strings.HasPrefix(slashInput, rootBase+"/") {
+			stripped := strings.TrimPrefix(slashInput, rootBase+"/")
+			altTarget := filepath.Clean(filepath.Join(cleanRoot, stripped))
+			if _, altErr := os.Stat(altTarget); altErr == nil {
+				cleanTarget = altTarget
+			}
+		}
+	}
+
 	if !strings.HasPrefix(cleanTarget, prefix) {
+		if strings.TrimSpace(inputPath) == ".." {
+			return "", fmt.Errorf("path '..' is outside workspace root '%s'. Workspace root is the top-level directory", a.WorkspaceRoot)
+		}
 		return "", fmt.Errorf("security violation: path '%s' escapes workspace root '%s'", inputPath, a.WorkspaceRoot)
 	}
 

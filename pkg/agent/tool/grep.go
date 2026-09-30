@@ -35,40 +35,39 @@ func (t *grepTool) Definition() Tool {
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "grep",
-			Description: "Search file contents for regular expressions or literal strings across the workspace (like grep -rn). Returns matching file paths, line numbers, and lines. Automatically respects .gitignore and ignores dependency/build directories.",
+			Description: "Search file contents for regular expressions or literal strings across the workspace (like grep -rn). Returns matching file paths, line numbers, and lines. If pattern is empty and glob is provided, lists matching file paths. Automatically respects .gitignore and ignores dependency/build directories",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
 					"pattern": {
 						Type:        "string",
-						Description: "The regular expression or literal string to search for.",
+						Description: "The regular expression or literal string to search for in file contents. Required unless glob is provided to find files",
 					},
 					"path": {
 						Type:        "string",
-						Description: "Directory or file path to search within (relative to workspace, defaults to '.').",
+						Description: "Directory or file path to search within (default: current directory)",
 					},
 					"glob": {
 						Type:        "string",
-						Description: "Optional glob pattern to filter filenames (e.g. '*.go', '*.py', 'src/**/*.ts').",
+						Description: "Optional glob pattern to filter filenames (e.g. *.go, *.py, src/**/*.ts). When pattern is empty, grep lists matching file paths",
 					},
 					"ignore_case": {
 						Type:        "boolean",
-						Description: "Case-insensitive search (default: false).",
+						Description: "Case-insensitive search (default: false)",
 					},
 					"literal": {
 						Type:        "boolean",
-						Description: "Treat pattern as a literal string instead of a regular expression (default: false).",
+						Description: "Treat pattern as a literal string instead of a regular expression (default: false)",
 					},
 					"context": {
 						Type:        "number",
-						Description: "Number of context lines to display before and after each match (default: 0).",
+						Description: "Number of context lines to display before and after each match (default: 0)",
 					},
 					"limit": {
 						Type:        "number",
-						Description: "Maximum number of matching lines to return (default: 100, max: 500).",
+						Description: "Maximum number of matching lines to return (default: 100, max: 500)",
 					},
 				},
-				Required: []string{"pattern"},
 			},
 		},
 	}
@@ -111,8 +110,9 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			pattern = args.Q
 		}
 	}
-	if pattern == "" {
-		return "", fmt.Errorf("pattern is required for grep")
+	globPattern := strings.TrimSpace(args.Glob)
+	if pattern == "" && globPattern == "" {
+		return "", fmt.Errorf("pattern is required for grep (or provide a glob pattern to list matching files, e.g. glob='*.py')")
 	}
 
 	searchPath := args.Path
@@ -146,28 +146,30 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	}
 
 	var matchFunc func(line string) bool
-	if literal {
-		if ignoreCase {
-			lowerPattern := strings.ToLower(pattern)
-			matchFunc = func(line string) bool {
-				return strings.Contains(strings.ToLower(line), lowerPattern)
+	if pattern != "" {
+		if literal {
+			if ignoreCase {
+				lowerPattern := strings.ToLower(pattern)
+				matchFunc = func(line string) bool {
+					return strings.Contains(strings.ToLower(line), lowerPattern)
+				}
+			} else {
+				matchFunc = func(line string) bool {
+					return strings.Contains(line, pattern)
+				}
 			}
 		} else {
-			matchFunc = func(line string) bool {
-				return strings.Contains(line, pattern)
+			regexPattern := pattern
+			if ignoreCase && !strings.HasPrefix(regexPattern, "(?i)") {
+				regexPattern = "(?i)" + regexPattern
 			}
-		}
-	} else {
-		regexPattern := pattern
-		if ignoreCase && !strings.HasPrefix(regexPattern, "(?i)") {
-			regexPattern = "(?i)" + regexPattern
-		}
-		re, err := regexp.Compile(regexPattern)
-		if err != nil {
-			return "", fmt.Errorf("invalid regular expression '%s': %w", pattern, err)
-		}
-		matchFunc = func(line string) bool {
-			return re.MatchString(line)
+			re, err := regexp.Compile(regexPattern)
+			if err != nil {
+				return "", fmt.Errorf("invalid regular expression '%s': %w", pattern, err)
+			}
+			matchFunc = func(line string) bool {
+				return re.MatchString(line)
+			}
 		}
 	}
 
@@ -179,7 +181,6 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	workspaceRoot := ctx.GetWorkspaceRoot()
 	gitIgnorePatterns := loadGitIgnore(workspaceRoot)
 
-	globPattern := strings.TrimSpace(args.Glob)
 	if globPattern != "" {
 		globPattern = strings.ToLower(globPattern)
 	}
@@ -196,6 +197,21 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 		fInfo, err := os.Stat(filePath)
 		if err != nil || fInfo.IsDir() || fInfo.Size() == 0 || fInfo.Size() > maxGrepFileSize {
+			return nil
+		}
+
+		if pattern == "" {
+			relPath, err := filepath.Rel(workspaceRoot, filePath)
+			if err != nil {
+				relPath = filePath
+			}
+			relPath = filepath.ToSlash(relPath)
+			out.WriteString(relPath + "\n")
+			totalMatches++
+			if totalMatches >= limit {
+				limitReached = true
+				return fs.SkipAll
+			}
 			return nil
 		}
 
@@ -329,6 +345,9 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 
 	result := out.String()
 	if strings.TrimSpace(result) == "" {
+		if pattern == "" && globPattern != "" {
+			return fmt.Sprintf("No files found matching glob: %s", globPattern), nil
+		}
 		return fmt.Sprintf("No matches found for pattern: %s", pattern), nil
 	}
 
