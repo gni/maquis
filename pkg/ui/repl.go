@@ -100,7 +100,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 				"endpoint", "model", "temperature", "auto_approve", "show_thinking",
 				"collapse_results", "show_tokens", "theme", "syntax_theme", "context_limit", "steps",
 				"direct_commands", "cert_file", "key_file", "skip_verify", "reasoning_effort",
-				"before_tool_hook", "after_tool_hook",
+				"before_tool_hook", "after_tool_hook", "debug", "debug_file",
 			}
 			if !isSet {
 				configCandidates = append(configCandidates, "show", "set")
@@ -250,6 +250,7 @@ func autoCompleteCallback(line string, pos int, key rune, a *agent.Agent) (strin
 }
 
 type customHistory struct {
+	mu      sync.RWMutex
 	entries []string
 	fullMap map[string]string
 }
@@ -272,6 +273,8 @@ func (h *customHistory) Add(entry string) {
 	if raw == "" {
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.fullMap == nil {
 		h.fullMap = make(map[string]string)
 	}
@@ -287,10 +290,14 @@ func (h *customHistory) Add(entry string) {
 }
 
 func (h *customHistory) Len() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return len(h.entries)
 }
 
 func (h *customHistory) At(idx int) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if idx < 0 || idx >= len(h.entries) {
 		return ""
 	}
@@ -298,6 +305,8 @@ func (h *customHistory) At(idx int) string {
 }
 
 func (h *customHistory) GetFull(line string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.fullMap == nil {
 		return line
 	}
@@ -351,6 +360,9 @@ type keyInterceptorReader struct {
 	approvalReader   *approvalByteReader
 	injectChan       chan byte
 	typeAheadBuffer  []byte
+	historyIndex     int
+	savedTypeAhead   []byte
+	hist             term.History
 	inBracketedPaste bool
 	bracketedBuffer  []byte
 	isAtMainPrompt   bool
@@ -358,6 +370,49 @@ type keyInterceptorReader struct {
 	pastedCodeBlocks map[string]string
 	promptQueue      []string
 	promptQueueMu    sync.Mutex
+}
+
+func (ki *keyInterceptorReader) resetTypeAheadLocked() {
+	ki.typeAheadBuffer = nil
+	ki.historyIndex = -1
+	ki.savedTypeAhead = nil
+}
+
+func (ki *keyInterceptorReader) navigateHistory(direction int) {
+	getUI().StateMu.Lock()
+	if ki.hist == nil && ki.rl != nil && ki.rl.History != nil {
+		ki.hist = ki.rl.History
+	}
+	if ki.hist == nil || ki.hist.Len() == 0 {
+		getUI().StateMu.Unlock()
+		return
+	}
+
+	if direction > 0 { // Up arrow / older history
+		if ki.historyIndex == -1 {
+			ki.savedTypeAhead = append([]byte(nil), ki.typeAheadBuffer...)
+			ki.historyIndex = 0
+			entry := ki.hist.At(ki.historyIndex)
+			ki.typeAheadBuffer = []byte(entry)
+		} else if ki.historyIndex+1 < ki.hist.Len() {
+			ki.historyIndex++
+			entry := ki.hist.At(ki.historyIndex)
+			ki.typeAheadBuffer = []byte(entry)
+		}
+	} else if direction < 0 { // Down arrow / newer history
+		if ki.historyIndex > 0 {
+			ki.historyIndex--
+			entry := ki.hist.At(ki.historyIndex)
+			ki.typeAheadBuffer = []byte(entry)
+		} else if ki.historyIndex == 0 {
+			ki.historyIndex = -1
+			ki.typeAheadBuffer = append([]byte(nil), ki.savedTypeAhead...)
+			ki.savedTypeAhead = nil
+		}
+	}
+	getUI().StateMu.Unlock()
+
+	ki.redrawTypeAhead()
 }
 
 func (ki *keyInterceptorReader) EnqueuePrompt(prompt string) int {
@@ -533,14 +588,23 @@ func (ki *keyInterceptorReader) copyReadData(p, data []byte) int {
 }
 
 func (ki *keyInterceptorReader) Drain() {
-	if ki.inputChan == nil {
-		return
+	if ki.inputChan != nil {
+		for {
+			select {
+			case <-ki.inputChan:
+			default:
+				goto drainInject
+			}
+		}
 	}
-	for {
-		select {
-		case <-ki.inputChan:
-		default:
-			return
+drainInject:
+	if ki.injectChan != nil {
+		for {
+			select {
+			case <-ki.injectChan:
+			default:
+				return
+			}
 		}
 	}
 }
@@ -649,7 +713,7 @@ func (ki *keyInterceptorReader) handleSubagentCancellation(rawInput <-chan byte,
 	}
 
 	getUI().StateMu.Lock()
-	ki.typeAheadBuffer = nil
+	ki.resetTypeAheadLocked()
 	getUI().StateMu.Unlock()
 }
 
@@ -676,25 +740,41 @@ func (ki *keyInterceptorReader) handleCtrlO() {
 func (ki *keyInterceptorReader) handleCtrlT() {
 	activeTheme := GetConfiguredTheme(ki.agent.Config)
 	ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
+	if ki.agent.Config.ShowThinking {
+		if strings.ToLower(ki.agent.Config.ReasoningEffort) == "off" || ki.agent.Config.ReasoningEffort == "" {
+			ki.agent.Config.ReasoningEffort = "low"
+		}
+	}
 	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 	DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
 }
 
 func (ki *keyInterceptorReader) handleCtrlR() {
 	activeTheme := GetConfiguredTheme(ki.agent.Config)
+	currentEffort := strings.ToLower(strings.TrimSpace(ki.agent.Config.ReasoningEffort))
+
 	nextEffort := "low"
-	switch strings.ToLower(ki.agent.Config.ReasoningEffort) {
+	switch currentEffort {
+	case "off", "none", "":
+		nextEffort = "low"
+		ki.agent.Config.ShowThinking = true
 	case "low":
 		nextEffort = "medium"
+		ki.agent.Config.ShowThinking = true
 	case "medium":
 		nextEffort = "high"
+		ki.agent.Config.ShowThinking = true
 	case "high":
 		nextEffort = "max"
+		ki.agent.Config.ShowThinking = true
 	case "max":
-		nextEffort = "low"
+		nextEffort = "off"
+		ki.agent.Config.ShowThinking = false
 	default:
 		nextEffort = "low"
+		ki.agent.Config.ShowThinking = true
 	}
+
 	ki.agent.Config.ReasoningEffort = nextEffort
 	_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
 	DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
@@ -1101,6 +1181,22 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 	for i := 0; i < n; i++ {
 		b := p[i]
 		if b == 3 { // Ctrl+C
+			if ki.agent != nil {
+				ki.agent.TasksMu.Lock()
+				if ki.agent.StreamingTask != "" {
+					streamingID := ki.agent.StreamingTask
+					ki.agent.StreamingTask = ""
+					ki.agent.TasksMu.Unlock()
+					fmt.Fprintf(os.Stderr, "\n[Stopped streaming %s]\n", streamingID)
+					if ki.isAtMainPrompt {
+						ki.ctrlCInterrupted = true
+						p[writeIdx] = '\n'
+						writeIdx++
+					}
+					continue
+				}
+				ki.agent.TasksMu.Unlock()
+			}
 			if ki.isAtMainPrompt {
 				ki.ctrlCInterrupted = true
 				p[writeIdx] = '\n'
@@ -1113,28 +1209,10 @@ func (ki *keyInterceptorReader) Read(p []byte) (int, error) {
 			p[writeIdx] = b
 			writeIdx++
 		} else if b == 20 || b == 18 || b == 15 { // Ctrl+T, Ctrl+R, or Ctrl+O
-			activeTheme := GetConfiguredTheme(ki.agent.Config)
 			if b == 20 { // Ctrl+T
-				ki.agent.Config.ShowThinking = !ki.agent.Config.ShowThinking
-				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-				DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
+				ki.handleCtrlT()
 			} else if b == 18 { // Ctrl+R
-				nextEffort := "low"
-				switch strings.ToLower(ki.agent.Config.ReasoningEffort) {
-				case "low":
-					nextEffort = "medium"
-				case "medium":
-					nextEffort = "high"
-				case "high":
-					nextEffort = "max"
-				case "max":
-					nextEffort = "low"
-				default:
-					nextEffort = "low"
-				}
-				ki.agent.Config.ReasoningEffort = nextEffort
-				_ = config.SaveConfig(ki.agent.ConfigPath, ki.agent.Config)
-				DrawStaticPromptSeparator(ki.w, ki.agent.Config.ShowThinking, ki.agent.Config.ReasoningEffort, activeTheme)
+				ki.handleCtrlR()
 			} else if b == 15 { // Ctrl+O
 				ki.handleCtrlO()
 			}
@@ -1225,6 +1303,8 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		inputChan:    make(chan byte, 1000),
 		approvalChan: make(chan byte, 1000),
 		injectChan:   make(chan byte, 100),
+		hist:         hist,
+		historyIndex: -1,
 	}
 	getUI().ActiveInputReader = kiReader
 	defer func() {
@@ -1253,12 +1333,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 	go func() {
 		for event := range a.SystemEvents {
-			a.TasksMu.Lock()
-			a.PendingSystemEvent = event
-			a.TasksMu.Unlock()
-			// \025 is Ctrl+U (clears the current input line), \n submits it
-			for _, b := range []byte("\025\n") {
-				kiReader.injectChan <- b
+			activeTheme := GetConfiguredTheme(a.Config)
+			DrawStatusBar(os.Stderr, activeTheme)
+
+			if event != "" && kiReader.isAtMainPrompt {
+				getUI().SetPromptHint(fmt.Sprintf("[%s]", event), 3*time.Second, nil)
 			}
 		}
 	}()
@@ -1284,7 +1363,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 					}
 					kiReader.printCancelMessage()
 					getUI().StateMu.Lock()
-					kiReader.typeAheadBuffer = nil
+					kiReader.resetTypeAheadLocked()
 					getUI().StateMu.Unlock()
 					kiReader.approvalChan <- b
 					continue
@@ -1300,7 +1379,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 						}
 						kiReader.printCancelMessage()
 						getUI().StateMu.Lock()
-						kiReader.typeAheadBuffer = nil
+						kiReader.resetTypeAheadLocked()
 						getUI().StateMu.Unlock()
 						kiReader.approvalChan <- b
 					}
@@ -1334,10 +1413,11 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			if cancelFunc != nil {
 				if b == 3 || b == 4 { // Ctrl+C or Ctrl+D
 					cancelFunc()
-					kiReader.printCancelMessage()
 					getUI().StateMu.Lock()
-					kiReader.typeAheadBuffer = nil
+					getUI().ActiveCancelFunc = nil
+					kiReader.resetTypeAheadLocked()
 					getUI().StateMu.Unlock()
+					kiReader.printCancelMessage()
 					cleared := kiReader.ClearQueue()
 					getUI().StateMu.Lock()
 					getUI().State.QueuedPromptsCount = 0
@@ -1361,25 +1441,60 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				if b == 27 { // Escape
 					select {
 					case next := <-rawChan:
-						kiReader.inputChan <- b
-						kiReader.inputChan <- next
 						if next == '[' || next == 'O' {
 							select {
 							case dir := <-rawChan:
+								if dir == 'A' { // Up arrow
+									kiReader.navigateHistory(1)
+									continue
+								}
+								if dir == 'B' { // Down arrow
+									kiReader.navigateHistory(-1)
+									continue
+								}
+								if dir == '[' {
+									select {
+									case dir2 := <-rawChan:
+										if dir2 == 'A' {
+											kiReader.navigateHistory(1)
+											continue
+										}
+										if dir2 == 'B' {
+											kiReader.navigateHistory(-1)
+											continue
+										}
+										kiReader.inputChan <- b
+										kiReader.inputChan <- next
+										kiReader.inputChan <- dir
+										kiReader.inputChan <- dir2
+									case <-time.After(20 * time.Millisecond):
+										kiReader.inputChan <- b
+										kiReader.inputChan <- next
+										kiReader.inputChan <- dir
+									}
+									continue
+								}
+								if dir == 'C' || dir == 'D' {
+									// Ignore plain left/right arrow keystrokes during stream
+									continue
+								}
+								kiReader.inputChan <- b
+								kiReader.inputChan <- next
 								kiReader.inputChan <- dir
-								time.Sleep(2 * time.Millisecond)
-								TerminalMu.Lock()
-								drawConsoleStaticControlsLocked(os.Stderr, kiReader.agent, kiReader, kiReader.rl, true)
-								TerminalMu.Unlock()
 							case <-time.After(20 * time.Millisecond):
+								kiReader.inputChan <- b
+								kiReader.inputChan <- next
 							}
+						} else {
+							kiReader.inputChan <- b
+							kiReader.inputChan <- next
 						}
 					case <-time.After(50 * time.Millisecond):
 						if cancelFunc != nil {
 							cancelFunc()
 							kiReader.printCancelMessage()
 							getUI().StateMu.Lock()
-							kiReader.typeAheadBuffer = nil
+							kiReader.resetTypeAheadLocked()
 							getUI().StateMu.Unlock()
 							kiReader.ClearQueue()
 							getUI().StateMu.Lock()
@@ -1389,6 +1504,14 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 							DrawStatusBar(os.Stderr, activeTheme)
 						}
 					}
+					continue
+				}
+				if b == 16 { // Ctrl+P (Up / Previous history)
+					kiReader.navigateHistory(1)
+					continue
+				}
+				if b == 14 { // Ctrl+N (Down / Next history)
+					kiReader.navigateHistory(-1)
 					continue
 				}
 				if b == 15 { // Ctrl+O
@@ -1424,7 +1547,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				if b == 10 || b == 13 {
 					getUI().StateMu.Lock()
 					typed := string(kiReader.typeAheadBuffer)
-					kiReader.typeAheadBuffer = nil
+					kiReader.resetTypeAheadLocked()
 					getUI().StateMu.Unlock()
 
 					trimmed := strings.TrimSpace(typed)
@@ -1511,6 +1634,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 						redrawScreen(os.Stderr, a, kiReader, rl)
 					} else {
 						handleResize(os.Stderr, a, kiReader, rl)
+						kiReader.redrawTypeAhead()
 					}
 				}
 			})
@@ -1530,14 +1654,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		var err error
 		fromQueue := false
 
-		a.TasksMu.Lock()
-		pendingEvent := a.PendingSystemEvent
-		a.PendingSystemEvent = ""
-		a.TasksMu.Unlock()
-
-		if pendingEvent != "" {
-			line = "/system_event " + pendingEvent
-		} else if queued, ok := kiReader.DequeuePrompt(); ok {
+		if queued, ok := kiReader.DequeuePrompt(); ok {
 			line = queued
 			fromQueue = true
 			getUI().StateMu.Lock()
@@ -1549,7 +1666,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 
 			getUI().StateMu.Lock()
 			uncommitted := append([]byte(nil), kiReader.typeAheadBuffer...)
-			kiReader.typeAheadBuffer = nil
+			kiReader.resetTypeAheadLocked()
 			getUI().StateMu.Unlock()
 			for _, b := range uncommitted {
 				kiReader.injectChan <- b
@@ -1576,14 +1693,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			kiReader.isAtMainPrompt = false
 			fmt.Fprint(os.Stderr, "\x1b[?2004l")
 			term.Restore(fd, oldState)
-
-			a.TasksMu.Lock()
-			pendingEvent = a.PendingSystemEvent
-			a.PendingSystemEvent = ""
-			a.TasksMu.Unlock()
-			if pendingEvent != "" {
-				line = "/system_event " + pendingEvent
-			}
 		}
 
 		if height > 0 {
@@ -1610,8 +1719,13 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 				kiReader.pastedText = ""
 				kiReader.pastedCodeBlocks = nil
 				getUI().StateMu.Lock()
-				kiReader.typeAheadBuffer = nil
+				kiReader.resetTypeAheadLocked()
 				getUI().StateMu.Unlock()
+				kiReader.ClearQueue()
+				getUI().StateMu.Lock()
+				getUI().State.QueuedPromptsCount = 0
+				getUI().StateMu.Unlock()
+				kiReader.Drain()
 				activeTasks := 0
 				for _, t := range a.ListTasks() {
 					if t.Status == "running" {
@@ -1658,32 +1772,6 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		}
 
 		if strings.HasPrefix(line, "/system_event ") {
-			eventMsg := strings.TrimPrefix(line, "/system_event ")
-
-			// Draw a small, subtle indicator instead of the giant prompt block
-			eventStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-			fmt.Fprintf(ppWriter, "\n%s\n", eventStyle.Render("✦ "+eventMsg))
-
-			ctx, cancel := context.WithCancel(context.Background())
-			getUI().StateMu.Lock()
-			getUI().ActiveCancelFunc = cancel
-			kiReader.typeAheadBuffer = nil
-			getUI().StateMu.Unlock()
-
-			restore, err := setNonCanonical(fd)
-
-			a.RunAgentLoop(ctx, ppWriter, &messages, eventMsg, allowedTools, theme, false, currentSessionID)
-
-			if err == nil && restore != nil {
-				restore()
-			}
-			cancel()
-			getUI().StateMu.Lock()
-			getUI().ActiveCancelFunc = nil
-			getUI().StateMu.Unlock()
-			kiReader.Drain()
-
-			redrawScreen(os.Stderr, a, kiReader, rl)
 			continue
 		}
 
@@ -1835,8 +1923,13 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 		borderStyle := style.NewStyle().Foreground(theme.Border)
 		statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 		thinkingText := "off"
-		if a.Config.ShowThinking {
-			thinkingText = a.Config.ReasoningEffort
+		effort := strings.ToLower(strings.TrimSpace(a.Config.ReasoningEffort))
+		if a.Config.ShowThinking && effort != "off" && effort != "none" {
+			if effort == "" {
+				thinkingText = "low"
+			} else {
+				thinkingText = effort
+			}
 		}
 		statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
 		prefix := "─── prompt "
@@ -1894,7 +1987,7 @@ func RunREPL(a *agent.Agent, allowedTools []string, theme style.UITheme, initial
 			ctx, cancel := context.WithCancel(context.Background())
 			getUI().StateMu.Lock()
 			getUI().ActiveCancelFunc = cancel
-			kiReader.typeAheadBuffer = nil
+			kiReader.resetTypeAheadLocked()
 			getUI().StateMu.Unlock()
 
 			restore, err := setNonCanonical(fd)
@@ -2048,7 +2141,15 @@ func drawConsoleStaticControlsLocked(w io.Writer, a *agent.Agent, kiReader *keyI
 	inputLine := ""
 	posOffset := 0
 	if drawPrompt {
-		if rl != nil {
+		getUI().StateMu.Lock()
+		activeOp := getUI().ActiveCancelFunc != nil
+		getUI().StateMu.Unlock()
+		if activeOp && kiReader != nil {
+			getUI().StateMu.Lock()
+			inputLine = string(kiReader.typeAheadBuffer)
+			posOffset = len([]rune(inputLine))
+			getUI().StateMu.Unlock()
+		} else if rl != nil {
 			inputLine, posOffset = getTerminalLine(rl)
 		} else if kiReader != nil {
 			inputLine = kiReader.currentInputLine

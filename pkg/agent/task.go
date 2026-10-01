@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -134,9 +135,9 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 		}
 		a.TasksMu.Unlock()
 
-		// Send event to the agent loop!
+		// Send notification event for listeners (e.g. UI status bar)
 		select {
-		case a.SystemEvents <- fmt.Sprintf("System Event: Background task %s finished with status %s. Please review the output or logs.", task.ID, finalStatus):
+		case a.SystemEvents <- fmt.Sprintf("Background task %s finished: %s", task.ID, finalStatus):
 		default:
 		}
 	}()
@@ -147,18 +148,27 @@ func (a *Agent) SpawnTask(command string, w io.Writer) (string, error) {
 func (a *Agent) KillTask(id string) error {
 	a.TasksMu.Lock()
 	task, exists := a.Tasks[id]
+	if !exists && !strings.HasPrefix(id, "task_") {
+		task, exists = a.Tasks["task_"+id]
+		if exists {
+			id = "task_" + id
+		}
+	}
 	a.TasksMu.Unlock()
 
 	if !exists {
-		return fmt.Errorf("task not found")
+		return fmt.Errorf("task %s not found", id)
 	}
 
 	task.mu.Lock()
 	defer task.mu.Unlock()
 
 	if task.Status != "running" {
-		return fmt.Errorf("task is not running (status: %s)", task.Status)
+		return fmt.Errorf("task %s is not running (status: %s)", id, task.Status)
 	}
+
+	task.Status = "killed"
+	task.EndTime = time.Now()
 
 	if task.Cmd != nil && task.Cmd.Process != nil {
 		pgid, err := syscall.Getpgid(task.Cmd.Process.Pid)
@@ -175,18 +185,22 @@ func (a *Agent) KillTask(id string) error {
 		}
 	}
 
-	task.Status = "killed"
-	task.EndTime = time.Now()
 	return nil
 }
 
 func (a *Agent) GetTaskStatus(id string) (string, string, error) {
 	a.TasksMu.Lock()
 	task, exists := a.Tasks[id]
+	if !exists && !strings.HasPrefix(id, "task_") {
+		task, exists = a.Tasks["task_"+id]
+		if exists {
+			id = "task_" + id
+		}
+	}
 	a.TasksMu.Unlock()
 
 	if !exists {
-		return "", "", fmt.Errorf("task not found")
+		return "", "", fmt.Errorf("task %s not found", id)
 	}
 
 	task.mu.Lock()
@@ -258,6 +272,12 @@ func (a *Agent) ToggleStreaming(id string, w io.Writer) {
 	a.TasksMu.Lock()
 	defer a.TasksMu.Unlock()
 
+	if !strings.HasPrefix(id, "task_") {
+		if _, exists := a.Tasks["task_"+id]; exists {
+			id = "task_" + id
+		}
+	}
+
 	if a.StreamingTask == id {
 		a.StreamingTask = ""
 		fmt.Fprintf(w, "\n[Stopped streaming output of %s]\n", id)
@@ -323,4 +343,42 @@ func (a *Agent) CountActiveTasks() int {
 		}
 	}
 	return count
+}
+
+// KillAllTasks terminates all currently running background tasks and their process groups.
+func (a *Agent) KillAllTasks() int {
+	if a == nil {
+		return 0
+	}
+	a.TasksMu.Lock()
+	var runningIds []string
+	for id, t := range a.Tasks {
+		t.mu.Lock()
+		if t.Status == "running" {
+			runningIds = append(runningIds, id)
+		}
+		t.mu.Unlock()
+	}
+	a.TasksMu.Unlock()
+
+	killed := 0
+	for _, id := range runningIds {
+		if err := a.KillTask(id); err == nil {
+			killed++
+		}
+	}
+	return killed
+}
+
+// ClearTasks terminates all running background tasks and clears the task registry.
+func (a *Agent) ClearTasks() int {
+	if a == nil {
+		return 0
+	}
+	killed := a.KillAllTasks()
+	a.TasksMu.Lock()
+	a.Tasks = make(map[string]*Task)
+	a.StreamingTask = ""
+	a.TasksMu.Unlock()
+	return killed
 }

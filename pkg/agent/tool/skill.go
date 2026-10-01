@@ -14,6 +14,10 @@ func NewLoadSkillTool() ToolExecutor {
 
 func (t *loadSkillTool) Name() string { return "load_skill" }
 
+func (t *loadSkillTool) PromptSnippet() string {
+	return "Load detailed reference skill instructions"
+}
+
 func (t *loadSkillTool) Definition() Tool {
 	return Tool{
 		Type: "function",

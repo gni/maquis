@@ -47,6 +47,8 @@ type Config struct {
 	MaxCompletionTokens  int                        `json:"max_completion_tokens,omitempty"`
 	CompactPrompt        bool                       `json:"compact_prompt,omitempty"`
 	DisableLocalPlugins  bool                       `json:"disable_local_plugins,omitempty"`
+	DebugLogFile         string                     `json:"debug_log_file,omitempty"`
+	MaxSubagentDepth     int                        `json:"max_subagent_depth,omitempty"`
 }
 
 func DefaultConfig() *Config {

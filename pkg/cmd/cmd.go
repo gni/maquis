@@ -35,6 +35,8 @@ var (
 	directCommandsFlag  bool
 	maxCompletionTokensFlag int
 	compactPrompt       bool
+	debugFileFlag       string
+	maxSubagentDepthFlag int
 )
 
 var rootCmd = &cobra.Command{
@@ -87,6 +89,12 @@ var rootCmd = &cobra.Command{
 		}
 		if cmd.Flags().Changed("compact") {
 			cfg.CompactPrompt = compactPrompt
+		}
+		if debugFileFlag != "" {
+			cfg.DebugLogFile = debugFileFlag
+		}
+		if cmd.Flags().Changed("max-subagent-depth") {
+			cfg.MaxSubagentDepth = maxSubagentDepthFlag
 		}
 
 		theme := ui.GetConfiguredTheme(cfg)
@@ -409,6 +417,8 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&maxCompletionTokensFlag, "max-completion-tokens", 0, "Override maximum completion/output tokens limit (default: 16384)")
 	rootCmd.PersistentFlags().BoolVar(&directCommandsFlag, "direct", false, "Enable direct execution of local shell commands (default: true in config)")
 	rootCmd.PersistentFlags().BoolVar(&compactPrompt, "compact", false, "Enable highly compressed system instructions for smaller models")
+	rootCmd.PersistentFlags().StringVar(&debugFileFlag, "debug-file", "", "Path to debug execution log file (default: maquis_debug.log in workspace)")
+	rootCmd.PersistentFlags().IntVar(&maxSubagentDepthFlag, "max-subagent-depth", 0, "Maximum subagent nesting depth (default: 0, leaf subagents cannot spawn further subagents)")
 
 	configCmd.AddCommand(configShowCmd, configEditCmd)
 	sessionCmd.AddCommand(sessionListCmd, sessionNewCmd, sessionClearCmd)

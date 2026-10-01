@@ -594,11 +594,63 @@ func RunInteractiveConfig(cfg *config.Config, theme UITheme, rlInput io.Reader, 
 		{
 			id:          "show_thinking",
 			name:        "show thinking",
-			value:       func() string { return formatBool(cloned.ShowThinking) },
+			value: func() string {
+				effort := strings.ToLower(strings.TrimSpace(cloned.ReasoningEffort))
+				isThinking := cloned.ShowThinking && effort != "off" && effort != "none"
+				return formatBool(isThinking)
+			},
 			description: "Stream the LLM thinking/reasoning process",
 			isBool:      true,
 			onToggle: func() {
-				cloned.ShowThinking = !cloned.ShowThinking
+				effort := strings.ToLower(strings.TrimSpace(cloned.ReasoningEffort))
+				isThinking := cloned.ShowThinking && effort != "off" && effort != "none"
+				if isThinking {
+					cloned.ShowThinking = false
+					cloned.ReasoningEffort = "off"
+				} else {
+					cloned.ShowThinking = true
+					cloned.ReasoningEffort = "low"
+				}
+			},
+		},
+		{
+			id:          "reasoning_effort",
+			name:        "reasoning effort",
+			value: func() string {
+				effort := strings.ToLower(strings.TrimSpace(cloned.ReasoningEffort))
+				if !cloned.ShowThinking || effort == "off" || effort == "none" || effort == "" {
+					return "off"
+				}
+				return effort
+			},
+			description: "Reasoning effort level (off, low, medium, high, max)",
+			onToggle: func() {
+				currentEffort := strings.ToLower(strings.TrimSpace(cloned.ReasoningEffort))
+				if !cloned.ShowThinking || currentEffort == "none" {
+					currentEffort = "off"
+				}
+				nextEffort := "low"
+				switch currentEffort {
+				case "off":
+					nextEffort = "low"
+					cloned.ShowThinking = true
+				case "low":
+					nextEffort = "medium"
+					cloned.ShowThinking = true
+				case "medium":
+					nextEffort = "high"
+					cloned.ShowThinking = true
+				case "high":
+					nextEffort = "max"
+					cloned.ShowThinking = true
+				case "max":
+					nextEffort = "off"
+					cloned.ShowThinking = false
+				default:
+					nextEffort = "low"
+					cloned.ShowThinking = true
+				}
+				cloned.ReasoningEffort = nextEffort
 			},
 		},
 		{

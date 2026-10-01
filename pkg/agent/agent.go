@@ -100,6 +100,7 @@ type Agent struct {
 
 	ClearAgentsFunc   func()
 	MultiAgentManager *MultiAgentManager
+	DebugLogger       *DebugLogger
 }
 
 func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *Agent {
@@ -108,6 +109,11 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 		cwd = "."
 	}
 	absWorkspace, _ := filepath.Abs(cwd)
+
+	debugPath := ""
+	if cfg != nil {
+		debugPath = cfg.DebugLogFile
+	}
 
 	a := &Agent{
 		Config:     cfg,
@@ -125,6 +131,7 @@ func NewAgent(cfg *config.Config, configPath string, httpClient *http.Client) *A
 		NextTaskId:     1,
 		SpawnedAgents:  make(map[string]bool),
 		SystemEvents:   make(chan string, 100),
+		DebugLogger:    NewDebugLogger(absWorkspace, debugPath),
 	}
 
 	// Register built-in tools
@@ -177,6 +184,11 @@ func (a *Agent) ApplyConfig(cfg *config.Config) {
 	}
 	a.ThinkingSupported = false
 	a.ThinkingSupportChecked = false
+
+	if a.DebugLogger != nil {
+		a.DebugLogger.Close()
+	}
+	a.DebugLogger = NewDebugLogger(a.WorkspaceRoot, cfg.DebugLogFile)
 }
 
 func (a *Agent) GetWorkspaceRoot() string {
@@ -422,8 +434,8 @@ func (a *Agent) CompressHistory(
 
 	keptMessages := make([]db.Message, 0, len((*messages)[keepIdx:]))
 	for _, m := range (*messages)[keepIdx:] {
-		if m.Role == "tool" && len(m.Content) > 1000 {
-			m.Content = m.Content[:1000] + "... (truncated for context optimization)"
+		if m.Role == "tool" && m.Name != "read" && m.Name != "write" && m.Name != "edit" && len(m.Content) > 30000 {
+			m.Content = m.Content[:30000] + "... (truncated for context optimization)"
 		}
 		keptMessages = append(keptMessages, m)
 	}
@@ -524,3 +536,52 @@ func (a *Agent) HasSubagent(name string) bool {
 	defer a.SpawnedAgentsMu.RUnlock()
 	return a.SpawnedAgents[name]
 }
+
+// GetDebugLogPath returns the file path of the debug log if enabled.
+func (a *Agent) GetDebugLogPath() string {
+	if a == nil || a.DebugLogger == nil {
+		return ""
+	}
+	return a.DebugLogger.FilePath()
+}
+
+// DebugLogUserCommand records a submitted prompt to the debug log.
+func (a *Agent) DebugLogUserCommand(sessionID, prompt string) {
+	if a == nil || a.DebugLogger == nil {
+		return
+	}
+	a.DebugLogger.LogUserCommand(sessionID, prompt)
+}
+
+// DebugLogLLMRequest records outgoing messages and tools payload to the debug log.
+func (a *Agent) DebugLogLLMRequest(sessionID string, iter int, model, endpoint string, messages []db.Message, tools []tool.Tool) {
+	if a == nil || a.DebugLogger == nil {
+		return
+	}
+	a.DebugLogger.LogLLMRequest(sessionID, iter, model, endpoint, messages, tools)
+}
+
+// DebugLogLLMResponse records the LLM completion and proposed tool calls.
+func (a *Agent) DebugLogLLMResponse(sessionID string, iter int, msg *db.Message, duration time.Duration) {
+	if a == nil || a.DebugLogger == nil {
+		return
+	}
+	a.DebugLogger.LogLLMResponse(sessionID, iter, msg, duration)
+}
+
+// DebugLogToolExecution records tool execution input, output, errors, and re-read detection.
+func (a *Agent) DebugLogToolExecution(sessionID string, iter int, toolName string, arguments string, output string, err error, duration time.Duration) {
+	if a == nil || a.DebugLogger == nil {
+		return
+	}
+	a.DebugLogger.LogToolExecution(sessionID, iter, toolName, arguments, output, err, duration)
+}
+
+// DebugLogRepetition records repetition circuit breaker warnings to the debug log.
+func (a *Agent) DebugLogRepetition(sessionID string, toolName string, arguments string, count int, detail string) {
+	if a == nil || a.DebugLogger == nil {
+		return
+	}
+	a.DebugLogger.LogRepetition(sessionID, toolName, arguments, count, detail)
+}
+

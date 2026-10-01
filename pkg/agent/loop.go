@@ -85,6 +85,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
 	}
 
+	a.DebugLogUserCommand(sessionID, prompt)
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -92,7 +94,8 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 	if maxSteps <= 0 {
 		maxSteps = 30
 	}
-	callCounts := make(map[string]int)
+	guard := NewTurnExecutionGuard()
+	consecutiveGuardRejections := 0
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return
@@ -102,6 +105,9 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			divider := style.NewStyle().Foreground(theme.Border).Render(strings.Repeat("╌", 40))
 			fmt.Fprintln(writerToUse, divider)
 		}
+
+		toolsForLog := a.Registry.GetAvailableTools(allowlist)
+		a.DebugLogLLMRequest(sessionID, iter, a.Config.Model, a.Config.Endpoint, *messages, toolsForLog)
 
 		chunkChan := make(chan StreamChunk, 200)
 		streamErrChan := make(chan error, 1)
@@ -122,9 +128,11 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 
 		teeWriter := &customTeeWriter{screen: writerToUse, buffer: a.CurrentStreamBuffer}
 		ncw := &newlineCounterWriter{Writer: teeWriter}
+		effort := strings.ToLower(strings.TrimSpace(a.Config.ReasoningEffort))
+		enableThinking := a.Config.ShowThinking && effort != "off" && effort != "none"
 		var sr StreamRenderer
 		if a.UI != nil {
-			sr = a.UI.NewStreamRenderer(ncw, theme, a.Config.ShowThinking, a.Config.StreamWrites, "maquis")
+			sr = a.UI.NewStreamRenderer(ncw, theme, enableThinking, a.Config.StreamWrites, "maquis")
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
@@ -235,6 +243,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 		totalApiDuration += a.lastGenerationDuration
 
 		assistantMsg.ReasoningDuration = sr.GetReasoningDuration()
+		a.DebugLogLLMResponse(sessionID, iter, assistantMsg, a.lastGenerationDuration)
 		*messages = append(*messages, *assistantMsg)
 		if sessionID != "" {
 			_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
@@ -276,7 +285,7 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			}
 
 			_, height := getTerminalSize()
-			if height > 0 {
+			if height > 0 && a.UI != nil {
 				a.UI.DrawStatsLine(rawW, theme, "", statsText)
 			} else {
 				fmt.Fprintln(writerToUse, statsText)
@@ -348,36 +357,42 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 			}
 
 			if approved {
-				allowed, reason := a.runBeforeToolHook(tc)
 				var toolOutput string
 				var toolErr error
 
-				if !allowed {
-					toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
-					toolErr = fmt.Errorf("blocked by hook")
+				if guardErr := guard.CheckPreExecution(tc.Function.Name, tc.Function.Arguments); guardErr != nil {
+					toolErr = guardErr
+					toolOutput = guardErr.Error()
+					consecutiveGuardRejections++
+					a.DebugLogRepetition(sessionID, tc.Function.Name, tc.Function.Arguments, guard.ConsecutiveIdenticalCount(), guardErr.Error())
 				} else {
-					if loader != nil {
-						loader.ShowDots()
+					consecutiveGuardRejections = 0
+					allowed, reason := a.runBeforeToolHook(tc)
+					startTool := time.Now()
+					if !allowed {
+						toolOutput = fmt.Sprintf("Error: Tool execution blocked by before-hook: %s", reason)
+						toolErr = fmt.Errorf("blocked by hook")
+					} else {
+						if loader != nil {
+							loader.ShowDots()
+						}
+						toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
+						if ctx.Err() != nil {
+							return
+						}
+						toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
 					}
-					toolOutput, toolErr = a.Registry.Execute(a, tc.Function.Name, tc.Function.Arguments)
-					toolOutput, toolErr = a.runAfterToolHook(tc, toolOutput, toolErr)
+					toolDuration := time.Since(startTool)
+					a.DebugLogToolExecution(sessionID, iter, tc.Function.Name, tc.Function.Arguments, toolOutput, toolErr, toolDuration)
 				}
+
+				guard.RecordPostExecution(tc.Function.Name, tc.Function.Arguments, toolOutput, toolErr)
 
 				if toolErr != nil {
 					toolOutput = FormatToolExecutionFailure(tc.Function.Name, toolOutput, toolErr)
 				}
 				if toolOutput == "" {
 					toolOutput = "(no output)"
-				}
-
-				if tc.Function.Name == "write" || tc.Function.Name == "edit" {
-					callCounts = make(map[string]int)
-				} else {
-					callKey := tc.Function.Name + ":" + strings.TrimSpace(tc.Function.Arguments)
-					callCounts[callKey]++
-					if callCounts[callKey] >= 2 && toolErr == nil {
-						toolOutput += "\n\n[Notice: You have inspected this target multiple times with identical arguments. The content has not changed. If no changes are needed, conclude your response or proceed to write/edit.]"
-					}
 				}
 
 				if !isSubagent && !approvalRendered && len(assistantMsg.ToolCalls) == 1 {
@@ -411,6 +426,23 @@ func (a *Agent) RunAgentLoop(ctx context.Context, w io.Writer, messages *[]db.Me
 				})
 				if sessionID != "" {
 					_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+				}
+
+				if consecutiveGuardRejections >= 3 {
+					haltNotice := "[Agent halted: loop protection rejected 3 consecutive tool calls. Stopping execution to prevent infinite loop. Proceed with 'edit'/'write' or provide final response.]"
+					*messages = append(*messages, db.Message{
+						Role:    "assistant",
+						Content: haltNotice,
+					})
+					if sessionID != "" {
+						_ = db.SaveMessage(sessionID, (*messages)[len(*messages)-1])
+					}
+					if a.UI != nil {
+						fmt.Fprintln(ncw, style.NewStyle().Foreground(theme.Error).Bold(true).Render(haltNotice))
+					} else {
+						fmt.Fprintln(ncw, haltNotice)
+					}
+					return
 				}
 
 			} else {

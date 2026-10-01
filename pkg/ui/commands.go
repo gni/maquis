@@ -45,11 +45,18 @@ func HandleSlashCommand(
 	cmdName := parts[0]
 
 	calcHistoryTokens := func() (int, int, bool) {
-		return calculateActiveTokenUsage(a, *messages, allowedTools, mam)
+		var msgs []db.Message
+		if messages != nil {
+			msgs = *messages
+		}
+		return calculateActiveTokenUsage(a, msgs, allowedTools, mam)
 	}
 
 	switch cmdName {
 	case "/exit", "/quit":
+		if a != nil {
+			a.KillAllTasks()
+		}
 		return true, true
 	case "/toggle", "/collapse", "/expand":
 		if cmdName == "/collapse" {
@@ -92,13 +99,7 @@ func HandleSlashCommand(
 		}
 		return true, false
 	case "/task", "/tasks":
-		if len(parts) < 2 {
-			fmt.Fprintln(w, "usage: /task [list | view <id> | stream <id> | kill <id>]")
-			return true, false
-		}
-		sub := parts[1]
-		switch sub {
-		case "list":
+		if len(parts) < 2 || parts[1] == "list" {
 			tasks := a.ListTasks()
 			if len(tasks) == 0 {
 				fmt.Fprintln(w, "no background tasks registered.")
@@ -109,6 +110,10 @@ func HandleSlashCommand(
 				fmt.Fprintf(w, "  - %s: %s (duration: %v, output size: %d bytes) - `%s`\n",
 					t.ID, t.Status, t.Duration.Round(time.Millisecond), t.BytesOut, t.Command)
 			}
+			return true, false
+		}
+		sub := parts[1]
+		switch sub {
 		case "view":
 			if len(parts) < 3 {
 				fmt.Fprintln(w, "usage: /task view <id>")
@@ -130,10 +135,20 @@ func HandleSlashCommand(
 			a.ToggleStreaming(id, w)
 		case "kill", "remove":
 			if len(parts) < 3 {
-				fmt.Fprintln(w, "usage: /task kill <id>")
+				fmt.Fprintln(w, "usage: /task kill <id> | /task kill all")
 				return true, false
 			}
 			id := parts[2]
+			if id == "all" {
+				killed := a.KillAllTasks()
+				fmt.Fprintf(w, "terminated %d running background task(s).\n", killed)
+				if kiReader != nil {
+					getUI().StateMu.Lock()
+					getUI().DrawStatusBar(w, *theme)
+					getUI().StateMu.Unlock()
+				}
+				return true, false
+			}
 			err := a.KillTask(id)
 			if err != nil {
 				fmt.Fprintf(w, "error: %v\n", err)
@@ -201,9 +216,33 @@ func HandleSlashCommand(
 			case "auto_approve", "yes", "yolo":
 				a.Config.AutoApprove = val == "true" || val == "yes" || val == "1"
 			case "show_thinking", "thinking":
-				a.Config.ShowThinking = val == "true" || val == "yes" || val == "1"
+				enabled := val == "true" || val == "yes" || val == "1" || val == "on"
+				a.Config.ShowThinking = enabled
+				if enabled {
+					if strings.ToLower(a.Config.ReasoningEffort) == "off" || a.Config.ReasoningEffort == "" {
+						a.Config.ReasoningEffort = "low"
+					}
+				} else {
+					a.Config.ReasoningEffort = "off"
+				}
 			case "reasoning_effort", "reasoning":
-				a.Config.ReasoningEffort = val
+				valLower := strings.ToLower(strings.TrimSpace(val))
+				switch valLower {
+				case "off", "none", "false", "0":
+					a.Config.ShowThinking = false
+					a.Config.ReasoningEffort = "off"
+				case "on", "true", "1":
+					a.Config.ShowThinking = true
+					if strings.ToLower(a.Config.ReasoningEffort) == "off" || a.Config.ReasoningEffort == "" {
+						a.Config.ReasoningEffort = "low"
+					}
+				case "low", "medium", "high", "max":
+					a.Config.ShowThinking = true
+					a.Config.ReasoningEffort = valLower
+				default:
+					fmt.Fprintf(w, "Invalid reasoning effort '%s'. Allowed values: off, low, medium, high, max\n", val)
+					return true, false
+				}
 			case "before_tool_hook", "before_hook":
 				a.Config.BeforeToolHook = val
 			case "after_tool_hook", "after_hook":
@@ -251,6 +290,12 @@ func HandleSlashCommand(
 				a.Config.SkipVerify = val == "true" || val == "yes" || val == "1"
 			case "stream_writes", "stream_write", "stream":
 				a.Config.StreamWrites = val == "true" || val == "yes" || val == "1"
+			case "debug_log_file", "debug_file", "debug":
+				a.Config.DebugLogFile = val
+				if a.DebugLogger != nil {
+					a.DebugLogger.Close()
+				}
+				a.DebugLogger = agent.NewDebugLogger(a.WorkspaceRoot, val)
 			default:
 				fmt.Fprintf(w, "unknown config key: %s\n", key)
 				return true, false
@@ -259,7 +304,11 @@ func HandleSlashCommand(
 			_ = config.SaveConfig(a.ConfigPath, a.Config)
 			fmt.Fprintf(w, "config updated. saved to %s\n", a.ConfigPath)
 			pTok, cTok, estimated := calcHistoryTokens()
-			latestTurnTokens := a.GetLatestAssistantCompletionTokens(*messages)
+			var msgs []db.Message
+			if messages != nil {
+				msgs = *messages
+			}
+			latestTurnTokens := a.GetLatestAssistantCompletionTokens(msgs)
 			UpdateStatus(a.Config.Model, pTok, cTok, latestTurnTokens, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 			DrawStatusBar(w, *theme)
 		} else {
@@ -316,8 +365,11 @@ func HandleSlashCommand(
 			agent.RenderSkills(w, a.ActiveSkills, *theme)
 		}
 		return true, false
-	case "/rewind", "/clear":
+	case "/rewind", "/clear", "/clean", "/reset":
 		getUI().LastStatsText = ""
+		if a != nil {
+			a.ClearTasks()
+		}
 		*messages = []db.Message{
 			{Role: "system", Content: a.GetSystemPrompt()},
 		}
@@ -537,6 +589,20 @@ func HandleSlashCommand(
 		pTok, cTok, estimated := calcHistoryTokens()
 		UpdateStatus(a.Config.Model, pTok, cTok, 0, a.Config.ContextWindowLimit, false, 0, getActiveTasks(a), a.Config.ShowTokens, estimated)
 		DrawStatusBar(os.Stderr, *theme)
+		return true, false
+	case "/debug":
+		path := a.GetDebugLogPath()
+		if path == "" {
+			fmt.Fprintln(w, "debug log is disabled or uninitialized.")
+			return true, false
+		}
+		info, err := os.Stat(path)
+		sizeStr := "not created yet"
+		if err == nil {
+			sizeStr = fmt.Sprintf("%d bytes", info.Size())
+		}
+		fmt.Fprintf(w, "debug log file: %s (%s)\n", path, sizeStr)
+		fmt.Fprintln(w, "records full LLM requests, function calls, arguments, outputs, and repetition statistics.")
 		return true, false
 	case "/mcp", "/mcps":
 		HandleMCPCommand(a, parts, messages, *theme, w, kiReader)

@@ -133,6 +133,7 @@ func RenderHelp(w io.Writer, theme UITheme) {
 		{"/task [list|view|stream|kill]", "manage background tasks"},
 		{"/queue [list|clear]", "view or clear queued prompts"},
 		{"/compress", "compress history to reclaim context tokens"},
+		{"/debug", "view path and status of debug execution log"},
 		{"/clear", "clear conversation history and start fresh"},
 		{"/help", "display this help menu"},
 		{"/exit", "exit the maquis application"},
@@ -881,8 +882,13 @@ func PrintPromptSeparatorWithSpinner(w io.Writer, showThinking bool, reasoningEf
 	statusStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
 
 	thinkingText := "off"
-	if showThinking {
-		thinkingText = reasoningEffort
+	effort := strings.ToLower(strings.TrimSpace(reasoningEffort))
+	if showThinking && effort != "off" && effort != "none" {
+		if effort == "" {
+			thinkingText = "low"
+		} else {
+			thinkingText = effort
+		}
 	}
 
 	statusPart := fmt.Sprintf("  [reasoning:%s]", thinkingText)
@@ -1291,6 +1297,16 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 				}
 			}
 
+			if strings.HasPrefix(msg.Content, "System Event: Background task ") || strings.HasPrefix(msg.Content, "Background task ") {
+				if lastRole != "" {
+					fmt.Fprintln(w)
+				}
+				eventStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+				fmt.Fprintf(w, "%s\n", eventStyle.Render("✦ "+msg.Content))
+				lastRole = "system_event"
+				continue
+			}
+
 			if lastRole != "" {
 				fmt.Fprintln(w)
 			}
@@ -1310,18 +1326,20 @@ func PrintSessionHistory(w io.Writer, messages []db.Message, theme UITheme, cfg 
 			if msg.ReasoningContent != "" {
 				cleanReasoning := agent.StripEchoedPrompt(msg.ReasoningContent, lastUserPrompt)
 				if strings.TrimSpace(cleanReasoning) != "" {
-					if cfg.ShowThinking {
+					effort := strings.ToLower(strings.TrimSpace(cfg.ReasoningEffort))
+					isThinkingEnabled := cfg.ShowThinking && effort != "off" && effort != "none"
+					if isThinkingEnabled {
 						renderReasoningMarkdownContent(w, strings.TrimRight(cleanReasoning, "\r\n"), theme)
 						fmt.Fprintln(w)
-					}
 
-					labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
-					if msg.ReasoningDuration > 0 {
-						fmt.Fprintf(w, "%s\n", labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
-					} else {
-						fmt.Fprintf(w, "%s\n", labelStyle.Render("thought"))
+						labelStyle := style.NewStyle().Foreground(theme.Border).Italic(true)
+						if msg.ReasoningDuration > 0 {
+							fmt.Fprintf(w, "%s\n", labelStyle.Render(fmt.Sprintf("thought (%.1fs)", msg.ReasoningDuration)))
+						} else {
+							fmt.Fprintf(w, "%s\n", labelStyle.Render("thought"))
+						}
+						hasPrintedAnything = true
 					}
-					hasPrintedAnything = true
 				}
 			}
 

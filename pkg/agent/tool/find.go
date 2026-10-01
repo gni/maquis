@@ -19,6 +19,16 @@ func NewFindTool() ToolExecutor {
 
 func (t *findTool) Name() string { return "find" }
 
+func (t *findTool) PromptSnippet() string {
+	return "Find files by glob pattern"
+}
+
+func (t *findTool) PromptGuidelines() []string {
+	return []string{
+		"Use 'find' to locate files by glob pattern instead of running find in bash.",
+	}
+}
+
 func (t *findTool) Definition() Tool {
 	return Tool{
 		Type: "function",
@@ -52,8 +62,8 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		Pattern string `json:"pattern"`
 		Glob    string `json:"glob"`
 		Path    string `json:"path"`
-		Dir     string `json:"dir"`
-		Limit   int    `json:"limit"`
+		Dir     string  `json:"dir"`
+		Limit   float64 `json:"limit"`
 	}
 
 	trimmed := strings.TrimSpace(arguments)
@@ -96,7 +106,7 @@ func (t *findTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", fmt.Errorf("cannot access path '%s': %w", searchPath, err)
 	}
 
-	limit := args.Limit
+	limit := int(args.Limit)
 	if limit <= 0 {
 		limit = 500
 	} else if limit > 1000 {

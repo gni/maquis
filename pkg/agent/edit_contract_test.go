@@ -128,3 +128,36 @@ func TestEditFuzzyBlockMatching(t *testing.T) {
 		t.Fatalf("expected file to contain updated content, got: %s", string(after))
 	}
 }
+
+func TestCleanStructuredSystemPromptSections(t *testing.T) {
+	a := &Agent{
+		Config: &config.Config{
+			CompactPrompt:     false,
+			SystemInstruction: "You are maquis, an elite autonomous software engineering harness.",
+			SkillsDir:         t.TempDir(),
+		},
+		WorkspaceRoot: "/workspace/project",
+	}
+
+	prompt := a.GetSystemPrompt()
+
+	// Ensure structured XML sections are present
+	for _, expected := range []string{"<tools>", "</tools>", "<rules>", "</rules>", "<cwd>", "</cwd>"} {
+		if !strings.Contains(prompt, expected) {
+			t.Errorf("system prompt missing structured section %q", expected)
+		}
+	}
+
+	// Ensure verbose lecturing rules are gone
+	for _, forbidden := range []string{
+		"ASCII tree structure",
+		"Keep all internal thoughts extremely short",
+		"Fallback Tool Execution Format:",
+		"maximum 2-3 files at once",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Errorf("system prompt contains obsolete bloated rule %q", forbidden)
+		}
+	}
+}
+

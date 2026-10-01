@@ -34,7 +34,8 @@ type StreamOptions struct {
 }
 
 type ChatTemplateKwargs struct {
-	EnableThinking bool `json:"enable_thinking"`
+	EnableThinking    bool   `json:"enable_thinking"`
+	ReasoningStrength string `json:"reasoning_strength,omitempty"`
 }
 
 type ChatCompletionRequest struct {
@@ -120,10 +121,11 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		p.ThinkingSupportChecked = true
 	}
 
-	enableThinking := p.Config.ShowThinking
+	effort := strings.ToLower(strings.TrimSpace(p.Config.ReasoningEffort))
+	enableThinking := p.Config.ShowThinking && effort != "off" && effort != "none"
 	budget := -1
 	if enableThinking {
-		switch strings.ToLower(p.Config.ReasoningEffort) {
+		switch effort {
 		case "low":
 			budget = 512
 		case "medium":
@@ -205,22 +207,28 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	}
 
 	cleanMessages := make([]db.Message, 0, len(apiMessages))
-	cutoff := len(apiMessages) - 6
-	if cutoff < 0 {
-		cutoff = 0
-	}
-	for i, m := range apiMessages {
+	for _, m := range apiMessages {
 		msgCopy := m
 		// Omit historical reasoning content from outgoing API messages; saves thousands of prompt tokens per turn.
 		msgCopy.ReasoningContent = ""
-		// Prune older tool outputs beyond the recent turn window to prevent context blowouts while keeping recent ones intact.
-		if m.Role == "tool" && i < cutoff && len(m.Content) > 1000 {
-			msgCopy.Content = m.Content[:1000] + "\n... (output truncated for context optimization)"
+		// Only truncate massive non-file tool outputs (like runaway bash logs) if they exceed 30000 chars.
+		// Never truncate 'read', 'write', or 'edit' tool outputs, as the model requires full file contents to understand and edit code.
+		if m.Role == "tool" && m.Name != "read" && m.Name != "write" && m.Name != "edit" && len(m.Content) > 30000 {
+			msgCopy.Content = m.Content[:30000] + "\n... (output truncated to 30000 chars for context optimization)"
 		}
 		cleanMessages = append(cleanMessages, msgCopy)
 	}
 
 	finalTools := prepareToolDefinitions(tools, p.Config.CompactPrompt)
+
+	reasoningEffort := ""
+	if enableThinking {
+		if effort == "max" {
+			reasoningEffort = "high"
+		} else if effort == "low" || effort == "medium" || effort == "high" {
+			reasoningEffort = effort
+		}
+	}
 
 	reqBody := ChatCompletionRequest{
 		Model:       p.Config.Model,
@@ -231,7 +239,7 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		StreamOptions: &StreamOptions{
 			IncludeUsage: true,
 		},
-		ReasoningEffort:     p.Config.ReasoningEffort,
+		ReasoningEffort:     reasoningEffort,
 		MaxCompletionTokens: p.Config.MaxCompletionTokens,
 		MaxTokens:           p.Config.MaxCompletionTokens,
 	}
@@ -239,9 +247,14 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 	if p.ThinkingSupported {
 		reqBody.ReasoningControl = true
 		if enableThinking {
+			strength := effort
+			if strength == "max" {
+				strength = "high"
+			}
 			reqBody.ReasoningFormat = "auto"
 			reqBody.ChatTemplateKwargs = &ChatTemplateKwargs{
-				EnableThinking: true,
+				EnableThinking:    true,
+				ReasoningStrength: strength,
 			}
 			if budget >= 0 {
 				reqBody.ThinkingBudgetTokens = budget
@@ -249,7 +262,8 @@ func (p *OpenAICompatibleProvider) StreamChatCompletions(
 		} else {
 			reqBody.ReasoningFormat = "none"
 			reqBody.ChatTemplateKwargs = &ChatTemplateKwargs{
-				EnableThinking: false,
+				EnableThinking:    false,
+				ReasoningStrength: "none",
 			}
 		}
 	}
@@ -607,7 +621,9 @@ func assembleToolCalls(toolCallsMap map[int]*db.ToolCall, rawText string) []db.T
 		var calls []db.ToolCall
 		for i := 0; i <= maxIdx; i++ {
 			if tc, ok := toolCallsMap[i]; ok {
-				calls = append(calls, *tc)
+				cleaned := *tc
+				cleaned.Function.Arguments = SanitizeLLMControlTokens(cleaned.Function.Arguments)
+				calls = append(calls, cleaned)
 			}
 		}
 		return calls
@@ -717,10 +733,10 @@ func compressToolDefinition(t tool.Tool) tool.Tool {
 			compressed.Function.Parameters.Properties["path"] = prop
 		}
 	case "read":
-		compressed.Function.Description = "Read file contents. Use read to examine files instead of cat or sed in bash."
+		compressed.Function.Description = "Read file contents. Path must be a specific file, not a directory. Use 'list' to inspect directory trees."
 		if compressed.Function.Parameters.Properties != nil {
 			if prop, ok := compressed.Function.Parameters.Properties["path"]; ok {
-				prop.Description = "File path"
+				prop.Description = "File path (not directory)"
 				compressed.Function.Parameters.Properties["path"] = prop
 			}
 			if prop, ok := compressed.Function.Parameters.Properties["offset"]; ok {

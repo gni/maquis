@@ -18,6 +18,10 @@ func NewListTool() ToolExecutor {
 
 func (t *listTool) Name() string { return "list" }
 
+func (t *listTool) PromptSnippet() string {
+	return "List directory contents"
+}
+
 func (t *listTool) Definition() Tool {
 	return Tool{
 		Type: "function",
@@ -45,8 +49,8 @@ func (t *listTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
 		Path     string `json:"path"`
 		Dir      string `json:"dir"`
-		DirPath  string `json:"dir_path"`
-		Depth    int    `json:"depth"`
+		DirPath  string  `json:"dir_path"`
+		Depth    float64 `json:"depth"`
 	}
 
 	trimmed := strings.TrimSpace(arguments)
@@ -75,7 +79,7 @@ func (t *listTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		targetPath = "."
 	}
 
-	depth := args.Depth
+	depth := int(args.Depth)
 	if depth <= 0 {
 		depth = 3
 	} else if depth > 4 {

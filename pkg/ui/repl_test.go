@@ -1555,3 +1555,434 @@ func TestQueueVisibilityAndFeedback(t *testing.T) {
 		t.Fatalf("expected no queue badge after queue drained, got: %s", rightAfter)
 	}
 }
+
+func TestKeyInterceptorReaderDrainBothChannels(t *testing.T) {
+	ki := &keyInterceptorReader{
+		inputChan:  make(chan byte, 10),
+		injectChan: make(chan byte, 10),
+	}
+
+	ki.inputChan <- 'a'
+	ki.inputChan <- 'b'
+	ki.injectChan <- '\025'
+	ki.injectChan <- '\n'
+
+	if len(ki.inputChan) != 2 || len(ki.injectChan) != 2 {
+		t.Fatalf("expected channels populated before drain")
+	}
+
+	ki.Drain()
+
+	if len(ki.inputChan) != 0 {
+		t.Fatalf("expected inputChan to be drained, got %d items", len(ki.inputChan))
+	}
+	if len(ki.injectChan) != 0 {
+		t.Fatalf("expected injectChan to be drained, got %d items", len(ki.injectChan))
+	}
+}
+
+func TestPrintSessionHistorySystemEventsFormattedCleanly(t *testing.T) {
+	var buf bytes.Buffer
+	theme := style.UITheme{}
+	cfg := &config.Config{}
+
+	messages := []db.Message{
+		{
+			Role:    "user",
+			Content: "System Event: Background task task_4 finished with status failed. Please review the output or logs.",
+		},
+		{
+			Role:    "assistant",
+			Content: "Acknowledged task failure.",
+		},
+	}
+
+	PrintSessionHistory(&buf, messages, theme, cfg)
+	output := buf.String()
+
+	// Should format as subtle ✦ notice, not as a big user prompt block
+	if strings.Contains(output, "─── prompt ") {
+		t.Fatalf("expected session history to NOT render prompt separator for system events, got:\n%s", output)
+	}
+	if !strings.Contains(output, "✦ System Event: Background task task_4 finished with status failed.") {
+		t.Fatalf("expected session history to render subtle ✦ notice, got:\n%s", output)
+	}
+}
+
+func TestInStreamHistoryNavigation(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	hist := &customHistory{}
+	hist.Add("cmd1: first")
+	hist.Add("cmd2: second")
+	hist.Add("cmd3: third")
+
+	var output bytes.Buffer
+	a := &agent.Agent{Config: &config.Config{}}
+	ki := &keyInterceptorReader{
+		agent:           a,
+		w:               &output,
+		hist:            hist,
+		historyIndex:    -1,
+		typeAheadBuffer: []byte("draft"),
+	}
+
+	// 1. Initial state
+	if string(ki.typeAheadBuffer) != "draft" {
+		t.Fatalf("expected initial typeAheadBuffer to be 'draft', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != -1 {
+		t.Fatalf("expected initial historyIndex to be -1, got %d", ki.historyIndex)
+	}
+
+	// 2. Up arrow: should show newest entry (cmd3)
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "cmd3: third" {
+		t.Fatalf("expected 'cmd3: third', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 0 {
+		t.Fatalf("expected historyIndex 0, got %d", ki.historyIndex)
+	}
+	if string(ki.savedTypeAhead) != "draft" {
+		t.Fatalf("expected savedTypeAhead to be 'draft', got %q", string(ki.savedTypeAhead))
+	}
+
+	// 3. Up arrow again: cmd2
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "cmd2: second" {
+		t.Fatalf("expected 'cmd2: second', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 1 {
+		t.Fatalf("expected historyIndex 1, got %d", ki.historyIndex)
+	}
+
+	// 4. Up arrow again: cmd1 (oldest)
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "cmd1: first" {
+		t.Fatalf("expected 'cmd1: first', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 2 {
+		t.Fatalf("expected historyIndex 2, got %d", ki.historyIndex)
+	}
+
+	// 5. Up arrow again (boundary): stays at cmd1
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "cmd1: first" {
+		t.Fatalf("expected boundary to hold 'cmd1: first', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 2 {
+		t.Fatalf("expected boundary historyIndex 2, got %d", ki.historyIndex)
+	}
+
+	// 6. Down arrow: back to cmd2
+	ki.navigateHistory(-1)
+	if string(ki.typeAheadBuffer) != "cmd2: second" {
+		t.Fatalf("expected 'cmd2: second', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 1 {
+		t.Fatalf("expected historyIndex 1, got %d", ki.historyIndex)
+	}
+
+	// 7. Down arrow: back to cmd3
+	ki.navigateHistory(-1)
+	if string(ki.typeAheadBuffer) != "cmd3: third" {
+		t.Fatalf("expected 'cmd3: third', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 0 {
+		t.Fatalf("expected historyIndex 0, got %d", ki.historyIndex)
+	}
+
+	// 8. Down arrow: restored to original draft
+	ki.navigateHistory(-1)
+	if string(ki.typeAheadBuffer) != "draft" {
+		t.Fatalf("expected restored 'draft', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != -1 {
+		t.Fatalf("expected historyIndex -1, got %d", ki.historyIndex)
+	}
+	if ki.savedTypeAhead != nil {
+		t.Fatalf("expected savedTypeAhead to be nil, got %q", string(ki.savedTypeAhead))
+	}
+
+	// 9. Down arrow again (boundary): stays at draft
+	ki.navigateHistory(-1)
+	if string(ki.typeAheadBuffer) != "draft" {
+		t.Fatalf("expected 'draft', got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != -1 {
+		t.Fatalf("expected historyIndex -1, got %d", ki.historyIndex)
+	}
+}
+
+func TestInStreamHistoryEmpty(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	var output bytes.Buffer
+	a := &agent.Agent{Config: &config.Config{}}
+	ki := &keyInterceptorReader{
+		agent:           a,
+		w:               &output,
+		hist:            &customHistory{},
+		historyIndex:    -1,
+		typeAheadBuffer: []byte("stay"),
+	}
+
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "stay" || ki.historyIndex != -1 {
+		t.Fatalf("expected empty history to be no-op, got %q, %d", string(ki.typeAheadBuffer), ki.historyIndex)
+	}
+
+	ki.navigateHistory(-1)
+	if string(ki.typeAheadBuffer) != "stay" || ki.historyIndex != -1 {
+		t.Fatalf("expected empty history to be no-op, got %q, %d", string(ki.typeAheadBuffer), ki.historyIndex)
+	}
+}
+
+func TestInStreamHistoryFallbackToRLHistory(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	hist := &customHistory{}
+	hist.Add("fallback command")
+
+	var output bytes.Buffer
+	a := &agent.Agent{Config: &config.Config{}}
+	ki := &keyInterceptorReader{
+		agent:        a,
+		w:            &output,
+		historyIndex: -1,
+	}
+	rl := term.NewTerminal(ki, "")
+	rl.History = hist
+	ki.rl = rl
+
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "fallback command" {
+		t.Fatalf("expected fallback to rl.History, got %q", string(ki.typeAheadBuffer))
+	}
+	if ki.historyIndex != 0 {
+		t.Fatalf("expected historyIndex 0, got %d", ki.historyIndex)
+	}
+}
+
+func TestResetTypeAheadLocked(t *testing.T) {
+	ki := &keyInterceptorReader{
+		typeAheadBuffer: []byte("something"),
+		historyIndex:    2,
+		savedTypeAhead:  []byte("draft"),
+	}
+
+	ki.resetTypeAheadLocked()
+
+	if ki.typeAheadBuffer != nil {
+		t.Fatalf("expected typeAheadBuffer to be nil, got %v", ki.typeAheadBuffer)
+	}
+	if ki.historyIndex != -1 {
+		t.Fatalf("expected historyIndex to be -1, got %d", ki.historyIndex)
+	}
+	if ki.savedTypeAhead != nil {
+		t.Fatalf("expected savedTypeAhead to be nil, got %v", ki.savedTypeAhead)
+	}
+}
+
+func TestInStreamHistoryFullWorkflow(t *testing.T) {
+	useIsolatedCursorTestUI(t)
+
+	hist := &customHistory{}
+	hist.Add("multiline\nfirst\ncommand")
+	hist.Add("git status")
+
+	var output bytes.Buffer
+	a := &agent.Agent{Config: &config.Config{}}
+	ki := &keyInterceptorReader{
+		agent:           a,
+		w:               &output,
+		hist:            hist,
+		historyIndex:    -1,
+		typeAheadBuffer: []byte("partial text"),
+	}
+
+	// 1. Up arrow: "git status"
+	ki.navigateHistory(1)
+	if string(ki.typeAheadBuffer) != "git status" {
+		t.Fatalf("expected 'git status', got %q", string(ki.typeAheadBuffer))
+	}
+
+	// 2. Up arrow: multiline command (display format)
+	ki.navigateHistory(1)
+	if !strings.Contains(string(ki.typeAheadBuffer), "multiline ↵ first ↵ command") {
+		t.Fatalf("expected multiline display, got %q", string(ki.typeAheadBuffer))
+	}
+
+	// 3. User submits this historical command while streaming
+	submitted := string(ki.typeAheadBuffer)
+	ki.resetTypeAheadLocked()
+	count := ki.EnqueuePrompt(submitted)
+	if count != 1 {
+		t.Fatalf("expected 1 prompt enqueued, got %d", count)
+	}
+	if ki.typeAheadBuffer != nil || ki.historyIndex != -1 || ki.savedTypeAhead != nil {
+		t.Fatalf("expected ki state to be reset after submission, got buf=%v, idx=%d", ki.typeAheadBuffer, ki.historyIndex)
+	}
+
+	// 4. Generation completes, REPL dequeues prompt and expands via GetFull
+	dequeued, ok := ki.DequeuePrompt()
+	if !ok {
+		t.Fatal("expected prompt to be dequeued successfully")
+	}
+	expanded := hist.GetFull(dequeued)
+	expanded = strings.ReplaceAll(expanded, "↵", "\n")
+	expectedFull := "multiline\nfirst\ncommand"
+	if expanded != expectedFull {
+		t.Fatalf("expected %q, got %q", expectedFull, expanded)
+	}
+}
+
+func TestReasoningEffortOffAndEnableCycle(t *testing.T) {
+	a := &agent.Agent{
+		Config: &config.Config{
+			ShowThinking:    true,
+			ReasoningEffort: "low",
+		},
+	}
+	var buf bytes.Buffer
+	ki := &keyInterceptorReader{
+		agent: a,
+		w:     &buf,
+	}
+
+	// 1. Initial: low -> medium
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "medium" || !a.Config.ShowThinking {
+		t.Fatalf("expected medium & enabled, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	// 2. medium -> high
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "high" || !a.Config.ShowThinking {
+		t.Fatalf("expected high & enabled, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	// 3. high -> max
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "max" || !a.Config.ShowThinking {
+		t.Fatalf("expected max & enabled, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	// 4. max -> off (switched off)
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "off" || a.Config.ShowThinking {
+		t.Fatalf("expected off & disabled, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	// Check prompt separator renders [reasoning:off]
+	buf.Reset()
+	PrintPromptSeparatorWithSpinner(&buf, a.Config.ShowThinking, a.Config.ReasoningEffort, UITheme{}, "")
+	if !strings.Contains(buf.String(), "[reasoning:off]") {
+		t.Fatalf("expected [reasoning:off] in separator, got: %s", buf.String())
+	}
+
+	// 5. off -> low (switched back on / enabled)
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "low" || !a.Config.ShowThinking {
+		t.Fatalf("expected low & enabled, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	buf.Reset()
+	PrintPromptSeparatorWithSpinner(&buf, a.Config.ShowThinking, a.Config.ReasoningEffort, UITheme{}, "")
+	if !strings.Contains(buf.String(), "[reasoning:low]") {
+		t.Fatalf("expected [reasoning:low] in separator, got: %s", buf.String())
+	}
+
+	// 6. Toggle with Ctrl+T when enabled -> off
+	ki.handleCtrlT()
+	if a.Config.ShowThinking {
+		t.Fatalf("expected ShowThinking=false after Ctrl+T, got true")
+	}
+
+	buf.Reset()
+	PrintPromptSeparatorWithSpinner(&buf, a.Config.ShowThinking, a.Config.ReasoningEffort, UITheme{}, "")
+	if !strings.Contains(buf.String(), "[reasoning:off]") {
+		t.Fatalf("expected [reasoning:off] when ShowThinking=false, got: %s", buf.String())
+	}
+
+	// 7. Advance with Ctrl+R while ShowThinking=false -> enables reasoning at medium
+	ki.handleCtrlR()
+	if a.Config.ReasoningEffort != "medium" || !a.Config.ShowThinking {
+		t.Fatalf("expected medium & enabled after Ctrl+R, got effort=%s, showThinking=%v", a.Config.ReasoningEffort, a.Config.ShowThinking)
+	}
+
+	buf.Reset()
+	PrintPromptSeparatorWithSpinner(&buf, a.Config.ShowThinking, a.Config.ReasoningEffort, UITheme{}, "")
+	if !strings.Contains(buf.String(), "[reasoning:medium]") {
+		t.Fatalf("expected [reasoning:medium] in separator, got: %s", buf.String())
+	}
+}
+
+func TestSlashConfigReasoningOffAndEnable(t *testing.T) {
+	a := &agent.Agent{Config: &config.Config{ShowThinking: true, ReasoningEffort: "low"}}
+	theme := style.GetTheme("catppuccin")
+	var buf bytes.Buffer
+
+	// Turn reasoning off via /config reasoning off
+	handled, _ := HandleSlashCommand(a, "/config reasoning off", nil, nil, &theme, &buf, nil, nil, nil, nil)
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if a.Config.ShowThinking || a.Config.ReasoningEffort != "off" {
+		t.Fatalf("expected disabled & off, got showThinking=%v, effort=%s", a.Config.ShowThinking, a.Config.ReasoningEffort)
+	}
+
+	// Turn reasoning back on via /config reasoning low
+	buf.Reset()
+	handled, _ = HandleSlashCommand(a, "/config reasoning low", nil, nil, &theme, &buf, nil, nil, nil, nil)
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if !a.Config.ShowThinking || a.Config.ReasoningEffort != "low" {
+		t.Fatalf("expected enabled & low, got showThinking=%v, effort=%s", a.Config.ShowThinking, a.Config.ReasoningEffort)
+	}
+
+	// Turn reasoning on via /config reasoning on
+	a.Config.ShowThinking = false
+	a.Config.ReasoningEffort = "off"
+	buf.Reset()
+	handled, _ = HandleSlashCommand(a, "/config reasoning on", nil, nil, &theme, &buf, nil, nil, nil, nil)
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if !a.Config.ShowThinking || a.Config.ReasoningEffort != "low" {
+		t.Fatalf("expected enabled & low, got showThinking=%v, effort=%s", a.Config.ShowThinking, a.Config.ReasoningEffort)
+	}
+}
+
+func TestPrintSessionHistoryHidesThinkingWhenOff(t *testing.T) {
+	var buf bytes.Buffer
+	theme := UITheme{}
+	messages := []db.Message{
+		{
+			Role:              "assistant",
+			Content:           "Here is the answer.",
+			ReasoningContent:  "Secret internal thinking.",
+			ReasoningDuration: 1.5,
+		},
+	}
+
+	// 1. When thinking is off: neither reasoning text nor thought footer should appear
+	cfgOff := &config.Config{ShowThinking: false, ReasoningEffort: "off"}
+	PrintSessionHistory(&buf, messages, theme, cfgOff)
+	outOff := buf.String()
+	if strings.Contains(outOff, "Secret internal thinking") || strings.Contains(outOff, "thought") {
+		t.Fatalf("expected no thinking text or thought header when reasoning is off, got: %s", outOff)
+	}
+
+	// 2. When thinking is on: both appear
+	buf.Reset()
+	cfgOn := &config.Config{ShowThinking: true, ReasoningEffort: "low"}
+	PrintSessionHistory(&buf, messages, theme, cfgOn)
+	outOn := buf.String()
+	if !strings.Contains(outOn, "Secret internal thinking") || !strings.Contains(outOn, "thought (1.5s)") {
+		t.Fatalf("expected thinking text and thought header when reasoning is on, got: %s", outOn)
+	}
+}
+
+

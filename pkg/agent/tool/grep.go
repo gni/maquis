@@ -30,6 +30,16 @@ func NewGrepTool() ToolExecutor {
 
 func (t *grepTool) Name() string { return "grep" }
 
+func (t *grepTool) PromptSnippet() string {
+	return "Search file contents for patterns or regular expressions"
+}
+
+func (t *grepTool) PromptGuidelines() []string {
+	return []string{
+		"Use 'grep' to search definitions or references across the workspace instead of running grep/find in bash.",
+	}
+}
+
 func (t *grepTool) Definition() Tool {
 	return Tool{
 		Type: "function",
@@ -83,9 +93,9 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		Glob       string `json:"glob"`
 		IgnoreCase bool   `json:"ignore_case"`
 		IgnoreCaseCamel bool `json:"ignoreCase"`
-		Literal    bool   `json:"literal"`
-		Context    int    `json:"context"`
-		Limit      int    `json:"limit"`
+		Literal         bool    `json:"literal"`
+		Context         float64 `json:"context"`
+		Limit           float64 `json:"limit"`
 	}
 
 	trimmed := strings.TrimSpace(arguments)
@@ -131,14 +141,14 @@ func (t *grepTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	ignoreCase := args.IgnoreCase || args.IgnoreCaseCamel
 	literal := args.Literal
 
-	limit := args.Limit
+	limit := int(args.Limit)
 	if limit <= 0 {
 		limit = defaultGrepLimit
 	} else if limit > maxGrepLimit {
 		limit = maxGrepLimit
 	}
 
-	contextLines := args.Context
+	contextLines := int(args.Context)
 	if contextLines < 0 {
 		contextLines = 0
 	} else if contextLines > 5 {

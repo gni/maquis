@@ -45,12 +45,12 @@ type MultiAgent struct {
 // GetSystemPrompt generates the system instructions and reference guides list for the agent.
 func (ma *MultiAgent) GetSystemPrompt() string {
 	var activeAgents []string
-	if ma.BaseAgent != nil {
-		ma.BaseAgent.SpawnedAgentsMu.RLock()
-		for name := range ma.BaseAgent.SpawnedAgents {
+	if ma != nil {
+		ma.SubagentsMu.RLock()
+		for name := range ma.Subagents {
 			activeAgents = append(activeAgents, name)
 		}
-		ma.BaseAgent.SpawnedAgentsMu.RUnlock()
+		ma.SubagentsMu.RUnlock()
 		sort.Strings(activeAgents)
 	}
 
@@ -224,6 +224,19 @@ func (mam *MultiAgentManager) CancelAllActiveSubagents() []string {
 	return cancelled
 }
 
+// Depth returns the nesting depth of this subagent.
+// Direct children of BaseAgent have depth 0. Children of those have depth 1, etc.
+func (ma *MultiAgent) Depth() int {
+	if ma == nil {
+		return 0
+	}
+	depth := 0
+	for p := ma.Parent; p != nil; p = p.Parent {
+		depth++
+	}
+	return depth
+}
+
 func (ma *MultiAgent) GetToolAllowlist() []string {
 	var allowlist []string
 
@@ -236,10 +249,20 @@ func (ma *MultiAgent) GetToolAllowlist() []string {
 	}
 	ma.SubagentsMu.RUnlock()
 
+	maxDepth := 0
+	if ma.BaseAgent != nil && ma.BaseAgent.Config != nil {
+		maxDepth = ma.BaseAgent.Config.MaxSubagentDepth
+	}
+	canSpawn := ma.Depth() < maxDepth
+
 	for name := range executors {
 		if strings.HasPrefix(name, "subagent__") {
 			subagentName := strings.TrimPrefix(name, "subagent__")
 			if children[subagentName] {
+				allowlist = append(allowlist, name)
+			}
+		} else if name == "spawn_subagent" || name == "remove_subagent" || name == "swarm_audit" || name == "swarm_topology" {
+			if canSpawn {
 				allowlist = append(allowlist, name)
 			}
 		} else {
@@ -357,7 +380,8 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		maxSteps = 30
 	}
 
-	callCounts := make(map[string]int)
+	guard := NewTurnExecutionGuard()
+	consecutiveGuardRejections := 0
 	for iter := 1; iter <= maxSteps; iter++ {
 		if ctx.Err() != nil {
 			return db.Message{}, ctx.Err()
@@ -366,6 +390,11 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		historyCopy := make([]db.Message, len(ma.History))
 		copy(historyCopy, ma.History)
 		ma.HistoryMu.RUnlock()
+
+		if ma.BaseAgent != nil {
+			toolsForLog := ma.BaseAgent.Registry.GetAvailableTools(ma.GetToolAllowlist())
+			ma.BaseAgent.DebugLogLLMRequest("subagent:"+ma.Name, iter, ma.BaseAgent.Config.Model, ma.BaseAgent.Config.Endpoint, historyCopy, toolsForLog)
+		}
 
 		chunkChan := make(chan StreamChunk, 100)
 		errChan := make(chan error, 1)
@@ -398,8 +427,13 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 
 		ncw := &newlineCounterWriter{Writer: writer}
 		var sr StreamRenderer
+		enableThinking := false
+		if ma.BaseAgent != nil && ma.BaseAgent.Config != nil {
+			effort := strings.ToLower(strings.TrimSpace(ma.BaseAgent.Config.ReasoningEffort))
+			enableThinking = ma.BaseAgent.Config.ShowThinking && effort != "off" && effort != "none"
+		}
 		if ma.BaseAgent != nil && ma.BaseAgent.UI != nil {
-			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, ma.BaseAgent.Config.ShowThinking, ma.BaseAgent.Config.StreamWrites, ma.Name)
+			sr = ma.BaseAgent.UI.NewStreamRenderer(ncw, theme, enableThinking, ma.BaseAgent.Config.StreamWrites, ma.Name)
 		} else {
 			sr = &fallbackStreamRenderer{w: ncw}
 		}
@@ -421,7 +455,7 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			}
 
 			if chunk.Type == "reasoning" {
-				if ma.BaseAgent.Config.ShowThinking {
+				if enableThinking {
 					if !responseHeaderStarted {
 						fmt.Fprintf(ncw, "\n[%s] response: ",
 							style.NewStyle().Foreground(theme.Highlight).Bold(true).Render(ma.Name),
@@ -495,6 +529,9 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 		ma.HistoryMu.Lock()
 		ma.History = append(ma.History, *assistantMsg)
 		ma.HistoryMu.Unlock()
+		if ma.BaseAgent != nil {
+			ma.BaseAgent.DebugLogLLMResponse("subagent:"+ma.Name, iter, assistantMsg, ma.BaseAgent.lastGenerationDuration)
+		}
 		if ma.Manager != nil {
 			_ = ma.Manager.SaveAgentState(ma, "running")
 		}
@@ -536,27 +573,37 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 				}
 			}
 
-			mac := &multiAgentContext{
-				AgentContext: ma.BaseAgent,
-				ma:           ma,
+			var output string
+			var toolErr error
+
+			if guardErr := guard.CheckPreExecution(tc.Function.Name, tc.Function.Arguments); guardErr != nil {
+				toolErr = guardErr
+				output = guardErr.Error()
+				consecutiveGuardRejections++
+				if ma.BaseAgent != nil {
+					ma.BaseAgent.DebugLogRepetition("subagent:"+ma.Name, tc.Function.Name, tc.Function.Arguments, guard.ConsecutiveIdenticalCount(), guardErr.Error())
+				}
+			} else {
+				consecutiveGuardRejections = 0
+				mac := &multiAgentContext{
+					AgentContext: ma.BaseAgent,
+					ma:           ma,
+				}
+				startTool := time.Now()
+				output, toolErr = ma.BaseAgent.Registry.Execute(mac, tc.Function.Name, tc.Function.Arguments)
+				toolDuration := time.Since(startTool)
+				if ma.BaseAgent != nil {
+					ma.BaseAgent.DebugLogToolExecution("subagent:"+ma.Name, iter, tc.Function.Name, tc.Function.Arguments, output, toolErr, toolDuration)
+				}
 			}
-			output, toolErr := ma.BaseAgent.Registry.Execute(mac, tc.Function.Name, tc.Function.Arguments)
+
+			guard.RecordPostExecution(tc.Function.Name, tc.Function.Arguments, output, toolErr)
 
 			if toolErr != nil {
 				output = FormatToolExecutionFailure(tc.Function.Name, output, toolErr)
 			}
 			if output == "" {
 				output = "(no output)"
-			}
-
-			if tc.Function.Name == "write" || tc.Function.Name == "edit" {
-				callCounts = make(map[string]int)
-			} else {
-				callKey := tc.Function.Name + ":" + strings.TrimSpace(tc.Function.Arguments)
-				callCounts[callKey]++
-				if callCounts[callKey] >= 2 && toolErr == nil {
-					output += "\n\n[Notice: You have inspected this target multiple times with identical arguments. The content has not changed. If no changes are needed, conclude your response or proceed to write/edit.]"
-				}
 			}
 
 			if !isSubagent && len(assistantMsg.ToolCalls) == 1 {
@@ -581,6 +628,23 @@ func (ma *MultiAgent) executeLoop(ctx context.Context, w io.Writer, theme style.
 			ma.HistoryMu.Unlock()
 			if ma.Manager != nil {
 				_ = ma.Manager.SaveAgentState(ma, "running")
+			}
+
+			if consecutiveGuardRejections >= 3 {
+				haltMsg := fmt.Sprintf("[Subagent '%s' halted: loop protection rejected 3 consecutive tool calls. Stop repeating blocked actions and proceed with 'edit'/'write' or provide final response.]", ma.Name)
+				ma.HistoryMu.Lock()
+				ma.History = append(ma.History, db.Message{
+					Role:    "assistant",
+					Content: haltMsg,
+				})
+				ma.HistoryMu.Unlock()
+				if ma.Manager != nil {
+					_ = ma.Manager.SaveAgentState(ma, "failed")
+				}
+				return db.Message{
+					Role:    "assistant",
+					Content: haltMsg,
+				}, nil
 			}
 		}
 	}
@@ -1599,6 +1663,13 @@ func (s *spawnSubagentTool) Execute(ctx tool.AgentContext, arguments string) (st
 
 	var parentName string
 	if mac, ok := ctx.(*multiAgentContext); ok {
+		maxDepth := 0
+		if s.mam.BaseAgent != nil && s.mam.BaseAgent.Config != nil {
+			maxDepth = s.mam.BaseAgent.Config.MaxSubagentDepth
+		}
+		if mac.ma.Depth() >= maxDepth {
+			return "", fmt.Errorf("subagent '%s' is not permitted to spawn further subagents (max depth %d reached); execute the task directly", mac.ma.Name, maxDepth)
+		}
 		parentName = mac.ma.Name
 	}
 

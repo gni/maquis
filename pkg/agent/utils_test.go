@@ -31,6 +31,16 @@ func TestFormatDefensiveErrorStillExplainsMissingPath(t *testing.T) {
 	}
 }
 
+func TestFormatDefensiveErrorTaskNotFound(t *testing.T) {
+	formatted := FormatDefensiveError("task_status", errors.New("task not found"))
+	if strings.Contains(formatted, "ls") || strings.Contains(formatted, "directory structure") {
+		t.Fatalf("task error suggested filesystem inspection: %q", formatted)
+	}
+	if !strings.Contains(formatted, "background task ID was not found") {
+		t.Fatalf("task error missing specific guidance: %q", formatted)
+	}
+}
+
 func TestFormatToolExecutionFailurePreservesCommandDiagnostics(t *testing.T) {
 	diagnostic := "npm ERR! code ERESOLVE\nnpm ERR! unable to resolve dependency tree"
 	formatted := FormatToolExecutionFailure("bash", diagnostic, errors.New("command failed: exit status 1"))
@@ -67,6 +77,19 @@ func TestFormatToolExecutionFailureDoesNotRepeatGenericFailure(t *testing.T) {
 
 	if count := strings.Count(formatted, err.Error()); count != 1 {
 		t.Fatalf("generic failure appeared %d times: %q", count, formatted)
+	}
+}
+
+func TestFormatToolExecutionFailureBashExplicitErrorHeader(t *testing.T) {
+	err := errors.New("command failed: exit status 1")
+	traceback := "Traceback (most recent call last):\n  File \"<stdin>\", line 2, in <module>\nNameError: name 'paththlib' is not defined"
+	formatted := FormatToolExecutionFailure("bash", traceback, err)
+
+	if !strings.HasPrefix(formatted, "[Command Failed: exit status 1]") {
+		t.Fatalf("expected [Command Failed: exit status 1] prefix, got: %q", formatted)
+	}
+	if !strings.Contains(formatted, "NameError: name 'paththlib' is not defined") {
+		t.Fatalf("traceback diagnostics missing from formatted output: %q", formatted)
 	}
 }
 
@@ -189,4 +212,16 @@ func TestStripEchoedPrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizeLLMControlTokens(t *testing.T) {
+	input := `{"system_prompt": "Research no-bake cheesecake.</atem: to=self<|message|>Need to wait.\n\nLet's spawn multiple.<|eom|><|start|>assistant to=spawn_subagent<|message|><atem:function_calls>\n<atem:invoke name=\"spawn_subagent\">\n<atem:parameter name=\"name\">cheesecake_researcher_variations"}`
+	sanitized := SanitizeLLMControlTokens(input)
+
+	for _, forbidden := range []string{"</atem:", "<|message|>", "<|eom|>", "<|start|>", "<atem:function_calls>", "<atem:invoke", "<atem:parameter"} {
+		if strings.Contains(sanitized, forbidden) {
+			t.Fatalf("sanitized output still contains control token %q: %s", forbidden, sanitized)
+		}
+	}
+}
+
 

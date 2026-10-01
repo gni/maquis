@@ -610,3 +610,69 @@ func TestCompactPromptExplainsEmptySkillCatalog(t *testing.T) {
 		t.Fatalf("compact prompt omits inline skill guidance: %q", prompt)
 	}
 }
+
+func TestSubagentNestingDepthAndAllowlist(t *testing.T) {
+	agentsDir := t.TempDir()
+	baseAgent := &Agent{
+		Config: &config.Config{
+			MaxSubagentDepth: 0,
+		},
+		Registry:      tool.NewToolRegistry(),
+		WorkspaceRoot: t.TempDir(),
+	}
+	baseAgent.Registry.Register(&spawnSubagentTool{})
+	baseAgent.Registry.Register(tool.NewListTool())
+	baseAgent.Registry.Register(tool.NewReadTool())
+
+	var buf bytes.Buffer
+	mam := NewMultiAgentManager(baseAgent, &buf, style.UITheme{})
+	mam.agentsDir = agentsDir
+
+	spawnTool := &spawnSubagentTool{mam: mam}
+	_, err := spawnTool.Execute(baseAgent, `{
+		"name": "worker_1",
+		"system_prompt": "Do culinary research."
+	}`)
+	if err != nil {
+		t.Fatalf("spawn worker_1 failed: %v", err)
+	}
+
+	worker, exists := mam.Agents["worker_1"]
+	if !exists {
+		t.Fatal("worker_1 not found")
+	}
+	t.Cleanup(worker.Cancel)
+
+	if worker.Depth() != 0 {
+		t.Fatalf("expected worker_1 depth 0, got %d", worker.Depth())
+	}
+
+	allowlist := worker.GetToolAllowlist()
+	for _, toolName := range allowlist {
+		if toolName == "spawn_subagent" || toolName == "remove_subagent" || toolName == "swarm_audit" || toolName == "swarm_topology" {
+			t.Fatalf("subagent at max depth should not have tool %q in allowlist: %v", toolName, allowlist)
+		}
+	}
+
+	mac := &multiAgentContext{AgentContext: baseAgent, ma: worker}
+	_, err = spawnTool.Execute(mac, `{
+		"name": "worker_nested",
+		"system_prompt": "Nested subagent."
+	}`)
+	if err == nil || !strings.Contains(err.Error(), "not permitted to spawn further subagents") {
+		t.Fatalf("expected max depth spawn rejection error, got: %v", err)
+	}
+
+	baseAgent.SpawnedAgentsMu.Lock()
+	baseAgent.SpawnedAgents["peer_agent"] = true
+	baseAgent.SpawnedAgentsMu.Unlock()
+
+	workerPrompt := worker.GetSystemPrompt()
+	if strings.Contains(workerPrompt, "peer_agent") {
+		t.Fatalf("worker system prompt leaked peer agent: %s", workerPrompt)
+	}
+	if strings.Contains(workerPrompt, "use 'spawn_subagent'") {
+		t.Fatalf("worker system prompt instructed subagent to use spawn_subagent: %s", workerPrompt)
+	}
+}
+

@@ -117,6 +117,31 @@ type ToolExecutor interface {
 	Execute(ctx AgentContext, arguments string) (string, error)
 }
 
+// PromptContributor is an optional interface tools can implement to contribute
+// a concise one-line snippet and short guideline rules to the dynamic system prompt.
+type PromptContributor interface {
+	PromptSnippet() string
+	PromptGuidelines() []string
+}
+
+// GetPromptSnippet retrieves the prompt snippet for a tool executor.
+func GetPromptSnippet(t ToolExecutor) string {
+	if pc, ok := t.(PromptContributor); ok {
+		if s := pc.PromptSnippet(); s != "" {
+			return s
+		}
+	}
+	return t.Definition().Function.Description
+}
+
+// GetPromptGuidelines retrieves the prompt guidelines for a tool executor.
+func GetPromptGuidelines(t ToolExecutor) []string {
+	if pc, ok := t.(PromptContributor); ok {
+		return pc.PromptGuidelines()
+	}
+	return nil
+}
+
 type ToolRegistry struct {
 	tools map[string]ToolExecutor
 }

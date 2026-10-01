@@ -128,13 +128,19 @@ func FormatDefensiveError(toolName string, err error) string {
 	if strings.Contains(errStr, "Recommendation:") {
 		return fmt.Sprintf("System Alert: Your execution of '%s' failed due to: %s", toolName, errStr)
 	}
+	if strings.Contains(lowerErr, "loop detected") || strings.Contains(lowerErr, "agent halted") {
+		return fmt.Sprintf("System Alert: Your execution of '%s' was blocked: %s", toolName, errStr)
+	}
 
 	var suggestion string
 	if (strings.Contains(lowerErr, "oldtext block") && strings.Contains(lowerErr, "not found")) ||
 		strings.Contains(lowerErr, "targetcontent not found") {
 		suggestion = "The file exists, but oldText does not match its current contents. Read the file again, copy a small unique block exactly as it exists now, and retry without reusing an earlier snapshot. Do not recover by overwriting the existing file with write."
+	} else if (strings.Contains(lowerErr, "task") && (strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "no task"))) ||
+		toolName == "task_status" || toolName == "task_kill" {
+		suggestion = "The background task ID was not found. Check background tasks list or events to inspect valid task IDs. Do not search the filesystem for task IDs."
 	} else if strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "no such file") {
-		suggestion = "Inspect your immediate working directory structure using 'bash' with 'ls' or check the file path. Ensure the file actually exists before calling this tool."
+		suggestion = "Inspect your immediate working directory structure using 'find' or 'list' or check the file path. Ensure the file actually exists before calling this tool."
 	} else if strings.Contains(lowerErr, "escapes workspace") || strings.Contains(lowerErr, "security violation") {
 		suggestion = "Verify that the path is relative or inside the current workspace. Escaping the workspace is blocked."
 	} else if strings.Contains(lowerErr, "command failed") || strings.Contains(lowerErr, "exit status") {
@@ -155,9 +161,19 @@ func FormatToolExecutionFailure(toolName, output string, err error) string {
 	diagnostic := strings.Trim(output, "\r\n")
 	if toolName == "bash" {
 		if diagnostic != "" {
+			if strings.TrimSpace(diagnostic) == strings.TrimSpace(err.Error()) {
+				return diagnostic
+			}
+			if !strings.HasPrefix(diagnostic, "[Command Failed") && !strings.HasPrefix(diagnostic, "Command failed") && !strings.HasPrefix(diagnostic, "Error:") {
+				errMsg := err.Error()
+				if strings.HasPrefix(errMsg, "command failed: ") {
+					errMsg = strings.TrimPrefix(errMsg, "command failed: ")
+				}
+				return fmt.Sprintf("[Command Failed: %s]\n%s", errMsg, diagnostic)
+			}
 			return diagnostic
 		}
-		return err.Error()
+		return fmt.Sprintf("[Command Failed: %s]", err.Error())
 	}
 	alert := FormatDefensiveError(toolName, err)
 	if strings.TrimSpace(diagnostic) == "" || strings.TrimSpace(diagnostic) == strings.TrimSpace(err.Error()) {
@@ -288,3 +304,42 @@ func StripEchoedPrompt(reasoning, prompt string) string {
 
 	return reasoning
 }
+
+// IsInspectionTool returns true if the tool performs read-only inspection or searching of files.
+func IsInspectionTool(name string) bool {
+	switch name {
+	case "read", "grep", "find", "list":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsActionTool returns true if the tool executes commands, modifies files, manages tasks, or orchestrates subagents.
+func IsActionTool(name string) bool {
+	switch name {
+	case "write", "edit", "bash", "task_kill":
+		return true
+	default:
+		if strings.HasPrefix(name, "subagent__") || name == "spawn_subagent" || name == "remove_subagent" {
+			return true
+		}
+		return false
+	}
+}
+
+var llmControlTokenRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`</?atem:[^>\n<]*>?`),
+	regexp.MustCompile(`</?atem:[^<\n]*`),
+	regexp.MustCompile(`<\|(?:eom|im_start|im_end|start|message|endoftext|assistant|user|system)[^>|]*\|?>`),
+	regexp.MustCompile(`<\|[^>\n|]+\|>`),
+}
+
+// SanitizeLLMControlTokens removes leaked provider control tokens and ChatML tags from text.
+func SanitizeLLMControlTokens(s string) string {
+	for _, re := range llmControlTokenRegexes {
+		s = re.ReplaceAllString(s, "")
+	}
+	return s
+}
+

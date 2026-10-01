@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -28,18 +29,26 @@ func NewReadTool() ToolExecutor {
 
 func (t *readTool) Name() string { return "read" }
 
+func (t *readTool) PromptSnippet() string {
+	return "Read file contents"
+}
+
+func (t *readTool) PromptGuidelines() []string {
+	return []string{"Use 'read' to examine files instead of cat or sed in bash. Do not call 'read' on directory paths; use 'list' to inspect directory trees."}
+}
+
 func (t *readTool) Definition() Tool {
 	return Tool{
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "read",
-			Description: "Read file contents. Use read to examine files instead of cat or sed in bash. Optional offset and limit for large files",
+			Description: "Read file contents. Supports text files. Optional offset and limit for large files.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
 					"path": {
 						Type:        "string",
-						Description: "Path to the file to read (relative or absolute)",
+						Description: "Path to a specific file to read (relative or absolute). Do not pass directory paths; use 'list' to inspect directory trees.",
 					},
 					"offset": {
 						Type:        "number",
@@ -60,9 +69,9 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	var args struct {
 		Path     string `json:"path"`
 		File     string `json:"file"`
-		FilePath string `json:"file_path"`
-		Offset   int    `json:"offset"`
-		Limit    int    `json:"limit"`
+		FilePath string  `json:"file_path"`
+		Offset   float64 `json:"offset"`
+		Limit    float64 `json:"limit"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		var rawPath string
@@ -98,16 +107,65 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	unlock := lockPath(safePath)
 	defer unlock()
 
+	var entryHeader string
 	info, err := os.Stat(safePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file info: %w", err)
+		found := false
+		for _, ext := range []string{".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".json", ".md", ".yaml", ".yml"} {
+			candidate := safePath + ext
+			if cInfo, cErr := os.Stat(candidate); cErr == nil && !cInfo.IsDir() {
+				safePath = candidate
+				info = cInfo
+				found = true
+				relPath, _ := filepath.Rel(ctx.GetWorkspaceRoot(), candidate)
+				if relPath == "" {
+					relPath = args.Path + ext
+				}
+				entryHeader = fmt.Sprintf("[Notice: Resolved '%s' to '%s']\n\n", args.Path, relPath)
+				break
+			}
+		}
+		if !found {
+			for _, ext := range []string{".py", ".ts", ".js", ".tsx", ".jsx", ".go"} {
+				if strings.HasSuffix(safePath, ext) {
+					trimmed := strings.TrimSuffix(safePath, ext)
+					if dInfo, dErr := os.Stat(trimmed); dErr == nil && dInfo.IsDir() {
+						safePath = trimmed
+						info = dInfo
+						found = true
+						break
+					}
+				}
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("failed to read file info: %w", err)
+		}
 	}
 	if info.IsDir() {
-		tree, err := ListDirectoryTree(safePath, ctx.GetWorkspaceRoot(), 2, 150)
-		if err != nil {
-			return "", fmt.Errorf("path '%s' is a directory and failed to list contents: %w", args.Path, err)
+		foundEntry := false
+		for _, entryName := range []string{"__init__.py", "index.ts", "index.js", "index.tsx", "index.jsx", "main.go"} {
+			entryPath := filepath.Join(safePath, entryName)
+			if entryInfo, err := os.Stat(entryPath); err == nil && !entryInfo.IsDir() && entryInfo.Size() > 0 {
+				safePath = entryPath
+				info = entryInfo
+				foundEntry = true
+				relEntry, _ := filepath.Rel(ctx.GetWorkspaceRoot(), entryPath)
+				if relEntry == "" {
+					relEntry = filepath.Join(args.Path, entryName)
+				}
+				entryHeader = fmt.Sprintf("[Notice: '%s' is a directory. Automatically reading package entrypoint '%s':]\n\n", args.Path, relEntry)
+				break
+			}
 		}
-		return fmt.Sprintf("[Path '%s' is a directory. Showing directory contents below. Call 'read' with a specific file path to view its content:]\n\n%s", args.Path, tree), nil
+
+		if !foundEntry {
+			tree, err := ListDirectoryTree(safePath, ctx.GetWorkspaceRoot(), 2, 150)
+			if err != nil {
+				return "", fmt.Errorf("path '%s' is a directory and failed to list contents: %w", args.Path, err)
+			}
+			return fmt.Sprintf("[Path '%s' is a directory. Use 'list' to view directories, or call 'read' with a specific file path to view its content:]\n\n%s", args.Path, tree), nil
+		}
 	}
 	if info.Size() > 500*1024 { // 500KB limit
 		return "", fmt.Errorf("file size (%d bytes) is too large; maximum allowed size is 500KB", info.Size())
@@ -123,13 +181,14 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", fmt.Errorf("cannot read binary file; the read tool only supports text files")
 	}
 
-	contentStr := SanitizeUTF8(data)
+	_, textWithoutBOM := splitBOM(data)
+	contentStr := SanitizeUTF8([]byte(textWithoutBOM))
 	if len(data) == 0 || strings.TrimSpace(contentStr) == "" {
-		return "(empty file)", nil
+		return entryHeader + "(empty file)", nil
 	}
 
 	lines := strings.Split(contentStr, "\n")
-	offset := args.Offset
+	offset := int(args.Offset)
 	if offset <= 0 {
 		offset = 1
 	}
@@ -137,7 +196,7 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		return "", nil
 	}
 
-	limit := args.Limit
+	limit := int(args.Limit)
 	if limit <= 0 {
 		limit = 1000 // default to 1000 lines so normal files are read completely in one call
 	} else if limit > 2000 {
@@ -165,7 +224,7 @@ func (t *readTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if truncated {
 		result += fmt.Sprintf("\n\n[Showing lines %d to %d of %d. Use read with offset=%d to view more]", offset, end, len(lines), end+1)
 	}
-	return result, nil
+	return entryHeader + result, nil
 }
 
 type writeTool struct{}
@@ -176,12 +235,20 @@ func NewWriteTool() ToolExecutor {
 
 func (t *writeTool) Name() string { return "write" }
 
+func (t *writeTool) PromptSnippet() string {
+	return "Create or overwrite complete files"
+}
+
+func (t *writeTool) PromptGuidelines() []string {
+	return []string{"Use 'write' only for new files or complete rewrites. Never use after an edit mismatch."}
+}
+
 func (t *writeTool) Definition() Tool {
 	return Tool{
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "write",
-			Description: "Create a new file or intentionally replace a complete file. Never overwrite an existing file merely to recover from an edit oldText mismatch; read it again and retry a smaller exact edit.",
+			Description: "Create a new file or completely overwrite an existing file. Automatically creates parent directories.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -268,12 +335,25 @@ func NewEditTool() ToolExecutor {
 
 func (t *editTool) Name() string { return "edit" }
 
+func (t *editTool) PromptSnippet() string {
+	return "Make precise file edits with exact text replacement, including multiple disjoint edits in one call"
+}
+
+func (t *editTool) PromptGuidelines() []string {
+	return []string{
+		"Use 'edit' for precise changes (updates[].oldText must match uniquely).",
+		"Keep oldText minimal (typically 2-5 lines).",
+		"When modifying multiple separate locations in a file, provide multiple updates in updates[] in a single edit call.",
+		"If edit reports an oldText mismatch, read the latest file and retry a smaller exact unique block. Never recover by overwriting the existing file with write.",
+	}
+}
+
 func (t *editTool) Definition() Tool {
 	return Tool{
 		Type: "function",
 		Function: FunctionDefinition{
 			Name:        "edit",
-			Description: "Edit one file using exact, unique search-and-replace blocks copied from the latest read. Target only the necessary element being modified with a small, focused block instead of rewriting untouched code. If oldText is stale, read the file again and retry a smaller unique block instead of overwriting the whole file.",
+			Description: "Edit a file using exact text replacement blocks. Matches unique blocks against current file contents.",
 			Parameters: JSONSchema{
 				Type: "object",
 				Properties: map[string]SchemaProp{
@@ -283,17 +363,17 @@ func (t *editTool) Definition() Tool {
 					},
 					"updates": {
 						Type:        "array",
-						Description: "List of replacement blocks.",
+						Description: "One or more targeted replacements.",
 						Items: &SchemaProp{
 							Type: "object",
 							Properties: map[string]SchemaProp{
 								"oldText": {
 									Type:        "string",
-									Description: "The exact text to be replaced. NEVER use an empty string. To insert text, you MUST include the adjacent existing text in this field, and reproduce it in newText alongside your insertion.",
+									Description: "Exact unique current text copied from latest read (typically 2-5 lines).",
 								},
 								"newText": {
 									Type:        "string",
-									Description: "The replacement text.",
+									Description: "The replacement text for oldText.",
 								},
 							},
 							Required: []string{"oldText", "newText"},
@@ -387,7 +467,10 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	hasBOM, rawStr := splitBOM(data)
+	originalEnding := detectLineEnding(rawStr)
+	content := strings.ReplaceAll(rawStr, "\r\n", "\n")
+	initialContent := content
 
 	var diffBuilder strings.Builder
 	contentChanged := false
@@ -416,6 +499,25 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 		}
 
 		indexOfOldText := strings.Index(content, edit.OldText)
+		if indexOfOldText == -1 {
+			// Try fuzzy normalized matching (smart quotes, dashes, unicode spaces, trailing whitespace)
+			normContent := normalizeForFuzzyMatch(content)
+			normOld := normalizeForFuzzyMatch(edit.OldText)
+			if normOld != edit.OldText || normContent != content {
+				if normIdx := strings.Index(normContent, normOld); normIdx != -1 {
+					if strings.Count(normContent, normOld) == 1 {
+						startLine := strings.Count(normContent[:normIdx], "\n")
+						numLines := strings.Count(normOld, "\n")
+						fileLines := strings.Split(content, "\n")
+						if startLine+numLines < len(fileLines) {
+							actualOldText := strings.Join(fileLines[startLine:startLine+numLines+1], "\n")
+							edit.OldText = actualOldText
+							indexOfOldText = strings.Index(content, edit.OldText)
+						}
+					}
+				}
+			}
+		}
 		if indexOfOldText == -1 {
 			// Try resilient line-by-line whitespace-insensitive matching
 			oldLines := strings.Split(edit.OldText, "\n")
@@ -535,53 +637,27 @@ func (t *editTool) Execute(ctx AgentContext, arguments string) (string, error) {
 			return "", fmt.Errorf("edit[%d]: oldText block is not unique; found %d occurrences in %s", i, occurrences, args.Path)
 		}
 
-		startLine := strings.Count(content[:indexOfOldText], "\n") + 1
-		oldLines := strings.Split(edit.OldText, "\n")
-		newLines := strings.Split(edit.NewText, "\n")
-		numOldLines := len(oldLines)
-
-		allLines := strings.Split(content, "\n")
 		updatedContent := strings.Replace(content, edit.OldText, edit.NewText, 1)
 		if updatedContent != content {
 			contentChanged = true
 		}
 		content = updatedContent
-
-		// Context before (3 lines)
-		contextStart := startLine - 3
-		if contextStart < 1 {
-			contextStart = 1
-		}
-		for lineNum := contextStart; lineNum < startLine; lineNum++ {
-			if lineNum <= len(allLines) {
-				diffBuilder.WriteString(fmt.Sprintf("%-4d   %s\n", lineNum, allLines[lineNum-1]))
-			}
-		}
-
-		// Deleted lines (red)
-		for j, oldLine := range oldLines {
-			lineNum := startLine + j
-			diffBuilder.WriteString(fmt.Sprintf("\x1b[31m%-4d - %s\x1b[0m\n", lineNum, oldLine))
-		}
-
-		// Added lines (green)
-		for j, newLine := range newLines {
-			lineNum := startLine + j
-			diffBuilder.WriteString(fmt.Sprintf("\x1b[32m%-4d + %s\x1b[0m\n", lineNum, newLine))
-		}
-
-		// Context after (3 lines)
-		contextEnd := startLine + numOldLines + 2
-		if contextEnd > len(allLines) {
-			contextEnd = len(allLines)
-		}
-		for lineNum := startLine + numOldLines; lineNum <= contextEnd; lineNum++ {
-			diffBuilder.WriteString(fmt.Sprintf("%-4d   %s\n", lineNum, allLines[lineNum-1]))
-		}
 	}
 
 	if contentChanged {
-		err = os.WriteFile(safePath, []byte(content), 0644)
+		diffStr := generateDisplayDiff(initialContent, content, 3)
+		diffBuilder.WriteString(diffStr)
+		finalStr := content
+		if originalEnding == "\r\n" {
+			finalStr = strings.ReplaceAll(finalStr, "\n", "\r\n")
+		}
+		var finalBytes []byte
+		if hasBOM {
+			finalBytes = append([]byte{0xef, 0xbb, 0xbf}, []byte(finalStr)...)
+		} else {
+			finalBytes = []byte(finalStr)
+		}
+		err = os.WriteFile(safePath, finalBytes, 0644)
 		if err != nil {
 			return "", fmt.Errorf("failed to write modified content back: %w", err)
 		}
@@ -685,8 +761,50 @@ func lockPath(path string) func() {
 	}
 }
 
+func splitBOM(data []byte) (bool, string) {
+	if len(data) >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf {
+		return true, string(data[3:])
+	}
+	return false, string(data)
+}
+
+func detectLineEnding(content string) string {
+	crlf := strings.Index(content, "\r\n")
+	lf := strings.Index(content, "\n")
+	if lf == -1 {
+		return "\n"
+	}
+	if crlf == -1 {
+		return "\n"
+	}
+	if crlf < lf {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+func normalizeForFuzzyMatch(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		switch r {
+		case '\u2018', '\u2019', '\u201a', '\u201b': // Smart single quotes
+			b.WriteRune('\'')
+		case '\u201c', '\u201d', '\u201e', '\u201f': // Smart double quotes
+			b.WriteRune('"')
+		case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212': // Dashes & minus
+			b.WriteRune('-')
+		case '\u00a0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000': // Unicode spaces
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func normalizeSpace(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return strings.Join(strings.Fields(normalizeForFuzzyMatch(s)), " ")
 }
 
 func replacementAlreadyApplied(content, newText string) bool {
@@ -734,3 +852,279 @@ func findClosestLineMatch(content, oldText string) int {
 	}
 	return 0
 }
+
+type diffOp int
+
+const (
+	diffEqual diffOp = iota
+	diffInsert
+	diffDelete
+)
+
+type diffPart struct {
+	op    diffOp
+	lines []string
+}
+
+func computeMyersDiff(a, b []string) []diffPart {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	if len(a) == 0 {
+		return []diffPart{{op: diffInsert, lines: b}}
+	}
+	if len(b) == 0 {
+		return []diffPart{{op: diffDelete, lines: a}}
+	}
+
+	prefixLen := 0
+	for prefixLen < len(a) && prefixLen < len(b) && a[prefixLen] == b[prefixLen] {
+		prefixLen++
+	}
+
+	suffixLen := 0
+	for suffixLen < len(a)-prefixLen && suffixLen < len(b)-prefixLen && a[len(a)-1-suffixLen] == b[len(b)-1-suffixLen] {
+		suffixLen++
+	}
+
+	var parts []diffPart
+	if prefixLen > 0 {
+		parts = append(parts, diffPart{op: diffEqual, lines: a[:prefixLen]})
+	}
+
+	midA := a[prefixLen : len(a)-suffixLen]
+	midB := b[prefixLen : len(b)-suffixLen]
+	n := len(midA)
+	m := len(midB)
+
+	if n == 0 && m == 0 {
+		// Nothing in middle
+	} else if n == 0 {
+		parts = append(parts, diffPart{op: diffInsert, lines: midB})
+	} else if m == 0 {
+		parts = append(parts, diffPart{op: diffDelete, lines: midA})
+	} else if n+m > 2000 {
+		parts = append(parts, diffPart{op: diffDelete, lines: midA})
+		parts = append(parts, diffPart{op: diffInsert, lines: midB})
+	} else {
+		maxD := n + m
+		offset := maxD
+		v := make([]int, 2*maxD+1)
+		trace := make([][]int, 0, maxD+1)
+
+		dFound := -1
+		for d := 0; d <= maxD; d++ {
+			vCopy := make([]int, len(v))
+			copy(vCopy, v)
+			trace = append(trace, vCopy)
+
+			for k := -d; k <= d; k += 2 {
+				var x int
+				if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
+					x = v[k+1+offset]
+				} else {
+					x = v[k-1+offset] + 1
+				}
+				y := x - k
+				for x < n && y < m && midA[x] == midB[y] {
+					x++
+					y++
+				}
+				v[k+offset] = x
+				if x >= n && y >= m {
+					dFound = d
+					break
+				}
+			}
+			if dFound != -1 {
+				break
+			}
+		}
+
+		if dFound == -1 {
+			parts = append(parts, diffPart{op: diffDelete, lines: midA})
+			parts = append(parts, diffPart{op: diffInsert, lines: midB})
+		} else {
+			x := n
+			y := m
+			var revParts []diffPart
+
+			addRevLine := func(op diffOp, line string) {
+				if len(revParts) > 0 && revParts[len(revParts)-1].op == op {
+					revParts[len(revParts)-1].lines = append([]string{line}, revParts[len(revParts)-1].lines...)
+				} else {
+					revParts = append(revParts, diffPart{op: op, lines: []string{line}})
+				}
+			}
+
+			for d := dFound; d > 0; d-- {
+				vSnap := trace[d]
+				k := x - y
+				var prevK int
+				if k == -d || (k != d && vSnap[k-1+offset] < vSnap[k+1+offset]) {
+					prevK = k + 1
+				} else {
+					prevK = k - 1
+				}
+				prevX := vSnap[prevK+offset]
+				prevY := prevX - prevK
+
+				for x > prevX && y > prevY && midA[x-1] == midB[y-1] {
+					addRevLine(diffEqual, midA[x-1])
+					x--
+					y--
+				}
+				if x == prevX {
+					addRevLine(diffInsert, midB[y-1])
+					y--
+				} else {
+					addRevLine(diffDelete, midA[x-1])
+					x--
+				}
+			}
+			for x > 0 && y > 0 && midA[x-1] == midB[y-1] {
+				addRevLine(diffEqual, midA[x-1])
+				x--
+				y--
+			}
+
+			for i := len(revParts) - 1; i >= 0; i-- {
+				parts = append(parts, revParts[i])
+			}
+		}
+	}
+
+	if suffixLen > 0 {
+		parts = append(parts, diffPart{op: diffEqual, lines: a[len(a)-suffixLen:]})
+	}
+
+	var merged []diffPart
+	for _, p := range parts {
+		if len(p.lines) == 0 {
+			continue
+		}
+		if len(merged) > 0 && merged[len(merged)-1].op == p.op {
+			merged[len(merged)-1].lines = append(merged[len(merged)-1].lines, p.lines...)
+		} else {
+			merged = append(merged, p)
+		}
+	}
+	return merged
+}
+
+func generateDisplayDiff(oldContent, newContent string, contextLines int) string {
+	oldLines := strings.Split(oldContent, "\n")
+	newLines := strings.Split(newContent, "\n")
+	parts := computeMyersDiff(oldLines, newLines)
+	if len(parts) == 0 {
+		return ""
+	}
+
+	maxLineNum := len(oldLines)
+	if len(newLines) > maxLineNum {
+		maxLineNum = len(newLines)
+	}
+	width := len(strconv.Itoa(maxLineNum))
+	if width < 4 {
+		width = 4
+	}
+
+	var sb strings.Builder
+	oldLineNum := 1
+	newLineNum := 1
+	lastWasChange := false
+
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+
+		if part.op == diffInsert || part.op == diffDelete {
+			for _, line := range part.lines {
+				if part.op == diffInsert {
+					sb.WriteString(fmt.Sprintf("\x1b[32m%-*d + %s\x1b[0m\n", width, newLineNum, line))
+					newLineNum++
+				} else {
+					sb.WriteString(fmt.Sprintf("\x1b[31m%-*d - %s\x1b[0m\n", width, oldLineNum, line))
+					oldLineNum++
+				}
+			}
+			lastWasChange = true
+		} else {
+			raw := part.lines
+			nextPartIsChange := i < len(parts)-1 && (parts[i+1].op == diffInsert || parts[i+1].op == diffDelete)
+			hasLeadingChange := lastWasChange
+			hasTrailingChange := nextPartIsChange
+
+			if hasLeadingChange && hasTrailingChange {
+				if len(raw) <= contextLines*2 {
+					for _, line := range raw {
+						sb.WriteString(fmt.Sprintf("%-*d   %s\n", width, oldLineNum, line))
+						oldLineNum++
+						newLineNum++
+					}
+				} else {
+					leadingLines := raw[:contextLines]
+					trailingLines := raw[len(raw)-contextLines:]
+					skippedLines := len(raw) - len(leadingLines) - len(trailingLines)
+
+					for _, line := range leadingLines {
+						sb.WriteString(fmt.Sprintf("%-*d   %s\n", width, oldLineNum, line))
+						oldLineNum++
+						newLineNum++
+					}
+
+					sb.WriteString(fmt.Sprintf("%-*s   ...\n", width, ""))
+					oldLineNum += skippedLines
+					newLineNum += skippedLines
+
+					for _, line := range trailingLines {
+						sb.WriteString(fmt.Sprintf("%-*d   %s\n", width, oldLineNum, line))
+						oldLineNum++
+						newLineNum++
+					}
+				}
+			} else if hasLeadingChange {
+				shownLines := raw
+				if len(shownLines) > contextLines {
+					shownLines = raw[:contextLines]
+				}
+				skippedLines := len(raw) - len(shownLines)
+
+				for _, line := range shownLines {
+					sb.WriteString(fmt.Sprintf("%-*d   %s\n", width, oldLineNum, line))
+					oldLineNum++
+					newLineNum++
+				}
+
+				if skippedLines > 0 {
+					sb.WriteString(fmt.Sprintf("%-*s   ...\n", width, ""))
+					oldLineNum += skippedLines
+					newLineNum += skippedLines
+				}
+			} else if hasTrailingChange {
+				skippedLines := len(raw) - contextLines
+				if skippedLines < 0 {
+					skippedLines = 0
+				}
+				if skippedLines > 0 {
+					sb.WriteString(fmt.Sprintf("%-*s   ...\n", width, ""))
+					oldLineNum += skippedLines
+					newLineNum += skippedLines
+				}
+
+				for _, line := range raw[skippedLines:] {
+					sb.WriteString(fmt.Sprintf("%-*d   %s\n", width, oldLineNum, line))
+					oldLineNum++
+					newLineNum++
+				}
+			} else {
+				oldLineNum += len(raw)
+				newLineNum += len(raw)
+			}
+
+			lastWasChange = false
+		}
+	}
+
+	return sb.String()
+}
+

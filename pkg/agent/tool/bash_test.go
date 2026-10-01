@@ -66,3 +66,60 @@ func TestBashFailureReturnsCapturedStderr(t *testing.T) {
 		t.Fatalf("failing command lost its exit status: %v", err)
 	}
 }
+
+func TestCleanBackgroundCommand(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			input:    "cd /workspace/tests && nohup python main.py > main.log 2>&1 & echo $!",
+			expected: "cd /workspace/tests && python main.py > main.log 2>&1",
+		},
+		{
+			input:    "nohup python server.py &",
+			expected: "python server.py",
+		},
+		{
+			input:    "go run main.go &",
+			expected: "go run main.go",
+		},
+	}
+
+	for _, tc := range cases {
+		got := cleanBackgroundCommand(tc.input)
+		if got != tc.expected {
+			t.Errorf("cleanBackgroundCommand(%q) = %q; want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+type backgroundDetectContext struct {
+	bashTestContext
+	spawnedCmd string
+}
+
+func (c *backgroundDetectContext) SpawnTask(cmd string, w io.Writer) (string, error) {
+	c.spawnedCmd = cmd
+	return "task_1", nil
+}
+
+func TestBashAutoDetectsBackgroundShellSyntax(t *testing.T) {
+	executor := NewBashTool()
+	ctx := &backgroundDetectContext{bashTestContext: bashTestContext{root: t.TempDir()}}
+
+	output, err := executor.Execute(
+		ctx,
+		`{"command":"cd /workspace/tests && nohup python main.py > main.log 2>&1 & echo $!"}`,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(output, "Task spawned in background with ID: task_1") {
+		t.Fatalf("expected output to mention task_1, got: %s", output)
+	}
+	if ctx.spawnedCmd != "cd /workspace/tests && python main.py > main.log 2>&1" {
+		t.Fatalf("expected cleaned spawned command, got: %q", ctx.spawnedCmd)
+	}
+}
+

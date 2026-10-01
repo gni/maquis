@@ -48,6 +48,10 @@ func NewTaskStatusTool() ToolExecutor {
 
 func (t *taskStatusTool) Name() string { return "task_status" }
 
+func (t *taskStatusTool) PromptSnippet() string {
+	return "Retrieve the execution status and output of a background task"
+}
+
 func (t *taskStatusTool) Definition() Tool {
 	return Tool{
 		Type: "function",
@@ -71,12 +75,12 @@ func (t *taskStatusTool) Definition() Tool {
 func (t *taskStatusTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	taskID, err := parseTaskID(arguments)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("missing required argument 'task_id'. Provide the ID of the background task (e.g. 'task_1').")
 	}
 
 	status, output, err := ctx.GetTaskStatus(taskID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("task %q not found. The task may have already completed, was killed, or does not exist.", taskID)
 	}
 
 	return fmt.Sprintf("Task %s is currently: %s\n\nOutput:\n%s", taskID, status, output), nil
@@ -89,6 +93,10 @@ func NewTaskKillTool() ToolExecutor {
 }
 
 func (t *taskKillTool) Name() string { return "task_kill" }
+
+func (t *taskKillTool) PromptSnippet() string {
+	return "Terminate a running background task"
+}
 
 func (t *taskKillTool) Definition() Tool {
 	return Tool{
@@ -113,12 +121,12 @@ func (t *taskKillTool) Definition() Tool {
 func (t *taskKillTool) Execute(ctx AgentContext, arguments string) (string, error) {
 	taskID, err := parseTaskID(arguments)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("missing required argument 'task_id'. Provide the ID of the background task to kill (e.g. 'task_1').")
 	}
 
 	err = ctx.KillTask(taskID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to terminate task %q: %w", taskID, err)
 	}
 
 	return fmt.Sprintf("Task %s successfully terminated.", taskID), nil

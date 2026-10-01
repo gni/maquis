@@ -15,5 +15,6 @@
   "stream_writes": true,
   "syntax_theme": "monokai",
   "max_completion_tokens": 128000,
-  "compact_prompt": true
+  "compact_prompt": true,
+  "debug_log_file": "off"
 }
